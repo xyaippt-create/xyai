@@ -1,0 +1,17 @@
+id: ai_commercial_kv
+name: AI商业KV模式
+target:
+  - 商业CG质感
+  - 主体高级感
+  - 背景干净
+  - 高频污染受控
+avoid:
+  - AI糊纹
+  - 假材质
+  - 脏空气感
+  - 乱高光
+priority_materials:
+  - product
+  - glass
+  - metal
+  - atmosphere

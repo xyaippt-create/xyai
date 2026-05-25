@@ -1,0 +1,16 @@
+id: cinematic
+name: 电影感模式
+target:
+  - 空气感
+  - 层次柔和
+  - 高光克制
+  - 暗部有细节
+avoid:
+  - 锐化破坏雾感
+  - 对比度过硬
+  - 颜色变成滤镜感
+priority_materials:
+  - atmosphere
+  - skin
+  - fabric
+  - background

@@ -1,0 +1,15 @@
+id: cosmetics
+name: 化妆品模式
+target:
+  - 高级玻璃通透感
+  - 肤感柔和
+  - 产品边缘干净
+avoid:
+  - 过度锐化瓶身高光
+  - 过度增加皮肤纹理
+  - 背景噪点变成脏纹理
+priority_materials:
+  - glass
+  - skin
+  - liquid
+  - metal

@@ -1,0 +1,19 @@
+id: luxury_product
+name: 奢侈品产品模式
+target:
+  - 黑金层次
+  - 镜面反射
+  - 材质通透
+  - 暗部高级感
+  - 高光克制
+avoid:
+  - 粗糙纹理
+  - 过度锐化
+  - 金属脏边
+  - 玻璃发灰
+  - 高光炸白
+priority_materials:
+  - metal
+  - glass
+  - leather
+  - gemstone

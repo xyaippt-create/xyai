@@ -1,0 +1,20 @@
+id: portrait_commercial
+name: 商业人像模式
+target:
+  - 皮肤干净
+  - 柔但不假
+  - 眼神清晰
+  - 发丝克制
+  - 棚拍柔光
+  - 背景空气化
+avoid:
+  - 塑料皮肤
+  - 假毛孔
+  - AI睫毛
+  - 发丝爆炸
+  - HDR皮肤
+priority_materials:
+  - skin
+  - eyes
+  - hair
+  - background

@@ -1,0 +1,24 @@
+engine_name: VisualMasterPro
+version: 0.1.0
+global_principles:
+  - 商业高级感优先于暴力清晰度
+  - 先清理 AI 脏感，再增强微对比
+  - 高频增强必须受到限制
+  - 不同材质使用不同增强逻辑
+  - 输出图不得覆盖原始图
+quality_targets:
+  premium:
+    description: 高级、干净、有商业质感
+  cinematic_air:
+    description: 有空间空气感，不硬、不脏
+  cg_material:
+    description: 材质边缘清晰但不过度锐化
+  ppt_readability:
+    description: 文字与版式稳定，信息不变形
+forbidden:
+  - 过度锐化
+  - 饱和度过高
+  - 暗部变脏
+  - 高光炸裂
+  - 细节生成幻觉
+  - 文字笔画变形

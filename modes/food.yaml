@@ -1,0 +1,15 @@
+id: food
+name: 食品模式
+target:
+  - 食欲感
+  - 新鲜水润
+  - 保留真实纹理
+avoid:
+  - 颜色过饱和
+  - 油光变脏
+  - 食材边缘硬化
+priority_materials:
+  - food_surface
+  - steam
+  - sauce
+  - ceramic

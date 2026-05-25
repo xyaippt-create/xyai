@@ -1,0 +1,49 @@
+materials:
+  glass:
+    enhance:
+      - 通透感
+      - 高光边界
+      - 层次清洁度
+    avoid:
+      - 高光断层
+      - 白边
+      - 过硬锐化
+  metal:
+    enhance:
+      - 边缘稳定
+      - 反射层次
+      - 商业CG质感
+    avoid:
+      - 噪点变亮
+      - 反射区域脏斑
+  skin:
+    enhance:
+      - 柔和肤感
+      - 均匀明度
+    avoid:
+      - 毛孔过锐
+      - 磨皮塑料感
+  food_surface:
+    enhance:
+      - 食欲色
+      - 湿润感
+      - 真实纹理
+    avoid:
+      - 油光变脏
+      - 颜色过饱和
+  text:
+    enhance:
+      - 笔画清晰
+      - 边缘稳定
+    avoid:
+      - 字体变形
+      - 毛边
+      - 伪影光晕
+  sky:
+    enhance:
+      - 渐变平滑
+      - 空气层次
+    avoid:
+      - 色带
+      - 颗粒
+      - 大面积锐化

@@ -1,0 +1,22 @@
+pipeline_order:
+  - input_validation
+  - image_decode_unicode_safe
+  - basic_metrics
+  - mode_select
+  - upscale
+  - ai_noise_cleanup
+  - material_logic
+  - micro_contrast
+  - tone_control
+  - high_frequency_control
+  - output_encode_unicode_safe
+  - quality_report
+output_policy:
+  keep_original: true
+  output_format: png
+  default_target_width: 3840
+  naming_rule: "{stem}_{mode}_master.png"
+batch_policy:
+  skip_unreadable: true
+  continue_on_error: true
+  report_each_file: true

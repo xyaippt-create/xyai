@@ -1,0 +1,48 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.log
+
+# Local inputs and generated outputs
+输入图片/
+输出成品/images/
+输出成品/reports_json/
+输出成品/reports_md/
+输出成品/compare/
+输出成品/archive/
+
+# Python environments and caches
+env/
+ENV/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE files
+.idea/
+.vscode/
+
+# Build and packaged EXE artifacts
+build/
+dist/
+*.spec
+*.spec.tmp
+*.exe
+*.pkg
+*.toc
+*.pyz
+base_library.zip
+scripts/build/
+scripts/dist/
+
+# Temporary files
+tests/outputs/
+tmp/
+temp/
+cache/
+*.tmp
+*.bak
+*.swp

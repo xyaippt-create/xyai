@@ -1,0 +1,16 @@
+id: ppt_business
+name: PPT商业模式
+target:
+  - 小字清晰
+  - 版式安全
+  - 图形边缘稳定
+  - 商务高级感
+avoid:
+  - 字体边缘毛刺
+  - 大面积背景脏点
+  - 信息图颜色偏移
+priority_materials:
+  - text
+  - chart
+  - icon
+  - flat_background

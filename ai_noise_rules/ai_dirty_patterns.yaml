@@ -1,0 +1,37 @@
+patterns:
+  muddy_texture:
+    name: AI糊纹
+    symptoms:
+      - 局部纹理像融化或涂抹
+      - 材质边界不清
+    strategy:
+      cleanup_strength: medium
+      sharpen: low
+      note: 先降噪再做低强度微对比，避免把糊纹锐化成脏纹理。
+  dirty_highlight:
+    name: 脏高光
+    symptoms:
+      - 高光区域发灰
+      - 亮部有颗粒或色块
+    strategy:
+      cleanup_strength: medium
+      high_frequency_guard: high
+      note: 高光区不宜直接锐化。
+  fake_detail:
+    name: 假细节
+    symptoms:
+      - 看似清晰但没有真实结构
+      - 局部重复纹理异常
+    strategy:
+      cleanup_strength: high
+      sharpen: very_low
+      note: 假细节不能通过锐化修复，只能抑制。
+  edge_halo:
+    name: 边缘光晕
+    symptoms:
+      - 主体边缘出现白边或黑边
+      - 图形线条周围有伪影
+    strategy:
+      cleanup_strength: low
+      high_frequency_guard: high
+      note: 降低锐化半径和权重。

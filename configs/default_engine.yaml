@@ -1,0 +1,16 @@
+engine:
+  name: VisualMasterPro
+  cn_name: 雪原Ai增强引擎
+  version: 0.1.0
+  default_mode: ai_commercial_kv
+  target_width: 3840
+  output_format: png
+paths:
+  input_dir: 输入图片
+  output_dir: 输出成品
+  rules_dir: rules
+  modes_dir: modes
+safety:
+  never_overwrite_original: true
+  unicode_path_safe: true
+  continue_batch_on_error: true

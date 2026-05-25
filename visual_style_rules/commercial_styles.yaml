@@ -1,0 +1,45 @@
+styles:
+  premium_clean:
+    name: 高级干净商业感
+    keywords:
+      - 干净
+      - 克制
+      - 通透
+      - 少噪点
+    avoid:
+      - 过曝
+      - 廉价滤镜
+      - 过度饱和
+  commercial_cg:
+    name: 商业CG质感
+    keywords:
+      - 材质清楚
+      - 高光受控
+      - 结构清晰
+      - 产品主体突出
+    avoid:
+      - 假细节
+      - 脏纹理
+      - 材质塑料感
+  cinematic_air:
+    name: 电影空气感
+    keywords:
+      - 柔和层次
+      - 空间雾感
+      - 暗部有细节
+      - 高光不炸
+    avoid:
+      - 硬锐化
+      - 对比断层
+      - 背景颗粒化
+  ppt_business:
+    name: PPT商业高级感
+    keywords:
+      - 可读
+      - 稳定
+      - 干净
+      - 版式安全
+    avoid:
+      - 文字变形
+      - 图表边缘伪影
+      - 背景色偏

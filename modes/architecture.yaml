@@ -1,0 +1,15 @@
+id: architecture
+name: 建筑模式
+target:
+  - 线条稳定
+  - 空间通透
+  - 玻璃和金属质感清晰
+avoid:
+  - 天空断层
+  - 建筑边缘光晕
+  - 大面积锐化噪点
+priority_materials:
+  - glass
+  - metal
+  - stone
+  - sky
