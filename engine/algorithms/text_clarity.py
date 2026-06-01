@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from engine.analysis.edge_classifier import highlight_mask
+
+
+def detect_text_like_regions(image):
+    """Detect dense stroke-like regions without using OCR."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(grad_x, grad_y)
+    mag_u8 = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+
+    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 17, 8)
+    _, edge_binary = cv2.threshold(mag_u8, max(28, int(np.percentile(mag_u8, 72))), 255, cv2.THRESH_BINARY)
+    stroke = cv2.bitwise_or(adaptive, edge_binary)
+
+    horizontal = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 2)), iterations=1)
+    vertical = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 7)), iterations=1)
+    connected = cv2.bitwise_or(horizontal, vertical)
+    density = cv2.blur(connected, (11, 5))
+    _, dense = cv2.threshold(density, 34, 255, cv2.THRESH_BINARY)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dense, 8)
+    filtered = np.zeros_like(dense)
+    image_area = gray.shape[0] * gray.shape[1]
+    for label in range(1, num_labels):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 10 or area > image_area * 0.22:
+            continue
+        aspect = width / max(height, 1)
+        fill = area / max(width * height, 1)
+        looks_like_line = 0.12 <= fill <= 0.82 and (aspect >= 1.4 or height <= 42 or width <= 42)
+        if looks_like_line:
+            filtered[y : y + height, x : x + width] = 255
+
+    if not np.any(filtered):
+        fallback = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2)), iterations=1)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fallback, 8)
+        for label in range(1, num_labels):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if 4 <= area <= image_area * 0.05 and 2 <= height <= max(64, gray.shape[0] // 3) and width >= 2:
+                filtered[y : y + height, x : x + width] = 255
+
+    protected = cv2.bitwise_not(highlight_mask(image, value_threshold=218))
+    filtered = cv2.bitwise_and(filtered, protected)
+    filtered = cv2.morphologyEx(filtered, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
+    return cv2.GaussianBlur(filtered, (0, 0), 0.75).astype("float32") / 255.0
+
+
+def enhance_text_regions(image, strength: float = 0.42):
+    """Improve small-text legibility locally while preserving text color."""
+    strength = float(np.clip(strength, 0.0, 0.75))
+    mask = detect_text_like_regions(image)[:, :, None]
+    if float(mask.max()) <= 0:
+        return image
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype("float32")
+    l = lab[:, :, 0]
+    blur = cv2.GaussianBlur(l, (0, 0), 0.62)
+    detail = l - blur
+    detail = np.sign(detail) * np.minimum(np.maximum(np.abs(detail) - 0.8, 0.0), 12.0)
+    local_mean = cv2.blur(l, (9, 9))
+    contrast = (l - local_mean) * 0.11
+    enhanced_l = l + detail * strength + contrast * strength
+    lab[:, :, 0] = l * (1.0 - mask[:, :, 0] * 0.72) + enhanced_l * (mask[:, :, 0] * 0.72)
+    return cv2.cvtColor(np.clip(lab, 0, 255).astype("uint8"), cv2.COLOR_LAB2BGR)

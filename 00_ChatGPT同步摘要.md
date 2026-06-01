@@ -2,7 +2,7 @@
 
 同步时间：2026-05-25
 
-同步主题：VisualMasterPro V3.6 整体项目状态同步。
+同步主题：VisualMasterPro V3.6 整体项目状态与中文版本文档体系同步。
 
 ## 项目定位
 
@@ -18,7 +18,7 @@ VisualMasterPro（雪原Ai增强引擎）不是普通图片增强脚本，而是
 
 ## 当前阶段结论
 
-项目已从 V1 单脚本增强，演进到 V3.6 的“单图商业交付系统”。
+项目已从 V1 单脚本增强，演进到 VisualMasterPro V0.3 的“图形化批量处理 + 原图忠实增强 + 4K 清晰优化”测试阶段。
 
 当前已经具备：
 
@@ -36,6 +36,11 @@ VisualMasterPro（雪原Ai增强引擎）不是普通图片增强脚本，而是
 - 默认单图交付逻辑
 - 中文路径兼容
 - EXE 打包保留
+- 完整版本说明文档体系
+- 批量处理系统
+- tkinter 图形化界面
+- 原图忠实增强算法链
+- 文字可辨识度增强
 
 ## 当前目录职责
 
@@ -49,6 +54,8 @@ VisualMasterPro（雪原Ai增强引擎）不是普通图片增强脚本，而是
 | `engine/rules/` | 规则加载与规则解释。 |
 | `engine/config/processing_strategy.py` | 视觉处理策略数据结构。 |
 | `engine/delivery/` | 交付系统，包括商业信息角标和 debug compare 图。 |
+| `batch/` | V0.3 批量处理系统，负责批量导入、单张容错、输出命名、批量日志和批量报告。 |
+| `gui/` | V0.3 图形化界面，支持添加图片、选择文件夹、选择输出目录、处理进度和任务日志。 |
 | `pipelines/` | V3.4 新增的模式管线系统，不同 mode 使用不同处理流程。 |
 | `modes/` | mode 配置与注册。 |
 | `rules/` | 全局视觉规则库。 |
@@ -56,10 +63,70 @@ VisualMasterPro（雪原Ai增强引擎）不是普通图片增强脚本，而是
 | `material_rules/` | 材质规则库。 |
 | `visual_style_rules/` | 商业视觉风格库。 |
 | `docs/` | 架构说明、文件管理规范、测试报告。 |
+| `软件版本历史.md` | 长期版本历史，记录每个版本的功能、技术升级、商业价值与下一步计划。 |
+| `项目路线图.md` | 未来版本路线图，覆盖 V3.8、V4.0、V4.5、V5.0。 |
+| `更新日志.md` | 中文软件更新日志，采用“新增功能 / 优化内容 / 修复问题 / 架构升级 / 已知问题”结构。 |
+| `商业版本规划.md` | 商业版本规划，覆盖免费版、创作者版、工作室版、企业版。 |
+| `技术架构说明.md` | 技术架构说明，覆盖模块关系、处理流程、商业签名引擎、预设系统和 GPU 方向。 |
+| `项目说明.md` | 中文项目说明，面向中国商业设计用户、中国 AI 视觉创作者和中国视觉工作室。 |
+| `README.md` | GitHub 项目首页，已改为中文入口页并链接到中文文档体系。 |
 | `tests/outputs/` | 临时测试输出，不作为正式交付。 |
 | `输入图片/` | 待处理原图。 |
 | `输出成品/images/` | 正式商业交付图。 |
 | `scripts/master_process.py` | 历史兼容入口，保留不删除。 |
+
+## V0.3 批量处理与 GUI 状态
+
+当前已新增：
+
+- `batch/batch_processor.py`
+- `batch/batch_task.py`
+- `batch/batch_logger.py`
+- `batch/batch_report.py`
+- `gui/app.py`
+- `gui/gui_state.py`
+- `gui/components.py`
+
+GUI 启动方式：
+
+```powershell
+python main.py --gui
+python -m gui.app
+```
+
+批量处理核心函数：
+
+```python
+process_batch(
+    input_paths,
+    output_dir,
+    mode="fidelity",
+    scale=2,
+    output_format="png"
+)
+```
+
+V0.3 对外模式：
+
+- `fidelity`：原图忠实增强。
+- `text_safe`：文字保护增强。
+- `ai_image_clean`：AI 图像清洁增强。
+- `sharp_4k`：4K 清晰增强。
+
+输出命名：
+
+```text
+原文件名_vmp_v03_4k.png
+```
+
+默认原则：
+
+- 不主动修改构图。
+- 不主动改色。
+- 不重塑画风。
+- 不生成新内容。
+- 默认输出不加角标。
+- debug/developer 模式才允许角标、JSON、Markdown、compare 图。
 
 ## 当前支持的 mode
 
@@ -204,6 +271,32 @@ debug/developer 模式输出：
 - 本次语法检查通过。
 - 本次产生的 `__pycache__` 已清理。
 
+## 中文版本文档体系状态
+
+已建立完整中文版本说明文档体系，用于 Codex 开发同步、GitHub 项目记录、商业化迭代管理、用户更新日志和后续收费版本规划。
+
+### 新增 / 重构文档
+
+| 文档 | 用途 |
+|---|---|
+| `软件版本历史.md` | 按版本号记录 V1.0、V2.0、V3.0、V3.5、V3.6、V3.7 的完整版本历史。 |
+| `项目路线图.md` | 规划 V3.8、V4.0、V4.5、V5.0 的战略目标、核心技术、商业方向、难度和市场定位。 |
+| `更新日志.md` | 重构为中文软件更新日志格式，覆盖 V1.0 到 V3.7。 |
+| `商业版本规划.md` | 规划免费版、创作者版、工作室版、企业版的功能权限、GPU、输出规格、商业授权、云同步、批量输出、API 和价格定位。 |
+| `技术架构说明.md` | 说明项目结构、模块关系、图像处理流程、商业签名引擎、预设系统、GPU 处理流程和 AI 增强逻辑。 |
+| `项目说明.md` | 面向中国商业设计用户、中国 AI 视觉创作者和中国视觉工作室的正式中文产品说明。 |
+| `README.md` | 改为 GitHub 中文入口页，链接到完整中文文档体系。 |
+
+### 文档定位
+
+这套文档体系把 VisualMasterPro 从“开发中项目”推进为“面向中国商业视觉行业、可被 GitHub 展示、可商业化规划、可长期版本管理的软件项目”。
+
+建议下一次提交信息：
+
+```text
+Docs: convert project documentation to full Chinese commercial system
+```
+
 ## GitHub 备份状态
 
 目标仓库：
@@ -214,43 +307,34 @@ https://github.com/xyaippt-create/xyai.git
 
 当前状态：
 
-- `.git` 目录不存在，项目尚未完成 Git 初始化。
+- GitHub 数据备份已完成。
+- 当前分支：`main`
+- 远程分支：`origin/main`
+- 最新 commit id：`bf079bb46dffa72a3b835a39a05e53a9f606dc28`
+- Commit 信息：`V3.6 TEST - Single Delivery Output + Mode Pipeline System`
+- Push 状态：成功，`main -> origin/main`
+- 本次提交：`79 files changed, 4289 insertions(+)`
 - `.gitignore` 已存在，并已覆盖缓存、打包产物、测试输出和临时文件。
-- 本机 PowerShell 当前无法识别 `git`。
-- 本机 PowerShell 当前无法识别 `gh`。
-- 常见安装位置未检测到 Git 或 GitHub CLI。
-- `winget`、`choco`、`scoop` 当前也不可用，因此无法自动安装。
+- 注意：中文版本文档体系是在本次 GitHub 备份后新增 / 重构，当前尚未提交到 GitHub。
 
-已执行检测：
+已执行关键命令：
 
 ```powershell
-git --version
-gh --version
-where.exe git
-where.exe gh
-winget --version
-choco --version
-scoop --version
+git status
+git add .
+git commit -m "V3.6 TEST - Single Delivery Output + Mode Pipeline System"
+git push -u origin main
+git status --short --branch
 ```
 
-结论：
+补充说明：
 
-GitHub 完整备份暂未完成。需要先安装 Git for Windows，并重新打开 PowerShell 后继续执行初始化、commit 和 push。
-
-计划 commit 信息：
-
-```text
-V3.6 TEST - Single Delivery Output + Mode Pipeline System
-```
-
-安装 Git 后下一步：
-
-1. `git init`
-2. `git branch -M main`
-3. `git add .`
-4. `git commit -m "V3.6 TEST - Single Delivery Output + Mode Pipeline System"`
-5. `git remote add origin https://github.com/xyaippt-create/xyai.git`
-6. `git push -u origin main`
+- 当前 PowerShell 里 `git` 仍不在 PATH。
+- 已检测到 Git 安装路径：`C:\Program Files\Git\cmd\git.exe`。
+- 本次使用完整路径完成提交与推送。
+- 提交前 Git 身份未配置，已在当前仓库设置局部身份：
+  - `user.name = xyaippt-create`
+  - `user.email = xyaippt-create@users.noreply.github.com`
 
 ## 当前已知问题
 
@@ -259,7 +343,8 @@ V3.6 TEST - Single Delivery Output + Mode Pipeline System
 3. 当前 `quality_report` 评分仍是工程化启发式指标，还不是成熟商业审美评分模型。
 4. 输出默认只处理第一张图，符合“单图交付”，但后续如果需要批量商业交付，应新增显式 `--batch`。
 5. `Material Reconstruction: ON` 当前是交付状态提示，还没有真实材质重建开关系统。
-6. 当前没有 GitHub 成功上传记录，本机环境未检测到 Git。
+6. 当前 PowerShell PATH 未包含 Git，需要后续补充系统 PATH，避免每次使用完整路径。
+7. 中文版本文档体系已建立，但尚未创建新的文档提交。
 
 ## 请 ChatGPT 重点分析
 

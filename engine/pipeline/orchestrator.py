@@ -139,7 +139,8 @@ def process_path(
             strategy=strategy,
             rules=rule_set,
         )
-        output_image = apply_delivery_badge(output_image, profile.name, report_data)
+        if developer_mode:
+            output_image = apply_delivery_badge(output_image, profile.name, report_data)
         height, width = output_image.shape[:2]
         output_path = build_output_path(source, output_dir, profile.name, profile.output_format)
         ok = write_image(output_path, output_image)

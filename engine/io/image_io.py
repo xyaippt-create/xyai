@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 
 
 def read_image(path: str | Path):

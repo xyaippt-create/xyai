@@ -1,0 +1,74 @@
+VisualMasterPro V0.3 日志位置说明
+
+一、日志用途
+
+日志用于记录软件启动、批量处理、异常捕获和运行环境信息。
+
+当软件启动失败、处理失败或双击后没有正常打开时，日志可以帮助开发者快速定位问题。
+
+二、常用日志文件
+
+1. latest_crash.txt
+
+最近一次启动或运行异常日志。
+
+如果软件弹出“启动失败”或“处理失败”提示，请优先查看这个文件。
+
+2. crash_时间.txt
+
+带时间戳的历史异常日志。
+
+用于保留每一次异常的完整记录。
+
+3. latest_batch.log
+
+最近一次批量处理日志。
+
+用于查看哪些图片处理成功、哪些图片处理失败。
+
+4. batch_reports/
+
+批量处理报告目录。
+
+当前版本主要用于内部排查，不影响正式图片输出。
+
+三、源码运行日志位置
+
+源码运行时，日志通常位于项目目录：
+
+logs/
+
+示例：
+
+D:\Codex\04_Visual-Master-Pro\logs\latest_crash.txt
+
+四、EXE 运行日志位置
+
+双击 EXE 运行时，日志通常位于 EXE 同级目录：
+
+dist/VisualMasterPro/logs/
+
+示例：
+
+dist\VisualMasterPro\logs\latest_crash.txt
+
+五、无法写入安装目录时
+
+如果软件所在目录没有写入权限，日志会自动尝试保存到：
+
+文档/VisualMasterPro/logs/
+
+六、发送日志给开发者
+
+建议发送以下文件：
+
+1. logs/latest_crash.txt
+2. logs/latest_batch.log
+3. 出问题的原图文件名
+4. 选择的增强模式和输出目录
+
+七、注意事项
+
+日志只用于排查运行问题。
+
+正式输出图片默认不包含调试角标、JSON 报告或 Markdown 报告。

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 *.log
+logs/
 
 # Local inputs and generated outputs
 输入图片/

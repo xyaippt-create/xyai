@@ -2,7 +2,10 @@ import cv2
 import numpy as np
 
 
-BADGE_VERSION = "VisualMasterPro V3.5"
+from runtime import APP_VERSION
+
+
+BADGE_VERSION = APP_VERSION
 
 
 def _text_size(lines: list[str], font_scale: float, thickness: int) -> tuple[int, int, int]:
