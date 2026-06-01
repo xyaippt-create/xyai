@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  background: #031014;
+  font-family: Inter, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(143, 244, 255, 0.18), transparent 32rem),
+    linear-gradient(180deg, #031014 0%, #061116 54%, #02090c 100%);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
