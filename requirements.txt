@@ -2,3 +2,7 @@ numpy>=2.0
 opencv-python-headless>=4.10
 Flask>=3.0
 Flask-Cors>=4.0
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+httpx>=0.28

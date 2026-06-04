@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const stages = [
   {
@@ -33,19 +33,9 @@ const stages = [
   }
 ];
 
-const logScript = [
-  "SSE CONNECTED /task/task_vmp_v03_core/stream",
-  "读取输入图片：3540fe7663cd45bfd4edb5248befc332.png",
-  "完成图像类型检测：architecture / text_poster hybrid",
-  "建立高光保护 mask：玻璃反光与过曝区域进入保护区",
-  "压缩损伤修复：JPEG block 与高频断层开始清理",
-  "Text Clarity Engine：检测疑似小字与展板说明区域",
-  "Edge Safe Enhance：过滤随机噪点，仅保留真实结构边缘",
-  "Structure Recovery：建筑线条与远景轮廓进入中频补偿",
-  "Color Lock：输出色彩回归原图 Lab 色彩坐标",
-  "Quality Compare：text +21.48 / edge +17.91 / color fidelity 96.13",
-  "任务完成：有效清晰增强"
-];
+const API_BASE = "http://localhost:8787";
+const EXPECTED_LOG_TOTAL = 11;
+const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.3 CORE Restorator Pipeline";
 
 function GlacierBackground() {
   return (
@@ -60,7 +50,7 @@ function GlacierBackground() {
 
 function ProgressTimeline({ currentStageIndex, taskStatus }) {
   return (
-    <section className="rounded-[1.75rem] border border-white/10 bg-white/[0.045] p-6 shadow-cinematic backdrop-blur-xl">
+    <section className="rounded-lg border border-white/10 bg-white/[0.045] p-6 shadow-cinematic backdrop-blur-xl">
       <div className="mb-6 flex items-end justify-between gap-4">
         <div>
           <p className="font-display text-xs uppercase tracking-[0.42em] text-glacier/70">Progress Timeline</p>
@@ -89,7 +79,7 @@ function ProgressTimeline({ currentStageIndex, taskStatus }) {
               >
                 {done ? "✓" : index + 1}
               </div>
-              <div className={`rounded-2xl border p-4 ${active ? "border-glacier/35 bg-glacier/10" : "border-white/10 bg-polar-900/65"}`}>
+              <div className={`rounded-lg border p-4 ${active ? "border-glacier/35 bg-glacier/10" : "border-white/10 bg-polar-900/65"}`}>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="font-display text-[0.62rem] uppercase tracking-[0.36em] text-white/36">{stage.subtitle}</p>
@@ -107,9 +97,15 @@ function ProgressTimeline({ currentStageIndex, taskStatus }) {
   );
 }
 
-function RealtimeLogStream({ logs }) {
+function RealtimeLogStream({ logs, taskStatus }) {
+  const logEndRef = useRef(null);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [logs]);
+
   return (
-    <section className="rounded-[1.75rem] border border-white/10 bg-[#02080a]/80 p-6 shadow-cinematic backdrop-blur-xl">
+    <section className="rounded-lg border border-white/10 bg-[#02080a]/80 p-6 shadow-cinematic backdrop-blur-xl">
       <div className="mb-5 flex items-center justify-between gap-4">
         <div>
           <p className="font-display text-xs uppercase tracking-[0.42em] text-aurora/70">Realtime Log Stream</p>
@@ -117,19 +113,20 @@ function RealtimeLogStream({ logs }) {
         </div>
         <span className="h-3 w-3 rounded-full bg-aurora shadow-[0_0_22px_rgba(183,255,212,0.9)]" />
       </div>
-      <div className="h-[27rem] overflow-hidden rounded-2xl border border-aurora/10 bg-black/45 p-4 font-mono text-xs leading-7 text-aurora/82">
+      <div className="h-[27rem] overflow-y-auto rounded-lg border border-aurora/10 bg-black/45 p-4 font-mono text-xs leading-7 text-aurora/82">
         {logs.map((line, index) => (
           <div key={`${line}-${index}`} className="flex gap-3 border-b border-white/[0.035] py-1">
             <span className="w-12 shrink-0 text-white/24">{String(index + 1).padStart(2, "0")}</span>
             <span>{line}</span>
           </div>
         ))}
-        {logs.length < logScript.length && (
+        {taskStatus !== "completed" && (
           <div className="mt-2 flex gap-3 text-glacier">
             <span className="w-12 shrink-0 text-white/24">...</span>
-            <span className="animate-pulse">stream packet receiving</span>
+            <span className="animate-pulse">{taskStatus === "failed" ? "stream connection interrupted" : "stream packet receiving"}</span>
           </div>
         )}
+        <div ref={logEndRef} />
       </div>
     </section>
   );
@@ -139,37 +136,55 @@ export default function TaskDetailPage({ taskConfig, onBackToDashboard, onViewCo
   const [logs, setLogs] = useState([]);
   const [currentStageIndex, setCurrentStageIndex] = useState(0);
   const [taskStatus, setTaskStatus] = useState("processing");
+  const [progress, setProgress] = useState(0);
 
   useEffect(() => {
     setLogs([]);
     setCurrentStageIndex(0);
     setTaskStatus("processing");
+    setProgress(0);
 
-    let cursor = 0;
-    const timer = window.setInterval(() => {
-      cursor += 1;
-      setLogs(logScript.slice(0, cursor));
-      setCurrentStageIndex(Math.min(stages.length - 1, Math.floor((cursor / logScript.length) * stages.length)));
-      if (cursor >= logScript.length) {
-        window.clearInterval(timer);
-        setCurrentStageIndex(stages.length);
-        setTaskStatus("completed");
+    const eventSource = new EventSource(`${API_BASE}/api/stream`);
+
+    eventSource.addEventListener("restoration.log", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        const index = Number(payload.index || 0);
+        const total = Number(payload.total || EXPECTED_LOG_TOTAL);
+        const message = payload.message || "接收到空日志包";
+        const nextProgress = total > 0 ? Math.round((index / total) * 100) : 0;
+
+        setLogs((prev) => [...prev, message]);
+        setProgress(Math.min(100, nextProgress));
+        setCurrentStageIndex(Math.min(stages.length - 1, Math.floor((nextProgress / 100) * stages.length)));
+
+        if (payload.done === true || index >= total) {
+          eventSource.close();
+          setCurrentStageIndex(stages.length);
+          setProgress(100);
+          setTaskStatus("completed");
+        }
+      } catch (error) {
+        setLogs((prev) => [...prev, "SSE 数据解析失败：请检查后端日志格式。"]);
+        setTaskStatus("failed");
+        eventSource.close();
       }
-    }, 560);
+    });
 
-    return () => window.clearInterval(timer);
+    eventSource.onerror = () => {
+      setLogs((prev) => [...prev, "SSE 连接中断：请确认后端服务 http://localhost:8787 已启动。"]);
+      setTaskStatus("failed");
+      eventSource.close();
+    };
+
+    return () => eventSource.close();
   }, []);
-
-  const progress = useMemo(() => {
-    if (taskStatus === "completed") return 100;
-    return Math.min(96, Math.round((logs.length / logScript.length) * 100));
-  }, [logs.length, taskStatus]);
 
   return (
     <section className="relative min-h-screen overflow-hidden px-6 py-6 text-polar-100">
       <GlacierBackground />
       <div className="relative z-10 mx-auto max-w-7xl">
-        <header className="mb-6 rounded-[2rem] border border-white/10 bg-white/[0.045] p-6 backdrop-blur-2xl">
+        <header className="mb-6 rounded-lg border border-white/10 bg-white/[0.045] p-6 backdrop-blur-2xl">
           <div className="flex flex-wrap items-center justify-between gap-5">
             <div>
               <p className="font-display text-xs uppercase tracking-[0.52em] text-glacier/70">Task Detail / AI Restoration Pipeline</p>
@@ -186,9 +201,13 @@ export default function TaskDetailPage({ taskConfig, onBackToDashboard, onViewCo
                 type="button"
                 disabled={taskStatus !== "completed"}
                 onClick={onViewCompare}
-                className="rounded-full border border-glacier/45 bg-glacier/15 px-5 py-3 text-sm font-semibold tracking-[0.18em] text-glacier transition hover:bg-glacier/25 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/28"
+                className={`rounded-full px-5 py-3 text-sm font-semibold tracking-[0.18em] transition disabled:cursor-not-allowed ${
+                  taskStatus === "completed"
+                    ? "border border-glacier/60 bg-glacier/20 text-glacier shadow-[0_0_32px_rgba(143,244,255,0.28)] animate-pulse hover:bg-glacier/30"
+                    : "border border-white/10 bg-white/5 text-white/28"
+                }`}
               >
-                查看对比
+                进入 8K 滑杆对比
               </button>
             </div>
           </div>
@@ -204,9 +223,12 @@ export default function TaskDetailPage({ taskConfig, onBackToDashboard, onViewCo
 
         <div className="grid gap-6 lg:grid-cols-[0.92fr_1.08fr]">
           <ProgressTimeline currentStageIndex={currentStageIndex} taskStatus={taskStatus} />
-          <RealtimeLogStream logs={logs} />
+          <RealtimeLogStream logs={logs} taskStatus={taskStatus} />
         </div>
       </div>
+      <footer className="pointer-events-none absolute bottom-4 left-0 right-0 z-20 text-center font-display text-[0.62rem] tracking-[0.24em] text-white/24">
+        {PAGE_FOOTER}
+      </footer>
     </section>
   );
 }

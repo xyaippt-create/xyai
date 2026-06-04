@@ -16,6 +16,7 @@ const checklist = [
   "色彩是否仍接近原图",
   "是否只是文件变大但信息量没提升"
 ];
+const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.3 CORE Restorator Pipeline";
 
 function LakeGlacierBackdrop() {
   return (
@@ -249,6 +250,9 @@ export default function ImageComparePage({ taskConfig, compareAssets, onBackToTa
           </div>
         </div>
       </div>
+      <footer className="pointer-events-none absolute bottom-4 left-0 right-0 z-20 text-center font-display text-[0.62rem] tracking-[0.24em] text-white/24">
+        {PAGE_FOOTER}
+      </footer>
     </section>
   );
 }

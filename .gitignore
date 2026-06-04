@@ -6,6 +6,8 @@ node_modules/
 venv/
 *.log
 logs/
+backend/backend_uploads/
+backend/backend_restored/
 
 # Local inputs and generated outputs
 输入图片/

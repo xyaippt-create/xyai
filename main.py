@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,9 @@ SUPPORTED_MODES = [
     "portrait_commercial",
     "ppt_business",
 ]
+SERVER_HOST = "localhost"
+SERVER_PORT = 8787
+SERVER_CORS_ORIGINS = ["*"]
 
 
 def get_desktop_work_dirs():
@@ -40,6 +44,165 @@ def get_desktop_work_dirs():
     return input_dir, output_dir
 
 
+def safe_upload_name(filename: str | None) -> str:
+    original = Path(filename or "image.png").name
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original).strip(" .")
+    return cleaned or "image.png"
+
+
+def public_file_url(kind: str, filename: str) -> str:
+    return f"/api/file/{kind}/{filename}"
+
+
+def build_web_app():
+    try:
+        from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+        from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import FileResponse, StreamingResponse
+    except ImportError as exc:
+        raise RuntimeError("缺少 FastAPI 服务依赖。请先运行：pip install -r requirements.txt") from exc
+
+    from backend.restoration_server import RESTORATION_LOGS, stream_restoration_logs
+    from batch.batch_processor import process_batch
+    from engine.io import read_image
+
+    input_dir, output_dir = get_desktop_work_dirs()
+    app = FastAPI(title="VisualMasterPro V0.3 API", version=APP_VERSION)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=SERVER_CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    def resolve_public_file(kind: str, filename: str) -> Path:
+        roots = {
+            "uploads": input_dir,
+            "outputs": output_dir,
+        }
+        root = roots.get(kind)
+        if root is None:
+            raise HTTPException(status_code=404, detail="未知文件类型。")
+        target = (root / filename).resolve()
+        root_resolved = root.resolve()
+        if root_resolved not in target.parents and target != root_resolved:
+            raise HTTPException(status_code=403, detail="非法文件路径。")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在。")
+        return target
+
+    @app.get("/api/health")
+    async def health():
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "message": "VisualMasterPro V0.3 API 已就绪。",
+            "data": {
+                "version": APP_VERSION,
+                "host": SERVER_HOST,
+                "port": SERVER_PORT,
+                "inputDir": str(input_dir),
+                "outputDir": str(output_dir),
+                "uploadEndpoint": "/api/upload",
+                "streamEndpoint": "/api/stream",
+                "logLines": len(RESTORATION_LOGS),
+            },
+        }
+
+    @app.get("/api/stream")
+    async def stream(delay: float = 0.45):
+        return StreamingResponse(
+            stream_restoration_logs(delay),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @app.get("/api/file/{kind}/{filename:path}")
+    async def serve_file(kind: str, filename: str):
+        return FileResponse(resolve_public_file(kind, filename))
+
+    @app.post("/api/upload")
+    async def upload_file(
+        file: UploadFile = File(...),
+        mode: str = Form("fidelity"),
+        scale: int = Form(2),
+        format: str = Form("png"),
+    ):
+        upload_name = safe_upload_name(file.filename)
+        output_format = (format or "png").lower().lstrip(".")
+        if output_format not in {"png", "jpg", "jpeg"}:
+            output_format = "png"
+        scale_value = 4 if int(scale) == 4 else 2
+
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="上传图片为空。")
+
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        saved_path = input_dir / upload_name
+        saved_path.write_bytes(raw)
+        source_image = read_image(saved_path)
+        source_height, source_width = source_image.shape[:2] if source_image is not None else (0, 0)
+
+        results = process_batch(
+            [saved_path],
+            output_dir,
+            mode=mode or "fidelity",
+            scale=scale_value,
+            output_format=output_format,
+            debug_output=False,
+        )
+        if not results or not results[0].ok or not results[0].output:
+            message = results[0].message if results else "未生成增强结果。"
+            raise HTTPException(status_code=500, detail=message)
+
+        result = results[0]
+        enhanced_path = result.output
+        data = {
+            "fileName": upload_name,
+            "mode": mode or "fidelity",
+            "originalPath": str(saved_path),
+            "outputPath": str(enhanced_path),
+            "originalUrl": public_file_url("uploads", saved_path.name),
+            "enhancedUrl": public_file_url("outputs", enhanced_path.name),
+            "sourceWidth": source_width,
+            "sourceHeight": source_height,
+            "width": result.width,
+            "height": result.height,
+            "scale": scale_value,
+            "format": output_format,
+            "qualityFlag": result.message,
+        }
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "message": "图片上传并增强完成。",
+            "filename": upload_name,
+            "url": data["originalUrl"],
+            "data": data,
+        }
+
+    return app
+
+
+def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT, debug: bool = False) -> int:
+    import uvicorn
+
+    print(f"{APP_VERSION} Web API 服务启动中...")
+    print(f"监听地址：http://{host}:{port}")
+    print("上传接口：POST /api/upload")
+    uvicorn.run(build_web_app(), host=host, port=port, log_level="debug" if debug else "info")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="VisualMasterPro",
@@ -50,6 +213,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", dest="input_option", help="输入图片或图片文件夹。")
     parser.add_argument("--output", dest="output_option", help="输出文件夹。")
     parser.add_argument("--gui", action="store_true", help="启动 VisualMasterPro V0.3 图形化界面。")
+    parser.add_argument("--server", action="store_true", help="启动 Web API 服务，监听 http://localhost:8787。")
+    parser.add_argument("--host", default=SERVER_HOST, help="Web API 监听主机，默认 localhost。")
+    parser.add_argument("--port", type=int, default=SERVER_PORT, help="Web API 监听端口，默认 8787。")
     parser.add_argument(
         "--mode",
         default=AUTO_MODE,
@@ -109,6 +275,9 @@ def resolve_paths(args):
 
 def run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if not argv and not is_pyinstaller():
+        return run_server()
+
     if is_pyinstaller() and not argv:
         from gui.app import run_gui
 
@@ -121,6 +290,9 @@ def run(argv: list[str] | None = None) -> int:
         from gui.app import run_gui
 
         return run_gui()
+
+    if args.server:
+        return run_server(host=args.host, port=args.port, debug=args.debug)
 
     try:
         input_path, output_dir = resolve_paths(args)

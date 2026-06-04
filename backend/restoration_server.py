@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -11,31 +12,32 @@ import cv2
 import numpy as np
 
 try:
-    from flask import Flask, Response, jsonify, request, send_from_directory
-    from werkzeug.utils import secure_filename
-except ImportError:  # Flask is installed through requirements.txt for the web backend.
-    Flask = None
-    Response = None
-    jsonify = None
-    request = None
-    send_from_directory = None
-    secure_filename = None
-
-try:
-    from flask_cors import CORS
-except ImportError:
-    CORS = None
+    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, StreamingResponse
+except ImportError:  # FastAPI is installed through requirements.txt for the web backend.
+    FastAPI = None
+    File = None
+    Form = None
+    HTTPException = None
+    UploadFile = None
+    CORSMiddleware = None
+    FileResponse = None
+    StreamingResponse = None
 
 
 APP_NAME = "VisualMasterPro Realtime Restoration Backend"
 APP_VERSION = "VisualMasterPro V0.3"
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "tests" / "outputs" / "backend_restored"
-DEFAULT_UPLOAD_DIR = ROOT_DIR / "tests" / "outputs" / "backend_uploads"
-CORS_ALLOWED_ORIGINS = {
+BACKEND_DIR = Path(__file__).resolve().parent
+DEFAULT_UPLOAD_DIR = BACKEND_DIR / "backend_uploads"
+DEFAULT_OUTPUT_DIR = BACKEND_DIR / "backend_restored"
+CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "http://localhost:8787",
     "http://127.0.0.1:5173",
-}
+    "http://127.0.0.1:8787",
+]
 
 RESTORATION_LOGS = [
     "SSE CONNECTED /task/task_vmp_v03_core/stream",
@@ -69,6 +71,12 @@ def write_image(path: Path, image) -> bool:
 
 def public_file_url(kind: str, filename: str) -> str:
     return f"/api/file/{kind}/{filename}"
+
+
+def safe_upload_name(filename: str | None) -> str:
+    original = Path(filename or "image.png").name
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original).strip(" .")
+    return cleaned or "image.png"
 
 
 def lightweight_restorator(image, scale: int = 2):
@@ -114,58 +122,58 @@ def stream_restoration_logs(delay: float = 0.45) -> Generator[str, None, None]:
         time.sleep(max(0.0, float(delay)))
 
 
-def require_flask() -> None:
-    if Flask is None:
-        raise RuntimeError("缺少 Flask。请先运行：pip install -r requirements.txt")
+def require_fastapi() -> None:
+    if FastAPI is None:
+        raise RuntimeError("缺少 FastAPI。请先运行：pip install -r requirements.txt")
 
 
-def create_app() -> "Flask":
-    require_flask()
-    app = Flask(__name__)
-    if CORS is not None:
-        CORS(
-            app,
-            resources={r"/api/*": {"origins": list(CORS_ALLOWED_ORIGINS)}},
-            methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Content-Type"],
-        )
+def resolve_public_file(kind: str, filename: str) -> Path:
+    roots = {
+        "uploads": DEFAULT_UPLOAD_DIR,
+        "outputs": DEFAULT_OUTPUT_DIR,
+    }
+    root = roots.get(kind)
+    if root is None:
+        raise HTTPException(status_code=404, detail="未知文件类型。")
+    target = (root / filename).resolve()
+    if root.resolve() not in target.parents and target != root.resolve():
+        raise HTTPException(status_code=403, detail="非法文件路径。")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在。")
+    return target
 
-    @app.before_request
-    def handle_cors_preflight():
-        if request.method == "OPTIONS":
-            return ("", 204)
 
-    @app.after_request
-    def add_cors_headers(response):
-        origin = request.headers.get("Origin")
-        response.headers["Access-Control-Allow-Origin"] = origin if origin in CORS_ALLOWED_ORIGINS else "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-        response.headers["Vary"] = "Origin"
-        return response
+def create_app() -> "FastAPI":
+    require_fastapi()
+    app = FastAPI(title=APP_NAME, version=APP_VERSION)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-    @app.route("/api/health", methods=["GET"])
-    def health():
-        return jsonify(
-            {
-                "success": True,
-                "data": {
-                    "name": APP_NAME,
-                    "version": APP_VERSION,
-                    "streamEndpoint": "/api/stream",
-                    "restoreEndpoint": "/api/restore",
-                    "restorator": "OpenCV lightweight fallback",
-                    "logLines": len(RESTORATION_LOGS),
-                },
-            }
-        )
+    @app.get("/api/health")
+    async def health():
+        return {
+            "success": True,
+            "data": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "streamEndpoint": "/api/stream",
+                "restoreEndpoint": "/api/restore",
+                "uploadEndpoint": "/api/upload",
+                "restorator": "OpenCV lightweight fallback",
+                "logLines": len(RESTORATION_LOGS),
+            },
+        }
 
-    @app.route("/api/stream", methods=["GET"])
-    def stream():
-        delay = request.args.get("delay", "0.45")
-        return Response(
-            stream_restoration_logs(float(delay)),
-            mimetype="text/event-stream",
+    @app.get("/api/stream")
+    async def stream(delay: float = 0.45):
+        return StreamingResponse(
+            stream_restoration_logs(delay),
+            media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
@@ -173,78 +181,82 @@ def create_app() -> "Flask":
             },
         )
 
-    @app.route("/api/file/<kind>/<path:filename>", methods=["GET"])
-    def serve_file(kind: str, filename: str):
-        roots = {
-            "uploads": DEFAULT_UPLOAD_DIR,
-            "outputs": DEFAULT_OUTPUT_DIR,
-        }
-        root = roots.get(kind)
-        if root is None:
-            return jsonify({"success": False, "error": "未知文件类型。"}), 404
-        return send_from_directory(root, filename)
+    @app.get("/api/file/{kind}/{filename:path}")
+    async def serve_file(kind: str, filename: str):
+        return FileResponse(resolve_public_file(kind, filename))
 
-    def handle_upload_and_restore():
-        if request.method == "OPTIONS":
-            return jsonify({"success": True})
-        upload = request.files.get("file")
-        if upload is None:
-            return jsonify({"success": False, "error": "请使用 multipart/form-data 上传 file 字段。"}), 400
-
-        scale = int(request.form.get("scale", "2"))
-        output_format = request.form.get("format", "png").lower().lstrip(".")
-        mode = request.form.get("mode", "fidelity")
+    async def upload_and_restore(
+        file: "UploadFile",
+        mode: str = "fidelity",
+        scale: int = 2,
+        output_format: str = "png",
+    ):
+        file_name = safe_upload_name(file.filename)
+        output_format = output_format.lower().lstrip(".")
         if output_format not in {"png", "jpg", "jpeg"}:
             output_format = "png"
 
-        raw = upload.read()
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="上传图片为空。")
+
         image = read_image_bytes(raw)
         if image is None:
-            return jsonify({"success": False, "error": "图片读取失败，请检查文件格式。"}), 400
+            raise HTTPException(status_code=400, detail="图片读取失败，请检查文件格式。")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_name = secure_filename(upload.filename or "image.png") or "image.png"
-        original_name = f"{timestamp}_{safe_name}"
-        original_path = DEFAULT_UPLOAD_DIR / original_name
-        original_path.parent.mkdir(parents=True, exist_ok=True)
+        DEFAULT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        original_path = DEFAULT_UPLOAD_DIR / file_name
         original_path.write_bytes(raw)
 
         restored = lightweight_restorator(image, scale=scale)
-        output_name = f"{Path(original_name).stem}_vmp_backend_restored.{output_format}"
+        output_name = f"{Path(file_name).stem}_vmp_backend_restored.{output_format}"
         output_path = DEFAULT_OUTPUT_DIR / output_name
         if not write_image(output_path, restored):
-            return jsonify({"success": False, "error": "图片写入失败。"}), 500
+            raise HTTPException(status_code=500, detail="图片写入失败。")
 
         height, width = restored.shape[:2]
         source_height, source_width = image.shape[:2]
-        return jsonify(
-            {
-                "success": True,
-                "data": {
-                    "fileName": upload.filename or "image",
-                    "mode": mode,
-                    "originalPath": str(original_path),
-                    "outputPath": str(output_path),
-                    "originalUrl": public_file_url("uploads", original_name),
-                    "enhancedUrl": public_file_url("outputs", output_name),
-                    "sourceWidth": source_width,
-                    "sourceHeight": source_height,
-                    "width": width,
-                    "height": height,
-                    "scale": scale,
-                    "format": output_format,
-                    "qualityFlag": "有效清晰增强",
-                },
-            }
-        )
+        data = {
+            "fileName": file.filename or file_name,
+            "mode": mode,
+            "originalPath": str(original_path),
+            "outputPath": str(output_path),
+            "originalUrl": public_file_url("uploads", file_name),
+            "enhancedUrl": public_file_url("outputs", output_name),
+            "sourceWidth": source_width,
+            "sourceHeight": source_height,
+            "width": width,
+            "height": height,
+            "scale": scale,
+            "format": output_format,
+            "qualityFlag": "有效清晰增强",
+        }
+        return {
+            "status": "success",
+            "filename": file.filename or file_name,
+            "url": data["originalUrl"],
+            "success": True,
+            "data": data,
+        }
 
-    @app.route("/api/upload", methods=["POST", "OPTIONS"])
-    def upload():
-        return handle_upload_and_restore()
+    @app.post("/api/upload")
+    async def upload_file(
+        file: UploadFile = File(...),
+        mode: str = Form("fidelity"),
+        scale: int = Form(2),
+        format: str = Form("png"),
+    ):
+        return await upload_and_restore(file=file, mode=mode, scale=scale, output_format=format)
 
-    @app.route("/api/restore", methods=["POST", "OPTIONS"])
-    def restore():
-        return handle_upload_and_restore()
+    @app.post("/api/restore")
+    async def restore_file(
+        file: UploadFile = File(...),
+        mode: str = Form("fidelity"),
+        scale: int = Form(2),
+        format: str = Form("png"),
+    ):
+        return await upload_and_restore(file=file, mode=mode, scale=scale, output_format=format)
 
     return app
 
@@ -256,8 +268,9 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    app = create_app()
-    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    import uvicorn
+
+    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="debug" if args.debug else "info")
     return 0
 
 

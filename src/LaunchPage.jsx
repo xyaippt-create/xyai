@@ -31,6 +31,7 @@ const initialStatus = checkGroups.reduce((acc, group) => {
   acc[group.key] = "waiting";
   return acc;
 }, {});
+const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.3 CORE Restorator Pipeline";
 
 function StatusPill({ status }) {
   const config = {
@@ -69,16 +70,14 @@ function SculptedTitle() {
       <p className="font-display text-xs uppercase tracking-[0.72em] text-glacier/70">Visual Master Pro</p>
       <div className="relative mt-8">
         <h1
-          className="relative z-10 flex flex-row items-center justify-center whitespace-nowrap bg-gradient-to-b from-white via-glacier to-aurora bg-clip-text text-4xl font-black leading-none tracking-[0.18em] text-transparent md:text-5xl"
+          className="relative z-10 flex flex-row items-center justify-center whitespace-nowrap bg-gradient-to-b from-white via-slate-100 to-emerald-50/20 bg-clip-text text-4xl font-black leading-none tracking-[0.18em] text-transparent md:text-5xl"
           style={{
-            WebkitTextStroke: "1px rgba(231, 251, 255, 0.86)",
-            textShadow:
-              "0 1px 2px rgba(255,255,255,0.6), 0 4px 10px rgba(0,242,254,0.3), 0 10px 30px rgba(0,242,254,0.15), 0 0 1px rgba(231,251,255,0.9)"
+            WebkitTextStroke: "0.7px rgba(255, 255, 255, 0.72)",
+            textShadow: "0 1px 0 #ffffff, 0 2px 1px rgba(0,0,0,0.4), 0 4px 6px rgba(0,0,0,0.15)"
           }}
         >
-          原图忠实增强
+          高清交付引擎
         </h1>
-        <div className="absolute inset-x-0 top-[54%] z-0 mx-auto h-16 w-[74%] rounded-full bg-glacier/18 blur-3xl" />
         <p className="mx-auto mt-8 max-w-2xl text-sm leading-8 text-white/62">
           以真实画质恢复为核心，保护构图、色彩与原始风格。下一阶段接入 AI Restoration Pipeline，面向文字、结构、纹理与压缩损伤进行可信修复。
         </p>
@@ -122,27 +121,32 @@ export default function LaunchPage({ onEnter }) {
     if (autoEnteredRef.current || !allDone) return;
     autoEnteredRef.current = true;
     setIsExiting(true);
-    window.setTimeout(() => onEnter(snapshot), 320);
   };
 
   useEffect(() => {
     if (!allDone || autoEnteredRef.current) return undefined;
-    const timer = window.setTimeout(() => {
-      enterDashboard();
-    }, 2000);
-    return () => window.clearTimeout(timer);
+    enterDashboard();
+    return undefined;
   }, [allDone, snapshot]);
 
+  const handleTransitionEnd = (event) => {
+    if (!isExiting || event.currentTarget !== event.target) return;
+    onEnter(snapshot);
+  };
+
   return (
-    <section className={`relative flex min-h-screen flex-col items-center justify-start overflow-hidden px-8 py-12 text-center transition-opacity duration-300 ${isExiting ? "opacity-0" : "opacity-100"}`}>
+    <section
+      onTransitionEnd={handleTransitionEnd}
+      className={`relative h-screen w-screen overflow-hidden flex flex-col justify-between p-6 bg-[#090e10] text-slate-100 select-none transition-all duration-700 ease-out transform ${isExiting ? "opacity-0 -translate-y-4 pointer-events-none scale-98" : "opacity-100 translate-y-0"}`}
+    >
       <CinematicTerrain />
 
-      <div className="relative z-10 flex w-full flex-col items-center">
+      <div className="relative z-10 flex w-full flex-col items-center animate-[fadeInUp_0.5s_ease-out_both]">
         <SculptedTitle />
 
         <div className="mt-12 grid w-full max-w-7xl grid-cols-1 items-stretch gap-6 md:grid-cols-2 xl:grid-cols-4">
           {checkGroups.map((group, index) => (
-            <div key={group.key} className="flex h-full flex-col rounded-[1.6rem] border border-white/10 bg-white/[0.045] p-5 shadow-cinematic backdrop-blur-2xl">
+            <div key={group.key} className="flex h-full flex-col rounded-lg border border-white/10 bg-white/[0.045] p-5 shadow-cinematic backdrop-blur-2xl">
               <div className="flex items-start justify-between gap-4">
                 <div className="text-left">
                   <p className="font-display text-[0.64rem] uppercase tracking-[0.36em] text-white/38">{group.label}</p>
@@ -170,11 +174,14 @@ export default function LaunchPage({ onEnter }) {
           type="button"
           disabled={!allDone}
           onClick={enterDashboard}
-          className="mt-8 rounded-full border border-glacier/40 bg-glacier/15 px-8 py-4 text-sm font-semibold tracking-[0.28em] text-glacier transition hover:bg-glacier/25 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/30"
+          className="mt-8 rounded-lg border border-glacier/40 bg-glacier/15 px-8 py-4 text-sm font-semibold tracking-[0.28em] text-glacier transition hover:bg-glacier/25 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-white/30"
         >
-          {allDone ? "2 秒后自动进入主工作台" : "环境自检中"}
+          {allDone ? "自动进入主工作台" : "环境自检中"}
         </button>
       </div>
+      <footer className="pointer-events-none absolute bottom-4 left-0 right-0 z-20 text-center font-display text-[0.62rem] tracking-[0.24em] text-white/24">
+        {PAGE_FOOTER}
+      </footer>
     </section>
   );
 }
