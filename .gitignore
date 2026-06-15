@@ -50,3 +50,14 @@ cache/
 *.tmp
 *.bak
 *.swp
+
+# V0.4.5.3 upload safety rules
+dist/
+.env
+输入图片/
+输出成品/
+runtime/test/
+runtime/v*/
+runtime/work/
+runtime/*.json
+settings/settings.json

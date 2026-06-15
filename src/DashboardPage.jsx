@@ -1,473 +1,827 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import TaskDetailPage from "./TaskDetailPage.jsx";
+import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
+import QualityReportPage from "./QualityReportPage.jsx";
 
 const API_BASE = "http://localhost:8787";
+const OUTPUT_PROFILE = "delivery_1080p";
+const DEFAULT_OUTPUT_FORMAT = "auto";
+const DEFAULT_SCALE = "2";
+const DEFAULT_LEGACY_FORMAT = "png";
 
-const modes = [
-  {
-    id: "fidelity",
-    name: "原图忠实增强",
-    signal: "FIDELITY",
-    description: "保持构图、颜色与画风，进行可信清晰优化。"
-  },
-  {
-    id: "text_safe",
-    name: "文字保护增强",
-    signal: "TEXT SAFE",
-    description: "优先处理小字、标题与海报说明文字。"
-  },
-  {
-    id: "ai_image_clean",
-    name: "AI图像清洁",
-    signal: "AI CLEAN",
-    description: "控制 diffusion 脏纹理、假 HDR 与电子锐边。"
-  },
-  {
-    id: "sharp_4k",
-    name: "4K清晰增强",
-    signal: "4K CORE",
-    description: "用于大屏预览和高清展示的结构补偿。"
-  }
+const DECOR_LABEL = {
+  color: "#6e7d80",
+  fontSize: "10px",
+  letterSpacing: "0.18em",
+  textTransform: "uppercase",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+};
+
+const PANEL_STYLE = {
+  backgroundColor: "#101819",
+  border: "1px solid #263738",
+  borderRadius: "8px",
+};
+
+const TITLE_STYLE = { color: "#f4f7f8" };
+
+const modeCards = [
+  { id: "fidelity", title: "原图忠实增强", desc: "保持构图、色彩与画风，只做高清清洁。" },
+  { id: "text_safe", title: "文字安全清洁", desc: "保护小字边缘，减少压缩毛刺。" },
+  { id: "texture", title: "参数纹理保持", desc: "保留材质层次，避免假锐化。" },
 ];
 
-const seedFiles = [];
-const DECOR_LABEL = "font-sans text-xs font-light uppercase tracking-[0.42em] text-emerald-500/60";
-const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.3 CORE Restorator Pipeline";
-let GLOBAL_IS_UPLOADING = false;
-let GLOBAL_UPLOAD_XHR = null;
+const statusText = {
+  queued: "待处理",
+  uploading: "上传中",
+  processing: "处理中",
+  completed: "已完成",
+  failed: "失败",
+};
 
-function TopStatusStream({ runtimeSnapshot }) {
-  const lines = [
-    "Runtime Core 已就绪",
-    "Quality Core Pipeline 待命",
-    "AI Restoration Slot 预留",
-    runtimeSnapshot?.runtimeReady ? "启动自检完成" : "等待启动快照"
+const statusColor = {
+  queued: "#6e7d80",
+  uploading: "#f0c36f",
+  processing: "#6feaf0",
+  completed: "#8be6b1",
+  failed: "#ff8a8a",
+};
+
+function normalizeApiUrl(url) {
+  if (!url) return "";
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${API_BASE}${url.startsWith("/") ? url : `/${url}`}`;
+}
+
+function safeText(value, fallback = "暂无数据") {
+  if (value == null || value === "") return fallback;
+  return value;
+}
+
+function formatFileSize(file) {
+  if (!file) return "0 MB";
+  return `${(file.size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function makeQueueId(file) {
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}_${file.name}`;
+}
+
+function extractTaskPayload(payload) {
+  const data = payload?.data || payload || {};
+  const task = data.task || payload?.task || {};
+  const taskResult = data.task_result || payload?.task_result || task.task_result || {};
+  const taskReport = data.task_report || payload?.task_report || task.task_report || {};
+  const taskId = payload?.taskId || payload?.task_id || data.taskId || data.task_id || task.taskId || task.task_id;
+  const finalOutputUrl =
+    taskResult.final_output_url ||
+    task.final_output_url ||
+    data.final_output_url ||
+    data.enhancedUrl ||
+    payload?.final_output_url ||
+    payload?.enhancedUrl;
+  const originalUrl = data.originalUrl || payload?.originalUrl || task.originalUrl || taskResult.originalUrl || "";
+
+  return {
+    data,
+    task,
+    taskId,
+    filename: payload?.filename || data.filename || data.input_filename || data.fileName || data.original_filename || task.input_filename,
+    originalUrl: normalizeApiUrl(originalUrl),
+    task_result: taskResult,
+    task_report: taskReport,
+    final_output_url: normalizeApiUrl(finalOutputUrl),
+  };
+}
+
+function requestJson(method, url, body) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const shouldLogOutputDir = url.includes("/api/output/validate") || url.includes("/api/output/open") || url.includes("/api/output/select-popup");
+    if (shouldLogOutputDir) {
+      console.info("[VisualMasterPro output_dir] request", { method, url, body: body || null });
+    }
+    xhr.open(method, url, true);
+    if (method !== "GET") xhr.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
+    xhr.onload = () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch (error) {
+        reject(new Error(`响应解析失败：${error.message}`));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300 || payload.success === false || payload.valid === false) {
+        if (shouldLogOutputDir) {
+          console.info("[VisualMasterPro output_dir] response", { url, status: xhr.status, payload });
+        }
+        reject(new Error(payload.message || payload.detail || `请求失败：HTTP ${xhr.status}`));
+        return;
+      }
+      if (shouldLogOutputDir) {
+        console.info("[VisualMasterPro output_dir] response", { url, status: xhr.status, payload });
+      }
+      resolve(payload);
+    };
+    xhr.onerror = () => reject(new Error("无法连接本地后端服务。"));
+    xhr.send(method === "GET" ? null : JSON.stringify(body || {}));
+  });
+}
+
+function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, onProgress) {
+  return new Promise((resolve, reject) => {
+    const outputDirForRequest = (requestedOutputDir || "").trim();
+    const formData = new FormData();
+    formData.append("file", item.file);
+    formData.append("mode", activeMode);
+    formData.append("scale", DEFAULT_SCALE);
+    formData.append("format", DEFAULT_LEGACY_FORMAT);
+    formData.append("output_profile", OUTPUT_PROFILE);
+    formData.append("output_format", outputFormat || DEFAULT_OUTPUT_FORMAT);
+    if (outputDirForRequest) formData.append("output_dir", outputDirForRequest);
+    console.info("[VisualMasterPro output_dir] upload FormData", {
+      filename: item.name,
+      output_dir: outputDirForRequest,
+      has_output_dir: formData.has("output_dir"),
+      keys: Array.from(formData.keys()),
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}/api/upload`, true);
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      onProgress?.(Math.max(1, Math.round((event.loaded / event.total) * 100)));
+    };
+    xhr.onload = () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch (error) {
+        reject(new Error(`上传响应解析失败：${error.message}`));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300 || payload.success === false) {
+        reject(new Error(payload.message || payload.detail || `上传失败：HTTP ${xhr.status}`));
+        return;
+      }
+      resolve(extractTaskPayload(payload));
+    };
+    xhr.onerror = () => reject(new Error("无法连接上传接口，请确认 FastAPI 服务已启动。"));
+    xhr.send(formData);
+  });
+}
+
+function streamTask(taskId, onLog, onProgress) {
+  return new Promise((resolve, reject) => {
+    if (!taskId) {
+      reject(new Error("缺少任务编号，无法监听任务日志。"));
+      return;
+    }
+    const eventSource = new EventSource(`${API_BASE}/api/v1/tasks/${encodeURIComponent(taskId)}/stream`);
+    let finalPayload = {};
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      eventSource.close();
+    };
+
+    eventSource.addEventListener("restoration.log", (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.message) onLog?.(payload.message);
+        if (payload.total && payload.index) onProgress?.(Math.min(99, Math.round((payload.index / payload.total) * 100)));
+        const extracted = extractTaskPayload(payload);
+        finalPayload = {
+          ...finalPayload,
+          ...extracted,
+          task_result: Object.keys(extracted.task_result || {}).length ? extracted.task_result : finalPayload.task_result,
+          task_report: Object.keys(extracted.task_report || {}).length ? extracted.task_report : finalPayload.task_report,
+        };
+        if (payload.done === true) {
+          close();
+          if (payload.task_status === "failed") reject(new Error(payload.message || "任务处理失败。"));
+          else resolve(finalPayload);
+        }
+      } catch (error) {
+        onLog?.(`SSE 数据解析失败：${error.message}`);
+      }
+    });
+
+    eventSource.onmessage = (event) => {
+      if (event.data === "[DONE]") {
+        close();
+        resolve(finalPayload);
+      }
+    };
+
+    eventSource.onerror = () => {
+      close();
+      reject(new Error("SSE 流式日志通道异常。"));
+    };
+  });
+}
+
+function StatusPill({ status }) {
+  const color = statusColor[status] || "#6e7d80";
+  return (
+    <span
+      style={{
+        color,
+        background: "#0d181a",
+        border: `1px solid ${status === "completed" ? "#8be6b1" : status === "failed" ? "#5a2525" : "#263738"}`,
+        borderRadius: "4px",
+        padding: "4px 8px",
+        fontSize: "10px",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {statusText[status] || "未知"}
+    </span>
+  );
+}
+
+function ParameterPanel({ outputFormat }) {
+  const rows = [
+    { label: "交付方案", value: "高清交付 1080P" },
+    { label: "目标格式", value: outputFormat === "auto" ? "智能自动选择" : `${outputFormat.toUpperCase()} 格式落盘` },
+    { label: "核心基线", value: "1080P 高清稳定交付" },
+    { label: "尺寸策略", value: "智能无损自适应缩放" },
   ];
 
   return (
-    <div className="flex items-center gap-3 overflow-hidden rounded-full border border-white/10 bg-white/[0.045] px-4 py-3 backdrop-blur-xl">
-      <span className="h-2 w-2 shrink-0 rounded-full bg-aurora shadow-[0_0_22px_rgba(183,255,212,0.9)]" />
-      <div className="flex min-w-0 gap-6 text-xs text-white/58">
-        {lines.map((line) => (
-          <span key={line} className="whitespace-nowrap tracking-[0.18em]">
-            {line}
-          </span>
+    <section style={{ ...PANEL_STYLE, padding: "18px" }}>
+      <p style={DECOR_LABEL}>Output Parameters</p>
+      <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>输出图片参数</h2>
+      <div style={{ backgroundColor: "#0e1516", border: "1px solid #263738", borderRadius: "6px", padding: "14px", marginTop: "14px", display: "grid", gap: "8px" }}>
+        {rows.map((row) => (
+          <div key={row.label} style={{ display: "flex", alignItems: "center", fontSize: "12px", lineHeight: 1.25 }}>
+            <span style={{ color: "#6feaf0", marginRight: "6px" }}>·</span>
+            <span style={{ color: "#9ba9ab" }}>{row.label}：</span>
+            <span style={{ color: "#f4f7f8" }}>{row.value}</span>
+          </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
-function SnowfieldMark() {
-  return (
-    <div className="relative flex h-28 w-28 shrink-0 items-center justify-center">
-      <div className="absolute inset-0 rounded-full border border-glacier/30 bg-glacier/10 blur-[1px]" />
-      <div className="absolute inset-3 rounded-full border border-white/10" />
-      <div className="relative text-center">
-        <div className="text-3xl font-black tracking-[0.16em] text-white [text-shadow:0_8px_32px_rgba(143,244,255,0.45)]">雪原</div>
-        <div className="mt-2 font-display text-[0.58rem] uppercase tracking-[0.42em] text-glacier/70">Snowfield</div>
-      </div>
-    </div>
-  );
+function makeTaskConfig(item) {
+  if (!item) return null;
+  return {
+    taskId: item.taskId,
+    task_id: item.taskId,
+    streamEndpoint: item.streamEndpoint,
+    fileName: item.name,
+    filename: item.name,
+    originalUrl: item.originalUrl,
+    enhancedUrl: item.final_output_url,
+    final_output_url: item.final_output_url,
+    mode: item.mode,
+    output_format: item.output_format,
+    task_status: item.status,
+    task_result: {
+      ...(item.task_result || {}),
+      final_output_url: item.final_output_url || item.task_result?.final_output_url || "",
+      originalUrl: item.originalUrl || "",
+      output_filename: item.output_filename || item.task_result?.output_filename || "",
+    },
+    task_report: item.task_report || {},
+    debug_quality: item.debug_quality || item.task_result?.debug_quality || {},
+    compareAssets: {
+      taskId: item.taskId,
+      fileName: item.name,
+      originalUrl: item.originalUrl,
+      enhancedUrl: item.final_output_url,
+      final_output_url: item.final_output_url,
+      mode: item.mode,
+      task_result: {
+        ...(item.task_result || {}),
+        final_output_url: item.final_output_url || item.task_result?.final_output_url || "",
+        originalUrl: item.originalUrl || "",
+      },
+      task_report: item.task_report || {},
+    },
+  };
 }
 
-function ImportPanel({ onFiles, uploadState }) {
-  const [dragging, setDragging] = useState(false);
+export default function DashboardPage() {
   const fileInputRef = useRef(null);
-  const folderInputRef = useRef(null);
-
-  const handleInputChange = (event) => {
-    const selectedFiles = Array.from(event.currentTarget.files || []);
-    onFiles(selectedFiles);
-    event.currentTarget.value = "";
-  };
-
-  const handleDrop = (event) => {
-    event.preventDefault();
-    setDragging(false);
-    onFiles(Array.from(event.dataTransfer.files || []));
-  };
-
-  return (
-    <div
-      onDragOver={(event) => {
-        event.preventDefault();
-        setDragging(true);
-      }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={handleDrop}
-      className={`rounded-lg border p-6 transition ${
-        dragging ? "border-glacier/80 bg-glacier/10" : "border-white/10 bg-white/[0.045]"
-      }`}
-    >
-      <p className={DECOR_LABEL}>Input Field</p>
-      <h2 className="mt-3 text-2xl font-semibold text-white">图片拖拽导入</h2>
-      <p className="mt-3 text-sm leading-7 text-white/55">
-        将图片拖入此处，或使用本地文件选择器接入。当前前端为高保真交互层，后续与本地 Python Runtime 连接。
-      </p>
-      <div className="mt-6 grid grid-cols-2 gap-3">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={handleInputChange}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          webkitdirectory=""
-          className="hidden"
-          onChange={handleInputChange}
-        />
-        <button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-lg border border-glacier/30 bg-glacier/10 px-5 py-3 text-sm text-glacier">
-          添加图片
-        </button>
-        <button type="button" onClick={() => folderInputRef.current?.click()} className="rounded-lg border border-white/10 bg-white/5 px-5 py-3 text-sm text-white/70">
-          选择文件夹
-        </button>
-      </div>
-      <p className={`mt-4 min-h-5 text-xs ${uploadState.error ? "text-ember" : "text-white/42"}`}>
-        {uploadState.message}
-      </p>
-    </div>
-  );
-}
-
-function SelectedImageTable({ images, uploadProgress }) {
-  const renderStatus = (status) => {
-    if (status === "uploading") {
-      return (
-        <div className="flex w-full min-w-[120px] flex-col items-end">
-          <span className="whitespace-nowrap text-xs font-medium text-yellow-400">正在上传... {uploadProgress}%</span>
-          <div className="mt-1 h-[2px] w-full overflow-hidden rounded-full bg-white/5">
-            <div
-              className="h-full bg-gradient-to-r from-emerald-500 to-cyan-400 transition-all duration-200 ease-out"
-              style={{ width: `${uploadProgress}%` }}
-            />
-          </div>
-        </div>
-      );
-    }
-    if (status === "ready") {
-      return <span className="whitespace-nowrap text-emerald-400 font-bold animate-pulse">ready</span>;
-    }
-    if (status === "fail") {
-      return <span className="whitespace-nowrap text-rose-500 font-medium">上传失败</span>;
-    }
-    return <span className="whitespace-nowrap text-white/42">{status || "等待"}</span>;
-  };
-
-  return (
-    <div className="flex h-full min-h-0 flex-1 flex-col rounded-lg border border-white/10 bg-white/[0.045] p-6">
-      <div className="mb-5 flex items-end justify-between">
-        <div>
-          <p className={DECOR_LABEL}>Queue</p>
-          <h2 className="mt-3 text-2xl font-semibold text-white">待处理列表</h2>
-        </div>
-        <span className="rounded-full border border-white/10 px-3 py-1 text-xs text-white/50">{images.length} 张</span>
-      </div>
-      <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-white/10">
-        <div className="grid grid-cols-[1.5fr_0.8fr_0.7fr_0.7fr_0.6fr] bg-white/[0.06] px-4 py-3 text-xs tracking-[0.18em] text-white/42">
-          <span>文件名</span>
-          <span>尺寸</span>
-          <span>大小</span>
-          <span>类型</span>
-          <span>状态</span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto">
-          {images.length === 0 ? (
-            <div className="flex h-full min-h-[16rem] items-center justify-center px-8 text-center">
-              <div>
-                <p className={DECOR_LABEL}>Empty Queue</p>
-                <p className="mt-4 text-sm leading-7 text-white/48">尚未添加图片。请从左侧导入本地图片，系统会在上传成功后将状态标记为 ready。</p>
-              </div>
-            </div>
-          ) : (
-            images.map((image) => (
-              <div key={image.id} className="grid grid-cols-[1.5fr_0.8fr_0.7fr_0.7fr_0.6fr] border-t border-white/8 px-4 py-4 text-sm text-white/68">
-                <span className="truncate pr-4">{image.name}</span>
-                <span>{image.dimension}</span>
-                <span>{image.size}</span>
-                <span>{image.type}</span>
-                <span>{renderStatus(image.status)}</span>
-              </div>
-            ))
-          )}
-          </div>
-      </div>
-    </div>
-  );
-}
-
-function ModePanel({ activeMode, setActiveMode }) {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-white/10 bg-white/[0.045] p-6">
-      <p className={DECOR_LABEL}>Restoration Modes</p>
-      <h2 className="mt-3 text-2xl font-semibold text-white">四大增强模式</h2>
-      <div className="mt-5 grid min-h-0 flex-1 gap-3 overflow-y-auto pr-1">
-        {modes.map((mode) => (
-          <button
-            key={mode.id}
-            type="button"
-            onClick={() => setActiveMode(mode.id)}
-            className={`rounded-lg border p-4 text-left transition ${
-              activeMode === mode.id ? "border-glacier/70 bg-glacier/12" : "border-white/10 bg-polar-900/60 hover:bg-white/[0.07]"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-base font-medium text-white">{mode.name}</span>
-              <span className="font-sans text-[0.62rem] font-light uppercase tracking-[0.36em] text-emerald-500/50">{mode.signal}</span>
-            </div>
-            <p className="mt-2 text-xs leading-6 text-white/48">{mode.description}</p>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PhysicalContractPanel({ activeMode, scale, setScale, format, setFormat }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.045] p-6">
-      <p className={DECOR_LABEL}>Output Parameters</p>
-      <h2 className="mt-3 text-2xl font-semibold text-white">输出图片参数</h2>
-      <div className="mt-5 grid grid-cols-2 gap-4">
-        <label className="space-y-2">
-          <span className="text-xs tracking-[0.2em] text-white/42">Scale</span>
-          <select value={scale} onChange={(event) => setScale(event.target.value)} className="w-full rounded-lg border border-white/10 bg-polar-900 px-4 py-3 text-white">
-            <option value="2">2x</option>
-            <option value="4">4x</option>
-          </select>
-        </label>
-        <label className="space-y-2">
-          <span className="text-xs tracking-[0.2em] text-white/42">Format</span>
-          <select value={format} onChange={(event) => setFormat(event.target.value)} className="w-full rounded-lg border border-white/10 bg-polar-900 px-4 py-3 text-white">
-            <option value="png">PNG</option>
-            <option value="jpg">JPG</option>
-          </select>
-        </label>
-      </div>
-      <div className="mt-5 rounded-lg border border-white/10 bg-polar-900/70 p-4 text-xs leading-6 text-white/52">
-        当前参数：`--mode {activeMode}`、`--scale {scale}`、`--format {format}`。正式输出默认不添加角标。
-      </div>
-    </div>
-  );
-}
-
-export default function DashboardPage({ runtimeSnapshot, onBackToLaunch, onStartTask, onUploadComplete }) {
+  const processingRef = useRef(false);
+  const [activeScreen, setActiveScreen] = useState("dashboard");
+  const [activeItemId, setActiveItemId] = useState("");
+  const [debugItemId, setDebugItemId] = useState("");
+  const [fileQueue, setFileQueue] = useState([]);
   const [activeMode, setActiveMode] = useState("fidelity");
-  const [scale, setScale] = useState("2");
-  const [format, setFormat] = useState("png");
-  const [images, setImages] = useState(seedFiles);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadState, setUploadState] = useState({ message: "后端地址：http://localhost:8787/api/upload", error: false });
+  const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
+  const [appliedOutputDir, setAppliedOutputDir] = useState("");
+  const [defaultOutputDir, setDefaultOutputDir] = useState("");
+  const [outputDirError, setOutputDirError] = useState("");
+  const [outputDirSuccess, setOutputDirSuccess] = useState("");
+  const [notice, setNotice] = useState("请选择图片，或更换输出文件夹后开始处理。");
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
 
-  const activeModeLabel = useMemo(() => modes.find((mode) => mode.id === activeMode)?.name || "原图忠实增强", [activeMode]);
+  useEffect(() => {
+    requestJson("GET", `${API_BASE}/api/health`)
+      .then(async (payload) => {
+        const dir = payload?.data?.default_output_dir || payload?.data?.outputDir || "";
+        setDefaultOutputDir(dir);
+      })
+      .catch(() => setDefaultOutputDir(""));
+  }, []);
 
-  const handleUploadError = (fileName, message = "上传失败，请确认后端服务已启动。") => {
-    setImages((prev) => prev.map((item) => (item.name === fileName ? { ...item, status: "fail" } : item)));
-    setUploadState({ message, error: true });
-    setUploadProgress(0);
-    GLOBAL_IS_UPLOADING = false;
-    GLOBAL_UPLOAD_XHR = null;
+  const activeItem = useMemo(() => fileQueue.find((item) => item.id === activeItemId) || fileQueue.find((item) => item.status === "processing") || fileQueue.find((item) => item.status === "completed") || null, [fileQueue, activeItemId]);
+  const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
+  const completedItems = fileQueue.filter((item) => item.status === "completed");
+
+  const updateQueueItem = (id, patch) => {
+    setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
 
-  const handleFileUpload = (originFile) => {
-    if (!originFile || (typeof File !== "undefined" && !(originFile instanceof File))) {
-      console.error("[Upload Error] 传入的文件对象非法或为空");
+  const addFiles = (incomingFiles) => {
+    const images = Array.from(incomingFiles || []).filter((file) => file?.type?.startsWith("image/"));
+    if (!images.length) {
+      setNotice("未检测到可用图片文件。");
       return;
     }
-    if (GLOBAL_IS_UPLOADING) {
-      console.warn("[Global Singleton Lock] 成功拦截并发高频请求，主通道安全通车");
-      return;
-    }
+    const nextItems = images.map((file) => ({
+      id: makeQueueId(file),
+      file,
+      name: file.name,
+      size: formatFileSize(file),
+      type: file.type || "image",
+      status: "queued",
+      mode: activeMode,
+      output_format: outputFormat,
+      output_dir: appliedOutputDir,
+      taskId: "",
+      streamEndpoint: "",
+      originalUrl: "",
+      input_width: 0,
+      input_height: 0,
+      output_width: 0,
+      output_height: 0,
+      resize_policy: "",
+      final_output_url: "",
+      output_path: "",
+      output_filename: "",
+      input_path: "",
+      hash_equal: null,
+      pixel_diff_score: null,
+      debug_timing: null,
+      debug_quality: null,
+      task_result: null,
+      task_report: null,
+      error: "",
+      logs: [],
+      progress: 0,
+    }));
+    setFileQueue((prev) => [...prev, ...nextItems]);
+    if (!activeItemId && nextItems[0]) setActiveItemId(nextItems[0].id);
+    setNotice(`已选择 ${fileQueue.length + nextItems.length} 张。`);
+  };
 
-    const shadowFile = originFile;
-    GLOBAL_IS_UPLOADING = true;
-    setUploadProgress(0);
-    const newImageItem = {
-        id: Date.now(),
-        name: shadowFile.name,
-        size: `${(shadowFile.size / 1024 / 1024).toFixed(2)} MB`,
-        dimension: "上传中",
-        type: "physical_upload",
-        status: "uploading"
-      }
-    setImages((prev) => {
-      const exists = prev.some((item) => item.name === shadowFile.name);
-      if (exists) {
-        return prev.map((item) => (item.name === shadowFile.name ? { ...item, ...newImageItem, id: item.id } : item));
-      }
-      return [...prev, newImageItem];
+  const handleFileChange = (event) => {
+    addFiles(event.target.files);
+    event.target.value = "";
+  };
+
+  const resolveOutputDirForRequest = () => appliedOutputDir.trim() || defaultOutputDir.trim();
+
+  const handleSelectOutputDir = () => {
+    setOutputDirError("");
+    setOutputDirSuccess("");
+    setNotice("正在等待本地文件夹选择。");
+    requestJson("POST", `${API_BASE}/api/output/select-popup`, {})
+      .then(async (payload) => {
+        if (payload.status === "cancelled" || !payload.output_dir) {
+          setNotice("已取消更换输出文件夹。");
+          return;
+        }
+        const normalized = payload.output_dir || payload?.data?.normalized_path || "";
+        const validatePayload = await requestJson("POST", `${API_BASE}/api/output/validate`, { output_dir: normalized });
+        const checkedPath = validatePayload?.normalized_path || validatePayload?.data?.normalized_path || normalized;
+        setAppliedOutputDir(checkedPath === defaultOutputDir ? "" : checkedPath);
+        setOutputDirError("");
+        setOutputDirSuccess(normalized === defaultOutputDir ? "✓ 已恢复默认输出位置" : "✓ 已成功绑定本地输出文件夹");
+        setNotice(normalized === defaultOutputDir ? "已恢复默认输出位置。" : "已成功绑定本地输出文件夹。");
+      })
+      .catch((error) => {
+        setOutputDirSuccess("");
+        setOutputDirError(error.message || "本地文件夹选择失败。");
+        setNotice("本地文件夹选择失败。");
+      });
+  };
+
+  const handleOpenOutputDir = () => {
+    const target = appliedOutputDir.trim() || defaultOutputDir;
+    if (!target) {
+      setOutputDirError("当前没有可打开的输出目录。");
+      return;
+    }
+    requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: target })
+      .then((payload) => {
+        setOutputDirError("");
+        setOutputDirSuccess("");
+        setNotice(payload.message || "已打开输出目录。");
+      })
+      .catch((error) => {
+        setOutputDirError(error.message);
+        setOutputDirSuccess("");
+        setNotice(error.message);
+      });
+  };
+
+  const handleResetOutputDir = () => {
+    setAppliedOutputDir("");
+    setOutputDirError("");
+    setOutputDirSuccess("✓ 已恢复默认输出位置");
+    setNotice("已恢复默认输出位置。");
+  };
+
+  const processOneItem = async (item, index, total, queueOutputDir) => {
+    const activeOutputDir = (queueOutputDir || defaultOutputDir || "").trim();
+    setCurrentIndex(index + 1);
+    setActiveItemId(item.id);
+    setActiveScreen("task_detail");
+    updateQueueItem(item.id, {
+      status: "uploading",
+      mode: activeMode,
+      output_format: outputFormat,
+      output_dir: activeOutputDir,
+      error: "",
+      logs: ["正在确认输出目录"],
+      progress: 1,
     });
 
-    const uploadMode = activeMode || "fidelity";
-    const uploadScale = scale || "2";
-    const uploadFormat = (format || "png").toLowerCase();
-    const formData = new FormData();
-    formData.append("file", shadowFile);
-    formData.append("mode", uploadMode);
-    formData.append("scale", uploadScale);
-    formData.append("format", uploadFormat);
+    try {
+      const uploadPayload = await uploadFileWithXhr(item, activeMode, activeOutputDir, outputFormat, (percent) => {
+        updateQueueItem(item.id, { progress: Math.min(30, percent) });
+      });
+      const taskId = uploadPayload.taskId;
+      if (!taskId) throw new Error("后端未返回任务编号。");
 
-    setUploadState({ message: `正在上传并修复：${shadowFile.name}`, error: false });
-    const xhr = new XMLHttpRequest();
-    GLOBAL_UPLOAD_XHR = xhr;
-    xhr.open("POST", `${API_BASE}/api/upload`, true);
+      updateQueueItem(item.id, {
+        status: "processing",
+        taskId,
+        streamEndpoint: uploadPayload.data?.streamEndpoint || `/api/v1/tasks/${taskId}/stream`,
+        originalUrl: uploadPayload.originalUrl,
+        input_width: uploadPayload.data?.input_width || 0,
+        input_height: uploadPayload.data?.input_height || 0,
+        output_width: uploadPayload.data?.output_width || 0,
+        output_height: uploadPayload.data?.output_height || 0,
+        progress: 35,
+        logs: ["上传完成，正在监听后端 SSE 日志。"],
+      });
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        const percentComplete = Math.round((event.loaded / event.total) * 100);
-        setUploadProgress(percentComplete);
-      }
-    };
+      const streamPayload = await streamTask(
+        taskId,
+        (message) => {
+          setFileQueue((prev) => prev.map((row) => (row.id === item.id ? { ...row, logs: [...(row.logs || []), message] } : row)));
+        },
+        (percent) => updateQueueItem(item.id, { progress: Math.max(35, percent) }),
+      );
 
-    xhr.onload = () => {
-      try {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const payload = JSON.parse(xhr.responseText);
-          if (payload.status === "success" || payload.success === true) {
-            const data = {
-              ...payload.data,
-              originalUrl: `${API_BASE}${payload.data.originalUrl}`,
-              enhancedUrl: `${API_BASE}${payload.data.enhancedUrl}`
-            };
-
-            console.log("[Upload Success] 进度100%完成，物理链路全线贯通:", data);
-            setUploadProgress(100);
-            setImages((prev) =>
-              prev.map((item) =>
-                item.name === shadowFile.name
-                  ? {
-                      ...item,
-                      dimension: `${data.sourceWidth} × ${data.sourceHeight} → ${data.width} × ${data.height}`,
-                      type: data.mode,
-                      status: "ready",
-                      originalUrl: data.originalUrl,
-                      enhancedUrl: data.enhancedUrl
-                    }
-                  : item
-              )
-            );
-            setUploadState({ message: `修复完成：${shadowFile.name}`, error: false });
-            onUploadComplete?.(data);
-            GLOBAL_IS_UPLOADING = false;
-            GLOBAL_UPLOAD_XHR = null;
-            return;
-          }
+      let merged = { ...uploadPayload, ...streamPayload };
+      if (!Object.keys(merged.task_result || {}).length) {
+        try {
+          const statusPayload = await requestJson("GET", `${API_BASE}/api/v1/tasks/${encodeURIComponent(taskId)}`);
+          merged = { ...merged, ...extractTaskPayload(statusPayload) };
+        } catch {
+          merged = { ...merged };
         }
-        throw new Error(`上传响应异常，状态码: ${xhr.status}`);
-      } catch (error) {
-        handleUploadError(shadowFile.name, error.message || "上传响应解析失败。");
       }
-    };
 
-    xhr.onerror = () => handleUploadError(shadowFile.name);
-    xhr.onabort = () => {
-      console.log("[Upload Abort] 重复并发请求已被全局原子锁优雅中断");
-      handleUploadError(shadowFile.name, "上传已中断。");
-    };
-    xhr.send(formData);
+      const taskResult = merged.task_result || {};
+      const taskReport = merged.task_report || {};
+      const finalOutputUrl = normalizeApiUrl(taskResult.final_output_url || merged.final_output_url);
+      const debugQuality = taskResult.debug_quality || merged.debug_quality || {};
+
+      updateQueueItem(item.id, {
+        status: "completed",
+        progress: 100,
+        task_result: taskResult,
+        task_report: taskReport,
+        debug_quality: debugQuality,
+        final_output_url: finalOutputUrl,
+        output_path: taskResult.output_path || "",
+        output_filename: taskResult.output_filename || "",
+        output_dir: taskResult.output_dir || activeOutputDir,
+        input_path: taskResult.input_path || uploadPayload.data?.input_path || "",
+        input_width: taskResult.input_width || uploadPayload.data?.input_width || 0,
+        input_height: taskResult.input_height || uploadPayload.data?.input_height || 0,
+        output_width: taskResult.output_width || taskResult.width || 0,
+        output_height: taskResult.output_height || taskResult.height || 0,
+        resize_policy: taskResult.resize_policy || "",
+        hash_equal: taskResult.hash_equal ?? debugQuality.hash_equal ?? null,
+        pixel_diff_score: taskResult.pixel_diff_score ?? debugQuality.pixel_diff_score ?? null,
+        debug_timing: taskResult.debug_timing || merged.data?.debug_timing || null,
+        error: "",
+      });
+      setNotice(`当前处理：第 ${index + 1} / ${total} 张已完成。`);
+      return true;
+    } catch (error) {
+      updateQueueItem(item.id, {
+        status: "failed",
+        progress: 0,
+        error: error.message,
+        logs: [...(item.logs || []), error.message],
+      });
+      setNotice(`第 ${index + 1} 张处理失败，已自动顺延后续队列：${error.message}`);
+      return false;
+    }
   };
 
-  const handleFiles = (files) => {
-    const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
-    if (!imageFiles.length) {
-      setUploadState({ message: "未检测到可上传的图片文件。", error: true });
+  const handleStartQueue = async () => {
+    if (processingRef.current) return;
+    const runnable = fileQueue.filter((item) => item.status === "queued" || item.status === "failed");
+    if (!runnable.length) {
+      setNotice("队列中没有待处理图片。");
       return;
     }
-    handleFileUpload(imageFiles[0]);
+    processingRef.current = true;
+    setIsProcessingQueue(true);
+    const queueOutputDir = resolveOutputDirForRequest();
+    console.info("[VisualMasterPro output_dir] queue start", {
+      total: runnable.length,
+      output_dir: queueOutputDir,
+      has_output_dir: Boolean(queueOutputDir),
+    });
+    setNotice(`逐张高清处理，共 ${runnable.length} 张。`);
+    let successCount = fileQueue.filter((item) => item.status === "completed").length;
+    let failedCount = 0;
+    for (let index = 0; index < runnable.length; index += 1) {
+      // 串行处理是 V0.4.4 的安全边界，不能改成并发。
+      // eslint-disable-next-line no-await-in-loop
+      const success = await processOneItem(runnable[index], index, runnable.length, queueOutputDir);
+      if (success) successCount += 1;
+      else failedCount += 1;
+    }
+    processingRef.current = false;
+    setIsProcessingQueue(false);
+    setCurrentIndex(0);
+    setActiveScreen("dashboard");
+    setNotice(`全部处理完成：成功 ${successCount} 张，失败 ${failedCount} 张。`);
   };
 
+  const selectForCompare = (item) => {
+    if (!item?.final_output_url) return;
+    setActiveItemId(item.id);
+    setActiveScreen("image_compare");
+  };
+
+  const selectForReport = (item) => {
+    if (!item?.task_report && !item?.debug_quality) return;
+    setActiveItemId(item.id);
+    setActiveScreen("quality_report");
+  };
+
+  if (activeScreen === "task_detail") {
+    return (
+      <TaskDetailPage
+        taskConfig={makeTaskConfig(activeItem)}
+        disableAutoStream
+        logsOverride={activeItem?.logs || []}
+        taskStatusOverride={activeItem?.status === "failed" ? "failed" : activeItem?.status === "completed" ? "completed" : "processing"}
+        progressOverride={activeItem?.progress || 0}
+        onBackToDashboard={() => setActiveScreen("dashboard")}
+        onViewCompare={() => selectForCompare(activeItem)}
+      />
+    );
+  }
+
+  if (activeScreen === "image_compare") {
+    return (
+      <ImageSliderComparePage
+        taskConfig={makeTaskConfig(activeItem)}
+        compareAssets={makeTaskConfig(activeItem)?.compareAssets}
+        onBackToTask={() => setActiveScreen("dashboard")}
+        onViewReport={() => selectForReport(activeItem)}
+      />
+    );
+  }
+
+  if (activeScreen === "quality_report") {
+    return (
+      <QualityReportPage
+        taskConfig={makeTaskConfig(activeItem)}
+        onBackToCompare={() => setActiveScreen("image_compare")}
+        onArchive={() => setActiveScreen("dashboard")}
+      />
+    );
+  }
+
+  const outputLocationLabel = appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
+  const currentOutputDir = appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
+
   return (
-    <section className="relative h-[100dvh] w-screen overflow-hidden flex flex-col p-6 bg-[#090e10] text-slate-100 select-none animate-[fadeInUp_0.6s_ease-out_both] opacity-0 translate-y-2">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_22%_12%,rgba(143,244,255,0.15),transparent_24rem),radial-gradient(circle_at_80%_6%,rgba(183,255,212,0.1),transparent_22rem)]" />
-      <div className="relative z-10 mx-auto flex h-full w-full max-w-7xl flex-col">
-        <header className="flex h-[70px] shrink-0 items-center gap-5">
-          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-glacier/30 bg-glacier/10 text-center">
-            <div>
-              <div className="text-base font-black tracking-[0.14em] text-white">雪原</div>
-              <div className="mt-1 font-display text-[0.48rem] uppercase tracking-[0.28em] text-emerald-500/60">V0.3</div>
-            </div>
+    <section
+      onDragOver={(event) => {
+        event.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setIsDragging(false);
+        addFiles(event.dataTransfer.files);
+      }}
+      style={{ minHeight: "100dvh", backgroundColor: "#060b0c", color: "#f4f7f8", padding: "24px", boxSizing: "border-box", overflow: "hidden" }}
+    >
+      <div style={{ maxWidth: "1360px", height: "calc(100dvh - 48px)", margin: "0 auto", display: "flex", flexDirection: "column", gap: "16px" }}>
+        <header style={{ height: "70px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #263738" }}>
+          <div>
+            <p style={DECOR_LABEL}>Visual Master Pro</p>
+            <h1 style={{ ...TITLE_STYLE, margin: "6px 0 0", fontSize: "28px", letterSpacing: "0.06em" }}>画质核心工作台</h1>
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className={DECOR_LABEL}>Visual Master Pro</p>
-                <h1 className="mt-1 truncate text-3xl font-semibold tracking-[0.08em] text-white">画质核心工作台</h1>
-              </div>
-              <div className="min-w-0 flex-1 px-4">
-                <TopStatusStream runtimeSnapshot={runtimeSnapshot} />
-              </div>
-              <button type="button" onClick={onBackToLaunch} className="shrink-0 rounded-lg border border-white/10 px-4 py-2 text-sm text-white/55 hover:bg-white/5">
-                返回启动页
-              </button>
-            </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <span style={{ width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#6feaf0", boxShadow: "0 0 12px rgba(111,234,240,0.7)" }} />
+            <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>Python Runtime 8787</span>
           </div>
         </header>
 
-        <div className="min-h-0 w-full flex-1 overflow-hidden py-5">
-          <div className="grid h-full w-full grid-cols-1 items-stretch gap-8 lg:grid-cols-3">
-          <div className="flex h-full min-h-0 flex-col gap-4 overflow-hidden">
-            <ImportPanel onFiles={handleFiles} uploadState={uploadState} />
-            <ModePanel activeMode={activeMode} setActiveMode={setActiveMode} />
-          </div>
-
-          <div className="flex h-full min-h-0 flex-col justify-between gap-6 overflow-hidden">
-            <SelectedImageTable images={images} uploadProgress={uploadProgress} />
-          </div>
-
-          <div className="flex h-full min-h-0 flex-col gap-6 overflow-hidden">
-            <PhysicalContractPanel activeMode={activeMode} scale={scale} setScale={setScale} format={format} setFormat={setFormat} />
-            <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-white/10 bg-white/[0.045] p-6">
-              <p className={DECOR_LABEL}>Pipeline</p>
-              <h2 className="mt-3 text-2xl font-semibold text-white">状态映射</h2>
-              <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-                {["图像类型检测", "压缩损伤修复", "文字清晰增强", "真实边缘保护", "色彩锁定", "质量对比"].map((stage, index) => (
-                  <div key={stage} className="flex items-center gap-3 rounded-md border border-white/10 bg-polar-900/70 px-4 py-3">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-glacier/10 text-xs text-glacier">{index + 1}</span>
-                    <span className="text-sm text-white/62">{stage}</span>
-                  </div>
-                ))}
+        <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "0.9fr 1.55fr 0.95fr", gap: "16px", alignItems: "start" }}>
+          <div style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: "16px" }}>
+            <section style={{ ...PANEL_STYLE, padding: "18px", flex: "0 0 auto" }}>
+              <p style={DECOR_LABEL}>Input Field</p>
+              <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>图片导入</h2>
+              <div
+                style={{
+                  marginTop: "16px",
+                  height: "176px",
+                  border: isDragging ? "1px dashed #6feaf0" : "1px dashed #263738",
+                  borderRadius: "8px",
+                  backgroundColor: isDragging ? "#0d181a" : "#05090a",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  textAlign: "center",
+                  padding: "16px",
+                  boxSizing: "border-box",
+                }}
+              >
+                <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleFileChange} style={{ display: "none" }} />
+                <button type="button" onClick={() => fileInputRef.current?.click()} style={{ backgroundColor: "#132f33", border: "1px solid #6feaf0", borderRadius: "6px", color: "#6feaf0", cursor: "pointer", padding: "12px 20px", fontSize: "13px", fontWeight: 700 }}>
+                  选择本地影像资产
+                </button>
+                <p style={{ margin: "14px 0 0", color: fileQueue.length ? "#6feaf0" : "#6e7d80", fontSize: "12px" }}>已选择 {fileQueue.length} 张</p>
+                <p style={{ margin: "8px 0 0", color: "#6e7d80", fontSize: "11px" }}>支持多选和多图拖拽导入</p>
               </div>
-            </div>
+            </section>
+
+            <section style={{ ...PANEL_STYLE, padding: "18px", minHeight: "140px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+              <p style={DECOR_LABEL}>Restoration Modes</p>
+              <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>三种增强模式</h2>
+              <div style={{ marginTop: "16px", display: "flex", gap: "10px" }}>
+                {modeCards.map((mode) => {
+                  const active = activeMode === mode.id;
+                  return (
+                    <button key={mode.id} type="button" onClick={() => setActiveMode(mode.id)} style={{ flex: 1, minWidth: 0, textAlign: "center", background: active ? "#102629" : "#0d181a", border: active ? "1px solid #6feaf0" : "1px solid #263738", color: active ? "#6feaf0" : "#6e7d80", padding: "10px 6px", borderRadius: "4px", fontSize: "11px", cursor: "pointer", transition: "all 0.2s", boxShadow: active ? "0 0 8px rgba(111,234,240,0.15)" : "none" }}>
+                      {mode.title}
+                    </button>
+                  );
+                })}
+              </div>
+              <p style={{ margin: "16px 0 0", color: "#7f8f91", fontSize: "12px", lineHeight: 1.8 }}>{modeCards.find((mode) => mode.id === activeMode)?.desc}</p>
+            </section>
           </div>
+
+          <section style={{ ...PANEL_STYLE, padding: "18px", height: "240px", minHeight: "240px", maxHeight: "240px", boxSizing: "border-box", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+              <div>
+                <p style={DECOR_LABEL}>Queue</p>
+                <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>多图处理队列</h2>
+              </div>
+              <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>{fileQueue.length} 张</span>
+            </div>
+            <div className="custom-scrollbar" style={{ marginTop: "12px", flex: 1, minHeight: 0, maxHeight: "160px", overflowY: "auto", overflowX: "auto", border: "1px solid #263738", borderRadius: "6px", backgroundColor: "#05090a" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "880px", fontSize: "11px" }}>
+                <thead style={{ position: "sticky", top: 0, backgroundColor: "#0d181a", color: "#6e7d80", zIndex: 1 }}>
+                  <tr>
+                    {["文件名", "输入尺寸", "输出尺寸", "处理模式", "输出格式", "当前状态", "输出文件名", "操作"].map((head) => (
+                      <th key={head} style={{ padding: "9px 8px", textAlign: "left", borderBottom: "1px solid #263738", whiteSpace: "nowrap", fontWeight: 500 }}>{head}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {!fileQueue.length ? (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
+                    </tr>
+                  ) : (
+                    fileQueue.map((item) => (
+                      <tr key={item.id} style={{ backgroundColor: activeItemId === item.id ? "#0d181a" : "transparent" }}>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#f4f7f8" }} title={item.name}>{item.name}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.input_width && item.input_height ? `${item.input_width} × ${item.input_height}` : "待识别"}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.mode || activeMode}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{(item.output_format || outputFormat).toUpperCase()}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628" }}><StatusPill status={item.status} /></td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: item.error ? "#ff8a8a" : "#9ba9ab", maxWidth: "190px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.output_filename || item.error}>{item.output_filename || item.error || "等待输出"}</td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", whiteSpace: "nowrap" }}>
+                          <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} style={{ marginRight: "8px", color: "#6feaf0", background: "none", border: 0, cursor: "pointer", fontSize: "11px" }}>定位</button>
+                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} style={{ marginRight: "8px", color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看对比</button>
+                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForReport(item)} style={{ color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看报告</button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <details style={{ marginTop: "10px", color: "#6e7d80", fontSize: "11px" }}>
+              <summary style={{ cursor: "pointer", color: "#6feaf0" }}>Debug Runtime Monitor</summary>
+              <pre style={{ margin: "8px 0 0", maxHeight: "120px", overflow: "auto", backgroundColor: "#040708", border: "1px solid #132628", borderRadius: "4px", padding: "10px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {debugItem ? JSON.stringify({
+                  input_path: debugItem.input_path,
+                  output_path: debugItem.output_path,
+                  hash_equal: debugItem.hash_equal,
+                  pixel_diff_score: debugItem.pixel_diff_score,
+                  debug_timing: debugItem.debug_timing,
+                }, null, 2) : "请选择一张队列图片查看运行时字段。"}
+              </pre>
+            </details>
+          </section>
+
+          <div style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: "16px" }}>
+            <ParameterPanel outputFormat={outputFormat} />
+            <section style={{ ...PANEL_STYLE, padding: "18px", minHeight: "140px", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+              <p style={DECOR_LABEL}>Pipeline</p>
+              <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>状态映射</h2>
+              <div style={{ marginTop: "14px", display: "grid", gap: "5px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "11px", color: "#6e7d80" }}>
+                <div style={{ color: "#8be6b1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>✓ CLIENT ONLINE : http://localhost:5173</div>
+                <div style={{ color: "#8be6b1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>✓ RUNTIME ONLINE : http://localhost:8787</div>
+                <div style={{ color: "#8be6b1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>✓ OUTPUT PROFILE : 高清交付 1080P</div>
+                <div style={{ color: "#8be6b1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>✓ TARGET REZ : 1080P 稳定基线</div>
+                <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>✓ 当前输出：{appliedOutputDir.trim() ? "自定义目录" : "默认输出目录"}</div>
+                <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{completedItems.length ? "✓ final_output_url 已绑定" : "⏳ 质量守门检测流就绪"}</div>
+              </div>
+            </section>
           </div>
         </div>
 
-        <div className="relative z-50 mt-auto flex h-[112px] shrink-0 flex-col items-center justify-between pb-6">
-          <div className="w-full max-w-3xl rounded-lg border border-glacier/20 bg-glacier/10 px-6 py-4 shadow-cinematic">
-            <div className="flex flex-wrap items-center justify-between gap-4">
+        <section style={{ ...PANEL_STYLE, flexShrink: 0, padding: "14px 18px" }}>
+          <div style={{ display: "grid", gap: "10px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
               <div>
-                <p className={DECOR_LABEL}>Execution</p>
-                <p className="mt-2 text-sm leading-6 text-white/55">
-                  当前模式：{activeModeLabel} · {scale}x · {format.toUpperCase()} · 已选择 {images.length} 张
-                </p>
+                <p style={DECOR_LABEL}>OUTPUT DIRECTORY MANAGEMENT</p>
+                <h2 style={{ ...TITLE_STYLE, margin: "5px 0 0", fontSize: "16px", fontWeight: 700 }}>输出文件夹</h2>
               </div>
-              <button
-                type="button"
-                onClick={() =>
-                  onStartTask?.({
-                    mode: activeMode,
-                    scale,
-                    format,
-                    imageCount: images.length,
-                    source: "DashboardPage"
-                  })
-                }
-                className="min-w-[18rem] rounded-lg border border-glacier/50 bg-glacier/20 px-8 py-4 text-sm font-semibold tracking-[0.32em] text-glacier shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] transition hover:bg-glacier/30"
+              <span
+                style={{
+                  border: appliedOutputDir.trim() ? "1px solid #6feaf0" : "1px solid #263738",
+                  backgroundColor: appliedOutputDir.trim() ? "rgba(111,234,240,0.12)" : "#0d181a",
+                  color: appliedOutputDir.trim() ? "#6feaf0" : "#8be6b1",
+                  borderRadius: "999px",
+                  padding: "7px 12px",
+                  fontSize: "12px",
+                  whiteSpace: "nowrap",
+                }}
               >
-                开启核心修复管线
+                {outputLocationLabel}
+              </span>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", gap: "10px", alignItems: "center" }}>
+              <span style={{ color: "#9ba9ab", fontSize: "12px", whiteSpace: "nowrap" }}>当前路径：</span>
+              <div className="custom-scrollbar" style={{ overflowX: "auto", whiteSpace: "nowrap", backgroundColor: "#05090a", border: "1px solid #263738", borderRadius: "6px", padding: "9px 10px", color: "#f4f7f8", fontSize: "12px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+                {currentOutputDir}
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, auto)", gap: "8px", alignItems: "center", justifyContent: "start" }}>
+              <button type="button" onClick={handleSelectOutputDir} style={{ border: "1px solid #6feaf0", backgroundColor: "rgba(111,234,240,0.1)", color: "#6feaf0", borderRadius: "5px", padding: "10px 14px", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 700 }}>
+                更换文件夹
+              </button>
+              <button type="button" onClick={handleOpenOutputDir} style={{ border: "1px solid #263738", backgroundColor: "#0d181a", color: "#9ba9ab", borderRadius: "5px", padding: "9px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                打开输出文件夹
+              </button>
+              <button type="button" onClick={handleResetOutputDir} style={{ border: "1px solid #263738", backgroundColor: "#0d181a", color: "#9ba9ab", borderRadius: "5px", padding: "9px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                恢复默认
               </button>
             </div>
+
+            {outputDirSuccess ? <p style={{ margin: 0, color: "#8be6b1", fontSize: "12px" }}>{outputDirSuccess}</p> : null}
+            {outputDirError ? <p style={{ margin: 0, color: "#ff8a8a", fontSize: "12px" }}>❌ 路径不可用，请检查目录是否存在或权限是否允许写入</p> : null}
           </div>
-          <footer className="text-center font-display text-[0.62rem] tracking-[0.24em] text-white/24">
-            {PAGE_FOOTER}
-          </footer>
-        </div>
+        </section>
+
+        <footer style={{ ...PANEL_STYLE, flexShrink: 0, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "18px" }}>
+          <div style={{ minWidth: 0 }}>
+            <p style={DECOR_LABEL}>Execution</p>
+            <p style={{ margin: "6px 0 0", color: notice.includes("失败") || notice.includes("不是目录") ? "#f0c36f" : "#9ba9ab", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {isProcessingQueue && currentIndex ? `逐张高清处理 · 当前处理：第 ${currentIndex} / ${fileQueue.length} 张 · ` : ""}
+              {notice}
+            </p>
+          </div>
+          <button type="button" onClick={handleStartQueue} disabled={isProcessingQueue} style={{ backgroundColor: fileQueue.length && !isProcessingQueue ? "#132f33" : "#0d181a", border: fileQueue.length && !isProcessingQueue ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: fileQueue.length && !isProcessingQueue ? "#6feaf0" : "#6e7d80", padding: "13px 28px", cursor: isProcessingQueue ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
+            开启核心修复管线
+          </button>
+        </footer>
       </div>
     </section>
   );

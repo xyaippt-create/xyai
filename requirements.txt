@@ -1,5 +1,6 @@
 numpy>=2.0
 opencv-python-headless>=4.10
+Pillow>=10.0
 Flask>=3.0
 Flask-Cors>=4.0
 fastapi>=0.115

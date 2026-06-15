@@ -33,10 +33,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_UPLOAD_DIR = BACKEND_DIR / "backend_uploads"
 DEFAULT_OUTPUT_DIR = BACKEND_DIR / "backend_restored"
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:8787",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:8787",
+    "*",
 ]
 
 RESTORATION_LOGS = [
@@ -120,6 +117,7 @@ def stream_restoration_logs(delay: float = 0.45) -> Generator[str, None, None]:
     for index, message in enumerate(RESTORATION_LOGS, start=1):
         yield format_sse_event(index, message)
         time.sleep(max(0.0, float(delay)))
+    yield "data: [DONE]\n\n"
 
 
 def require_fastapi() -> None:
@@ -149,7 +147,7 @@ def create_app() -> "FastAPI":
     app.add_middleware(
         CORSMiddleware,
         allow_origins=CORS_ALLOWED_ORIGINS,
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -161,7 +159,7 @@ def create_app() -> "FastAPI":
             "data": {
                 "name": APP_NAME,
                 "version": APP_VERSION,
-                "streamEndpoint": "/api/stream",
+                "streamEndpoint": "/api/v1/tasks/task_vmp_v03_core/stream",
                 "restoreEndpoint": "/api/restore",
                 "uploadEndpoint": "/api/upload",
                 "restorator": "OpenCV lightweight fallback",
@@ -170,6 +168,7 @@ def create_app() -> "FastAPI":
         }
 
     @app.get("/api/stream")
+    @app.get("/api/v1/tasks/task_vmp_v03_core/stream")
     async def stream(delay: float = 0.45):
         return StreamingResponse(
             stream_restoration_logs(delay),

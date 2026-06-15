@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import LaunchPage from "./LaunchPage.jsx";
 import DashboardPage from "./DashboardPage.jsx";
 import TaskDetailPage from "./TaskDetailPage.jsx";
-import ImageComparePage from "./ImageComparePage.jsx";
+import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
 
 export default function App() {
@@ -17,7 +17,9 @@ export default function App() {
   };
 
   const handleStartTask = (config) => {
-    setTaskConfig({ ...config, compareAssets });
+    const nextAssets = config?.compareAssets || compareAssets || config;
+    setCompareAssets(nextAssets);
+    setTaskConfig({ ...config, compareAssets: nextAssets });
     setViewState("task_detail");
   };
 
@@ -58,7 +60,7 @@ export default function App() {
   if (viewState === "image_compare") {
     return (
       <main className="min-h-screen bg-polar-950 text-polar-100">
-        <ImageComparePage
+        <ImageSliderComparePage
           taskConfig={taskConfig}
           compareAssets={compareAssets || taskConfig?.compareAssets}
           onBackToTask={() => setViewState("task_detail")}
