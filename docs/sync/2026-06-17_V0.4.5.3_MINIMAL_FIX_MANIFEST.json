@@ -1,0 +1,106 @@
+{
+  "generated_at": "2026-06-17T08:42:32",
+  "version_scope": "V0.4.5.3 minimal pipeline fix",
+  "modified_files": [
+    "backend/v036_output_core.py",
+    "main.py",
+    "tests/diagnostics/test_v0453_api_pipeline.py",
+    "docs/sync/2026-06-17_V0.4.5.3_MINIMAL_FIX_REPORT.md",
+    "docs/sync/2026-06-17_V0.4.5.3_MINIMAL_FIX_MANIFEST.json"
+  ],
+  "modified_functions": {
+    "backend/v036_output_core.py": [
+      "quarantine_formal_output_noise",
+      "safe_copy_final",
+      "process_v036_output"
+    ],
+    "main.py": [
+      "build_web_app.ensure_task_started",
+      "build_web_app.run_task_background",
+      "build_web_app.run_image_pipeline",
+      "build_web_app.stream_task_events",
+      "build_web_app.upload_file"
+    ],
+    "tests/diagnostics/test_v0453_api_pipeline.py": [
+      "run_upload_poll",
+      "run_failed_sse_check"
+    ]
+  },
+  "api_changed": false,
+  "frontend_change_required": false,
+  "core_results": [
+    {
+      "sample": "JPG",
+      "core_direct": "PASS",
+      "last_pipeline_stage": "process_v036_output:completed"
+    },
+    {
+      "sample": "普通PNG",
+      "core_direct": "PASS",
+      "last_pipeline_stage": "process_v036_output:completed"
+    },
+    {
+      "sample": "透明PNG",
+      "core_direct": "PASS",
+      "last_pipeline_stage": "process_v036_output:completed"
+    },
+    {
+      "sample": "中文小字图",
+      "core_direct": "PASS",
+      "last_pipeline_stage": "process_v036_output:completed"
+    }
+  ],
+  "api_results": [
+    {
+      "sample": "JPG",
+      "api_upload": "PASS",
+      "task_poll": "PASS",
+      "sse": "PASS",
+      "sse_reconnect": "PASS",
+      "sse_double_subscribe": "PASS",
+      "final_output_url_check": "PASS",
+      "final_status": "completed",
+      "output_path_exists": true
+    },
+    {
+      "sample": "普通PNG",
+      "api_upload": "PASS",
+      "task_poll": "PASS",
+      "sse": "PASS",
+      "sse_reconnect": "PASS",
+      "sse_double_subscribe": "PASS",
+      "final_output_url_check": "PASS",
+      "final_status": "completed",
+      "output_path_exists": true
+    },
+    {
+      "sample": "透明PNG",
+      "api_upload": "PASS",
+      "task_poll": "PASS",
+      "sse": "PASS",
+      "sse_reconnect": "PASS",
+      "sse_double_subscribe": "PASS",
+      "final_output_url_check": "PASS",
+      "final_status": "completed",
+      "output_path_exists": true
+    },
+    {
+      "sample": "中文小字图",
+      "api_upload": "PASS",
+      "task_poll": "PASS",
+      "sse": "PASS",
+      "sse_reconnect": "PASS",
+      "sse_double_subscribe": "PASS",
+      "final_output_url_check": "PASS",
+      "final_status": "completed",
+      "output_path_exists": true
+    }
+  ],
+  "failure_sse": {
+    "status": "PASS",
+    "done": true,
+    "has_failed_status": true
+  },
+  "blockers": [],
+  "conclusion": "允许开始V0.4.6"
+}

@@ -1,0 +1,120 @@
+{
+  "generated_at": "2026-06-17T14:35:00",
+  "version_scope": "V0.4.6 quality engine phase 1",
+  "baseline": "V0.4.5.3 minimal pipeline fix",
+  "modified_files": [
+    "engine/algorithms/text_clarity.py",
+    "backend/v036_output_core.py",
+    "tests/diagnostics/test_v046_quality_pipeline.py",
+    "docs/09_CODEX_CHANGELOG.md",
+    "docs/03_CURRENT_STATUS_V0.4.5.1.md",
+    "docs/sync/2026-06-17_V0.4.6_QUALITY_ENGINE_REPORT.md",
+    "docs/sync/2026-06-17_V0.4.6_QUALITY_ENGINE_MANIFEST.json"
+  ],
+  "api_changed": false,
+  "frontend_changed": false,
+  "sse_changed": false,
+  "output_dir_changed": false,
+  "final_output_url_changed": false,
+  "implemented": [
+    "micro-stroke text region detection",
+    "text-safe local luminance readability enhancement",
+    "text score calculation using edge, gradient, laplacian and local contrast",
+    "V0.4.6 small text diagnostic fields",
+    "V0.4.6 quality diagnostic script"
+  ],
+  "v046_quality_results": {
+    "all_passed": true,
+    "samples": [
+      {
+        "sample": "JPG",
+        "status": "PASS",
+        "image_type": "text_poster",
+        "quality_1080p_pass": true,
+        "quality_1080p_level": "standard",
+        "text_clarity_score": 46.6452,
+        "small_text_readability_score": 41.1161,
+        "color_fidelity_score": 98.8076
+      },
+      {
+        "sample": "普通PNG",
+        "status": "PASS",
+        "image_type": "product_kv",
+        "quality_1080p_pass": false,
+        "quality_1080p_level": "failed",
+        "text_clarity_score": 29.8266,
+        "small_text_readability_score": 28.1199,
+        "color_fidelity_score": 97.8592
+      },
+      {
+        "sample": "透明PNG",
+        "status": "PASS",
+        "image_type": "product_kv",
+        "quality_1080p_pass": true,
+        "quality_1080p_level": "standard",
+        "text_clarity_score": 39.6729,
+        "small_text_readability_score": 37.4538,
+        "color_fidelity_score": 97.9791
+      },
+      {
+        "sample": "中文小字图",
+        "status": "PASS",
+        "image_type": "text_poster",
+        "quality_1080p_pass": false,
+        "quality_1080p_level": "failed",
+        "text_clarity_score": 28.1225,
+        "small_text_readability_score": 25.3631,
+        "color_fidelity_score": 98.7969
+      }
+    ]
+  },
+  "api_regression": {
+    "status": "PASS",
+    "samples": [
+      {
+        "sample": "JPG",
+        "api_upload": "PASS",
+        "task_poll": "PASS",
+        "sse": "PASS",
+        "sse_reconnect": "PASS",
+        "sse_double_subscribe": "PASS",
+        "final_output_url_check": "PASS"
+      },
+      {
+        "sample": "普通PNG",
+        "api_upload": "PASS",
+        "task_poll": "PASS",
+        "sse": "PASS",
+        "sse_reconnect": "PASS",
+        "sse_double_subscribe": "PASS",
+        "final_output_url_check": "PASS"
+      },
+      {
+        "sample": "透明PNG",
+        "api_upload": "PASS",
+        "task_poll": "PASS",
+        "sse": "PASS",
+        "sse_reconnect": "PASS",
+        "sse_double_subscribe": "PASS",
+        "final_output_url_check": "PASS"
+      },
+      {
+        "sample": "中文小字图",
+        "api_upload": "PASS",
+        "task_poll": "PASS",
+        "sse": "PASS",
+        "sse_reconnect": "PASS",
+        "sse_double_subscribe": "PASS",
+        "final_output_url_check": "PASS"
+      }
+    ],
+    "failure_sse": "PASS"
+  },
+  "known_unresolved": [
+    "ordinary PNG still fails 1080P quality gate",
+    "small Chinese text sample still fails full 1080P quality gate",
+    "file size ratio remains high on small low-resolution source samples",
+    "core numbered docs are still incomplete"
+  ],
+  "decision": "V0.4.6 phase 1 implemented and verified; V0.4.6 is not complete"
+}

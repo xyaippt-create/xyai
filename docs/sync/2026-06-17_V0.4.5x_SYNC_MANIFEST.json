@@ -1,0 +1,349 @@
+{
+  "project": "VisualMasterPro",
+  "product_name": "影界 / VisualMasterPro",
+  "audit_date": "2026-06-17",
+  "workspace": "D:\\Codex\\04_Visual-Master-Pro",
+  "current_branch": "main",
+  "remote": "https://github.com/xyaippt-create/xyai.git",
+  "head_commit": {
+    "hash": "780d49b",
+    "message": "V0.4.5.3 stable output folder native picker and output_dir pipeline"
+  },
+  "working_tree": {
+    "clean": false,
+    "modified_files": [
+      "AGENTS.md"
+    ],
+    "untracked_files": []
+  },
+  "git_recent_commits": [
+    "780d49b V0.4.5.3 stable output folder native picker and output_dir pipeline",
+    "86c5bbc V0.3 complete local web pipeline integration",
+    "a97750a Sync VisualMasterPro frontend backend integration",
+    "83b1d94 Backup VisualMasterPro V0.3 quality core and Gemini spec pack",
+    "bf079bb V3.6 TEST - Single Delivery Output + Mode Pipeline System"
+  ],
+  "git_tags": [],
+  "detected_versions": [
+    {
+      "source": "Git HEAD",
+      "version": "V0.4.5.3",
+      "evidence": "git log -1 --oneline",
+      "truth_weight": "current_commit_baseline"
+    },
+    {
+      "source": "AGENTS.md",
+      "version": "V0.4.5.1",
+      "evidence": "AGENTS.md:17",
+      "truth_weight": "current_work_boundary"
+    },
+    {
+      "source": "main.py",
+      "version": "V0.4",
+      "evidence": "main.py:783, main.py:1218",
+      "truth_weight": "active_backend_code_label"
+    },
+    {
+      "source": "package.json",
+      "version": "0.3.0",
+      "evidence": "package.json:4",
+      "truth_weight": "stale_frontend_package_version"
+    },
+    {
+      "source": "runtime/system_info.py",
+      "version": "VisualMasterPro V0.3",
+      "evidence": "runtime/system_info.py:9",
+      "truth_weight": "stale_runtime_label"
+    }
+  ],
+  "tech_stack": {
+    "frontend": [
+      "React 18",
+      "Vite 5",
+      "Tailwind CSS 3",
+      "JavaScript/JSX"
+    ],
+    "backend": [
+      "Python",
+      "FastAPI",
+      "Uvicorn"
+    ],
+    "image_processing": [
+      "OpenCV",
+      "NumPy",
+      "Pillow"
+    ]
+  },
+  "environment_checks": [
+    {
+      "command": "node --version",
+      "result": "v24.16.0",
+      "passed": true
+    },
+    {
+      "command": "npm.cmd --version",
+      "result": "11.13.0",
+      "passed": true
+    },
+    {
+      "command": "python --version",
+      "result": "python not found in current PowerShell PATH",
+      "passed": false
+    },
+    {
+      "command": "py --version",
+      "result": "No installed Python found",
+      "passed": false
+    },
+    {
+      "command": "npm --version",
+      "result": "PowerShell execution policy blocks npm.ps1",
+      "passed": false
+    },
+    {
+      "command": "npm run build",
+      "result": "not run because it would modify dist under this sync-only boundary",
+      "passed": null
+    },
+    {
+      "command": "python -m compileall",
+      "result": "not run because Python is unavailable and compileall would write __pycache__",
+      "passed": null
+    }
+  ],
+  "confirmed_features": [
+    {
+      "name": "React/Vite frontend structure",
+      "evidence": "package.json, src/main.jsx, src/App.jsx"
+    },
+    {
+      "name": "FastAPI backend route definitions",
+      "evidence": "main.py build_web_app routes"
+    },
+    {
+      "name": "XHR upload code path",
+      "evidence": "src/DashboardPage.jsx uploadFileWithXhr"
+    },
+    {
+      "name": "SSE EventSource code path",
+      "evidence": "src/DashboardPage.jsx streamTask"
+    },
+    {
+      "name": "multi-image fileQueue state",
+      "evidence": "src/DashboardPage.jsx fileQueue"
+    },
+    {
+      "name": "output_dir form field support",
+      "evidence": "src/DashboardPage.jsx FormData output_dir and main.py upload_file output_dir Form"
+    },
+    {
+      "name": "native output folder select endpoint",
+      "evidence": "main.py /api/output/select-popup"
+    },
+    {
+      "name": "1080P planning code",
+      "evidence": "backend/v036_output_core.py target_size"
+    },
+    {
+      "name": "compression gate code",
+      "evidence": "backend/v036_output_core.py compression_gate"
+    },
+    {
+      "name": "metadata writing code",
+      "evidence": "backend/v036_output_core.py write_delivery_metadata"
+    }
+  ],
+  "implemented_not_verified": [
+    "single-image upload runtime behavior",
+    "multi-image serial processing runtime behavior",
+    "SSE runtime streaming",
+    "custom output_dir real landing",
+    "final_output_url browser preview",
+    "JPG metadata visible in Windows file properties",
+    "PNG metadata readable by tool",
+    "WebP output",
+    "real 1080P quality improvement",
+    "bad image failure recovery"
+  ],
+  "planned_features": [
+    "V0.4.6 1080P+ small text readability",
+    "text clean zone enhancement",
+    "manual color distortion restore mode",
+    "diagnostic package export",
+    "dual-layer quality report"
+  ],
+  "api_routes": [
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "handler": "health",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "POST",
+      "path": "/api/upload",
+      "handler": "upload_file",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "GET",
+      "path": "/api/stream",
+      "handler": "stream_latest",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tasks/{task_id}/stream",
+      "handler": "stream",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/tasks/{task_id}",
+      "handler": "task_status",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "GET",
+      "path": "/api/file/{kind}/{filename:path}",
+      "handler": "serve_file",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "POST",
+      "path": "/api/output/validate",
+      "handler": "validate_output",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "POST",
+      "path": "/api/output/apply",
+      "handler": "apply_output",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "POST",
+      "path": "/api/output/select-popup",
+      "handler": "select_output_popup",
+      "status": "implemented_not_verified"
+    },
+    {
+      "method": "POST",
+      "path": "/api/output/open",
+      "handler": "open_output",
+      "status": "implemented_not_verified"
+    }
+  ],
+  "pipeline_stages": [
+    "load_image_with_alpha",
+    "estimate_text_density",
+    "classify_image_type",
+    "target_size",
+    "compress_clipped_highlights",
+    "light_clean",
+    "mid_frequency_detail",
+    "enhance_true_edges",
+    "enhance_text_regions",
+    "protect_highlights",
+    "lock_color_to_reference",
+    "encode_image main png",
+    "encode_image optimized candidate",
+    "quality_metrics",
+    "compression_gate",
+    "safe_copy_final",
+    "write_delivery_metadata"
+  ],
+  "tests": [
+    "test_backend_server.py",
+    "test_batch_processor.py",
+    "test_fidelity_enhancement.py",
+    "test_gui_startup.py",
+    "test_quality_core.py",
+    "test_runtime_startup.py",
+    "test_text_clarity.py"
+  ],
+  "known_issues": [
+    {
+      "id": "I-001",
+      "severity": "High",
+      "title": "version labels conflict across Git, AGENTS, main.py, src, package.json, runtime and README"
+    },
+    {
+      "id": "I-002",
+      "severity": "High",
+      "title": "working tree is not clean; AGENTS.md is modified"
+    },
+    {
+      "id": "I-003",
+      "severity": "Blocker",
+      "title": "Python is unavailable in current PowerShell PATH"
+    },
+    {
+      "id": "I-004",
+      "severity": "Medium",
+      "title": "npm.ps1 is blocked by PowerShell execution policy; npm.cmd works"
+    },
+    {
+      "id": "I-005",
+      "severity": "Medium",
+      "title": "main.py contains duplicate build_web_app definitions"
+    },
+    {
+      "id": "I-006",
+      "severity": "Medium",
+      "title": "V0.4.5.3 backup report conflicts with current Git HEAD"
+    },
+    {
+      "id": "I-007",
+      "severity": "High",
+      "title": "core documentation files required by AGENTS are missing"
+    },
+    {
+      "id": "I-008",
+      "severity": "Medium",
+      "title": "21:9 output rule differs from earlier roadmap"
+    },
+    {
+      "id": "I-009",
+      "severity": "Medium",
+      "title": "WebP support exists in code but is not consistently exposed"
+    },
+    {
+      "id": "I-010",
+      "severity": "High",
+      "title": "Chinese encoding/mojibake risk exists in AGENTS, old docs and some source strings"
+    }
+  ],
+  "conflicts": [
+    "Git HEAD V0.4.5.3 versus AGENTS.md V0.4.5.1",
+    "package.json/runtime/README still V0.3",
+    "main.py active app says V0.4 while old app also says V0.3",
+    "docs/file_management_rules old output structure versus current custom output_dir/final root behavior",
+    "project_structure.md old V2/V3 description versus current React/FastAPI mainline",
+    "V0.4.5.3 backup report says backup failed while Git HEAD is now V0.4.5.3"
+  ],
+  "missing_documents": [
+    "docs/00_PROJECT_CONTEXT.md",
+    "docs/03_CURRENT_STATUS_V0.4.5.1.md",
+    "docs/04_ARCHITECTURE.md",
+    "docs/05_API_REFERENCE.md",
+    "docs/07_TEST_STANDARD.md",
+    "docs/08_KNOWN_ISSUES.md",
+    "docs/09_CODEX_CHANGELOG.md",
+    "docs/migration/"
+  ],
+  "v05_entry_decision": "暂不允许进入V0.5",
+  "blocker_count": 1,
+  "blockers": [
+    "Python is unavailable in current PowerShell PATH, so backend startup, /api/health, compileall and real image processing cannot be verified in this turn."
+  ],
+  "needs_user_data": [
+    "working Python environment or virtual environment path",
+    "real JPG and PNG test images",
+    "custom output_dir runtime verification",
+    "final_output_url browser preview verification",
+    "Windows file properties screenshot for JPG metadata",
+    "PNG metadata readback via Pillow or ExifTool",
+    "npm.cmd run build result if user permits dist update"
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "project": "影界 / VisualMasterPro",
+  "version_scope": "V0.4.5.3 baseline diagnosis",
+  "date": "2026-06-17",
+  "workspace": "D:\\Codex\\04_Visual-Master-Pro",
+  "status": "FAIL",
+  "can_start_v046_quality_work": false,
+  "diagnostic_scripts": [
+    "tests/diagnostics/test_v0453_core_pipeline.py",
+    "tests/diagnostics/test_v0453_api_pipeline.py"
+  ],
+  "diagnostic_outputs": [
+    "tests/diagnostics/v0453_core_pipeline_results.json",
+    "tests/diagnostics/v0453_api_pipeline_results.json"
+  ],
+  "matrix": [
+    {
+      "sample": "JPG",
+      "core_direct": "FAIL",
+      "api_upload": "PASS",
+      "task_poll": "TIMEOUT",
+      "sse": "NOT_TESTED",
+      "output_file": "FAIL",
+      "conclusion": "process_v036_output fails at final_path.stat with FileNotFoundError; API registers task but task remains pending without SSE."
+    },
+    {
+      "sample": "普通PNG",
+      "core_direct": "PASS",
+      "api_upload": "PASS",
+      "task_poll": "TIMEOUT",
+      "sse": "NOT_TESTED",
+      "output_file": "PASS",
+      "conclusion": "Core output succeeds; API upload registers task; task remains pending without SSE."
+    },
+    {
+      "sample": "透明PNG",
+      "core_direct": "PASS",
+      "api_upload": "PASS",
+      "task_poll": "TIMEOUT",
+      "sse": "NOT_TESTED",
+      "output_file": "PASS",
+      "conclusion": "Core alpha output succeeds; API upload registers task; task remains pending without SSE."
+    },
+    {
+      "sample": "中文小字图",
+      "core_direct": "PASS",
+      "api_upload": "PASS",
+      "task_poll": "TIMEOUT",
+      "sse": "NOT_TESTED",
+      "output_file": "PASS",
+      "conclusion": "Core output succeeds but text scores are low; API upload registers task; task remains pending without SSE."
+    }
+  ],
+  "findings": {
+    "image_core_stable": false,
+    "first_failed_sample": "JPG",
+    "api_upload_stable": true,
+    "task_status_can_finish_without_sse": false,
+    "sse_infinite_wait_detected": "NOT_TESTED",
+    "backend_process_crash_confirmed": false,
+    "problem_layer": [
+      "backend/v036_output_core.py final output path handling for JPG",
+      "main.py task lifecycle: processing is triggered from SSE instead of upload/background worker"
+    ]
+  },
+  "evidence": {
+    "jpg_core_exception": {
+      "type": "FileNotFoundError",
+      "location": "backend/v036_output_core.py:1120",
+      "operation": "final_path.stat().st_size"
+    },
+    "api_upload": {
+      "http_status": 200,
+      "taskId_returned": true,
+      "streamEndpoint_returned": true,
+      "health_after_upload": true
+    },
+    "task_poll": {
+      "poll_timeout_sec": 12,
+      "observed_status": "pending",
+      "samples_affected": [
+        "JPG",
+        "普通PNG",
+        "透明PNG",
+        "中文小字图"
+      ]
+    }
+  },
+  "minimal_fix_scope": [
+    "Fix final_path/final_source suffix consistency in process_v036_output or make safe_copy_final return the actual final path.",
+    "Decouple task processing from SSE or explicitly start the worker after upload; keep API protocol unchanged.",
+    "After the two fixes, run SSE success/failure termination diagnostics before V0.4.6 quality work."
+  ],
+  "must_not_change": [
+    "image enhancement parameters",
+    "output size rules",
+    "frontend pages",
+    "API field contract",
+    "version number",
+    "V0.4.6 image quality features"
+  ]
+}

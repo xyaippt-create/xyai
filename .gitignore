@@ -58,6 +58,12 @@ dist/
 输出成品/
 runtime/test/
 runtime/v*/
+runtime/baseline_validation_*/
+runtime/diagnostics/
 runtime/work/
 runtime/*.json
 settings/settings.json
+
+# Diagnostic generated images
+tests/diagnostics/output/
+tests/results/

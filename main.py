@@ -778,6 +778,7 @@ def build_web_app():
     task_registry: dict[str, dict] = {}
     upload_file_index: dict[str, Path] = {}
     output_file_index: dict[str, Path] = {}
+    background_tasks: dict[str, asyncio.Task] = {}
     latest_task_id = {"value": None}
 
     app = FastAPI(title="VisualMasterPro / Yingjie V0.4 API", version="V0.4")
@@ -1066,7 +1067,31 @@ def build_web_app():
             raise HTTPException(status_code=404, detail="文件不存在。")
         return target
 
+    async def run_task_background(task_id: str) -> None:
+        task = task_registry.get(task_id)
+        if not task:
+            return
+        if task.get("task_status") in {"processing", "completed", "failed"}:
+            return
+        await asyncio.to_thread(run_image_pipeline, task)
+
+    def ensure_task_started(task: dict) -> None:
+        task_id = task.get("task_id")
+        if not task_id:
+            return
+        if task.get("task_status") in {"processing", "completed", "failed"}:
+            return
+        existing = background_tasks.get(task_id)
+        if existing and not existing.done():
+            return
+        task["execution_started"] = True
+        background_tasks[task_id] = asyncio.create_task(run_task_background(task_id))
+
     def run_image_pipeline(task: dict) -> dict:
+        if task.get("execution_state") in {"processing", "completed", "failed"}:
+            return task
+        task["execution_started"] = True
+        task["execution_state"] = "processing"
         task["task_status"] = "processing"
         task["status"] = "processing"
         task["task_progress"] = max(int(task.get("task_progress") or 0), 10)
@@ -1088,6 +1113,7 @@ def build_web_app():
                 {
                     "task_status": "completed",
                     "status": "completed",
+                    "execution_state": "completed",
                     "task_progress": 100,
                     "completed_at": datetime.now().isoformat(timespec="seconds"),
                     "output_path": final_path,
@@ -1123,8 +1149,11 @@ def build_web_app():
                 {
                     "task_status": "failed",
                     "status": "failed",
-                    "task_progress": task.get("task_progress") or 0,
+                    "execution_state": "failed",
+                    "task_progress": 100,
                     "error_message": str(exc),
+                    "task_error": str(exc),
+                    "task_report": task.get("task_report") or empty_task_report(),
                     "completed_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
@@ -1156,14 +1185,11 @@ def build_web_app():
             "1080P 输出完成：task_result 与 task_report 已生成",
         ]
         total = len(stage_logs)
-        worker = None
-        if task.get("task_status") in {"pending", "ready"}:
-            worker = asyncio.create_task(asyncio.to_thread(run_image_pipeline, task))
-
         for index, message in enumerate(stage_logs, start=1):
             if index > 1:
                 await asyncio.sleep(max(0.0, float(delay)))
-            task["task_progress"] = min(99, int(round((index / total) * 100)))
+            if task.get("task_status") not in {"completed", "failed"}:
+                task["task_progress"] = min(99, int(round((index / total) * 100)))
             extra = {
                 "task_id": task.get("task_id"),
                 "task_status": task.get("task_status"),
@@ -1180,8 +1206,22 @@ def build_web_app():
                 extra=extra,
             )
 
-        if worker:
-            await worker
+        deadline = time.perf_counter() + 180.0
+        while task.get("task_status") not in {"completed", "failed"} and time.perf_counter() < deadline:
+            await asyncio.sleep(0.25)
+        if task.get("task_status") not in {"completed", "failed"}:
+            task.update(
+                {
+                    "task_status": "failed",
+                    "status": "failed",
+                    "execution_state": "failed",
+                    "task_progress": 100,
+                    "error_message": "任务处理超时，SSE 已安全结束。",
+                    "task_error": "任务处理超时，SSE 已安全结束。",
+                    "task_report": task.get("task_report") or empty_task_report(),
+                    "completed_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
 
         final_payload = public_task(task)
         if task.get("task_status") == "failed":
@@ -1485,6 +1525,7 @@ def build_web_app():
         latest_task_id["value"] = task_id
         upload_file_index[saved_path.name] = saved_path
         output_file_index[expected_output_path.name] = expected_output_path
+        ensure_task_started(task)
 
         data = public_task(task)
         return {

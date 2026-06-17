@@ -387,10 +387,16 @@ def output_dirs(output_root: Path) -> dict[str, Path]:
     }
 
 
-def quarantine_formal_output_noise(formal_dir: Path, test_archive_dir: Path, work_dir: Path) -> list[dict[str, str]]:
+def quarantine_formal_output_noise(
+    formal_dir: Path,
+    test_archive_dir: Path,
+    work_dir: Path,
+    protected_paths: set[Path] | None = None,
+) -> list[dict[str, str]]:
     moved: list[dict[str, str]] = []
     if not formal_dir.exists():
         return moved
+    protected = {path.resolve() for path in (protected_paths or set())}
     test_archive_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     for path in formal_dir.iterdir():
@@ -414,6 +420,13 @@ def quarantine_formal_output_noise(formal_dir: Path, test_archive_dir: Path, wor
             moved.append({"from": str(path), "to": str(target)})
             continue
         if not path.is_file():
+            continue
+        try:
+            if path.resolve() in protected:
+                continue
+        except OSError:
+            pass
+        if "_影界高清_1080p_" in lower:
             continue
         if any(marker in lower for marker in FORMAL_NOISE_MARKERS):
             target_dir = test_archive_dir if any(marker in lower for marker in ("async_test", "smoke_test", "demo_test", "vmp_async_test")) else work_dir
@@ -525,9 +538,11 @@ def mid_frequency_detail(image: np.ndarray, strength: float) -> np.ndarray:
     return cv2.cvtColor(lab.astype("uint8"), cv2.COLOR_LAB2BGR)
 
 
-def light_clean(image: np.ndarray, profile: str, image_type: str) -> np.ndarray:
+def light_clean(image: np.ndarray, profile: str, image_type: str, mode: str = "fidelity") -> np.ndarray:
     if profile == "preview_light":
         return cv2.bilateralFilter(image, 3, 5, 5)
+    if mode == "text_safe":
+        return cv2.bilateralFilter(image, 3, 3, 3)
     if image_type in {"portrait", "mixed"}:
         cleaned = cv2.bilateralFilter(image, 3, 4, 4)
         return cv2.fastNlMeansDenoisingColored(cleaned, None, 0.45, 0.45, 7, 15)
@@ -545,11 +560,12 @@ def enhance_fidelity(
 ) -> np.ndarray:
     reference = resize_keep_ratio(image, target_width, target_height)
     result = compress_clipped_highlights(reference, amount=0.04)
-    result = light_clean(result, profile, image_type)
+    result = light_clean(result, profile, image_type, mode)
 
     mid_strength = 0.11 if profile == "preview_light" else 0.18
     edge_strength = 0.13 if profile == "preview_light" else 0.22
     text_strength = 0.18 if profile == "preview_light" else 0.30
+    text_intensive = mode == "text_safe"
     if image_type == "portrait":
         mid_strength += 0.02
         edge_strength -= 0.02
@@ -566,15 +582,19 @@ def enhance_fidelity(
         mid_strength += 0.03
         edge_strength += 0.02
     if mode == "text_safe":
+        mid_strength += 0.02
+        edge_strength += 0.01
         text_strength += 0.06
     if mode == "texture":
         mid_strength += 0.05
         edge_strength += 0.01
         text_strength -= 0.03
 
+    if text_intensive:
+        result = enhance_text_regions(result, strength=min(text_strength * 0.72, 0.38))
     result = mid_frequency_detail(result, strength=mid_strength)
-    result = enhance_true_edges(result, strength=max(0.08, min(edge_strength, 0.30)))
-    result = enhance_text_regions(result, strength=min(text_strength, 0.42))
+    result = enhance_true_edges(result, strength=max(0.08, min(edge_strength, 0.28 if text_intensive else 0.30)))
+    result = enhance_text_regions(result, strength=min(text_strength, 0.52 if text_intensive else 0.42))
     result = protect_highlights(reference, result, strength=0.92)
     return lock_color_to_reference(reference, result, chroma_strength=0.985, luma_strength=0.045)
 
@@ -625,7 +645,7 @@ def write_encoded(path: Path, encoded: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
-def safe_copy_final(source: Path, final_path: Path) -> None:
+def safe_copy_final(source: Path, final_path: Path) -> Path:
     final_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = final_path.with_name(f"{final_path.stem}_tmp{final_path.suffix}")
     counter = 1
@@ -639,6 +659,7 @@ def safe_copy_final(source: Path, final_path: Path) -> None:
         if final_path.exists():
             final_path.unlink()
         temp_path.replace(final_path)
+    return final_path
 
 
 def decode_encoded(encoded: np.ndarray) -> np.ndarray:
@@ -665,10 +686,23 @@ def text_score(image: np.ndarray) -> float:
         mask = detect_text_like_regions(image)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 60, 160)
-        area = mask > 0.18
-        if np.mean(area) < 0.001:
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        magnitude = cv2.magnitude(grad_x, grad_y)
+        lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F))
+        local = cv2.blur(gray.astype("float32"), (7, 7))
+        local_contrast = np.abs(gray.astype("float32") - local)
+        area = mask > 0.12
+        if np.mean(area) < 0.0005:
             return laplacian_score(image)
-        return float(np.mean(edges[area])) * 4.0
+        edge_signal = float(np.mean(edges[area])) * 1.35
+        gradient_signal = float(np.mean(magnitude[area])) * 0.62
+        lap_signal = float(np.mean(lap[area])) * 0.18
+        contrast_signal = float(np.mean(local_contrast[area])) * 1.45
+        score = max(edge_signal, gradient_signal + lap_signal + contrast_signal)
+        if score <= 0.01:
+            return laplacian_score(image)
+        return score
     except Exception:
         return laplacian_score(image)
 
@@ -749,6 +783,10 @@ def quality_metrics(before_image: np.ndarray, after_image: np.ndarray, text_dens
     if before_image.shape[:2] != after_image.shape[:2]:
         before_resized = cv2.resize(before_image, (after_image.shape[1], after_image.shape[0]), interpolation=cv2.INTER_CUBIC)
 
+    before_text_mask = detect_text_like_regions(before_resized)
+    after_text_mask = detect_text_like_regions(after_image)
+    before_text_region_density = float(np.mean(before_text_mask > 0.12))
+    after_text_region_density = float(np.mean(after_text_mask > 0.12))
     before_clarity_raw = laplacian_score(before_resized)
     after_clarity_raw = laplacian_score(after_image)
     before_text_raw = text_score(before_resized)
@@ -823,6 +861,9 @@ def quality_metrics(before_image: np.ndarray, after_image: np.ndarray, text_dens
         "fabric_texture_gain": fabric_gain,
         "text_edge_clean_score": text_edge_clean_score,
         "small_text_readability_score": small_text_readability_score,
+        "before_text_region_density": round(before_text_region_density, 6),
+        "after_text_region_density": round(after_text_region_density, 6),
+        "text_region_density_delta": round(after_text_region_density - before_text_region_density, 6),
         "dark_detail_score": after_dark,
         "dark_detail_gain": dark_gain,
         "over_smoothing_risk": over_smoothing_risk,
@@ -1081,6 +1122,7 @@ def process_v036_output(
     start = time.perf_counter()
     enhanced = enhance_fidelity(source_image, plan["output_width"], plan["output_height"], profile, mode, image_type)
     timings["enhance_time"] = round(time.perf_counter() - start, 6)
+    v046_text_engine_active = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or plan["text_density"] >= 0.015)
 
     start = time.perf_counter()
     main_encoded, _ = encode_image(enhanced, "png", role="main", profile=profile, alpha=target_alpha)
@@ -1113,8 +1155,9 @@ def process_v036_output(
     if final_path.suffix.lower() != final_source.suffix.lower():
         final_path = final_path.with_suffix(final_source.suffix)
         paths["final"] = final_path
-    safe_copy_final(final_source, final_path)
-    quarantine_formal_output_noise(dirs["formal"], dirs["test_archive"], dirs["work"])
+    final_path = safe_copy_final(final_source, final_path)
+    paths["final"] = final_path
+    quarantine_formal_output_noise(dirs["formal"], dirs["test_archive"], dirs["work"], protected_paths={final_path})
     delivery_package = write_delivery_metadata(final_path)
 
     final_size = final_path.stat().st_size
@@ -1214,6 +1257,11 @@ def process_v036_output(
         "fabric_texture_gain": main_metrics["fabric_texture_gain"],
         "text_edge_clean_score": main_metrics["text_edge_clean_score"],
         "small_text_readability_score": main_metrics["small_text_readability_score"],
+        "before_text_region_density": main_metrics["before_text_region_density"],
+        "after_text_region_density": main_metrics["after_text_region_density"],
+        "text_region_density_delta": main_metrics["text_region_density_delta"],
+        "v046_text_engine_active": v046_text_engine_active,
+        "v046_quality_profile": "1080P+ small text readability",
         "dark_detail_score": main_metrics["dark_detail_score"],
         "dark_detail_gain": main_metrics["dark_detail_gain"],
         "over_smoothing_risk": main_metrics["over_smoothing_risk"],
@@ -1253,6 +1301,9 @@ def process_v036_output(
         ),
         "pseudo_hd_risk": main_metrics["pseudo_hd_risk"],
         "artifact_risk": main_metrics["artifact_risk"],
+        "small_text_readability_score": main_metrics["small_text_readability_score"],
+        "text_edge_clean_score": main_metrics["text_edge_clean_score"],
+        "v046_text_engine_active": v046_text_engine_active,
         "encoding_warning": encoding_warning,
         "delivery_score": main_metrics["visual_score"],
         "warnings": warnings,
@@ -1364,6 +1415,8 @@ def process_v036_output(
             "fabric_texture_gain": main_metrics["fabric_texture_gain"],
             "text_edge_clean_score": main_metrics["text_edge_clean_score"],
             "small_text_readability_score": main_metrics["small_text_readability_score"],
+            "v046_text_engine_active": v046_text_engine_active,
+            "v046_quality_profile": "1080P+ small text readability",
             "dark_detail_score": main_metrics["dark_detail_score"],
             "dark_detail_gain": main_metrics["dark_detail_gain"],
             "over_smoothing_risk": main_metrics["over_smoothing_risk"],

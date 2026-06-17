@@ -16,7 +16,17 @@ def detect_text_like_regions(image):
 
     adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 17, 8)
     _, edge_binary = cv2.threshold(mag_u8, max(28, int(np.percentile(mag_u8, 72))), 255, cv2.THRESH_BINARY)
-    stroke = cv2.bitwise_or(adaptive, edge_binary)
+    micro_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, micro_kernel)
+    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, micro_kernel)
+    micro_contrast = cv2.max(blackhat, tophat)
+    _, micro_binary = cv2.threshold(
+        micro_contrast,
+        max(5, int(np.percentile(micro_contrast, 84))),
+        255,
+        cv2.THRESH_BINARY,
+    )
+    stroke = cv2.bitwise_or(cv2.bitwise_or(adaptive, edge_binary), micro_binary)
 
     horizontal = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 2)), iterations=1)
     vertical = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 7)), iterations=1)
@@ -41,27 +51,36 @@ def detect_text_like_regions(image):
         if looks_like_line:
             filtered[y : y + height, x : x + width] = 255
 
-    if not np.any(filtered):
-        fallback = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2)), iterations=1)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fallback, 8)
-        for label in range(1, num_labels):
-            x = int(stats[label, cv2.CC_STAT_LEFT])
-            y = int(stats[label, cv2.CC_STAT_TOP])
-            width = int(stats[label, cv2.CC_STAT_WIDTH])
-            height = int(stats[label, cv2.CC_STAT_HEIGHT])
-            area = int(stats[label, cv2.CC_STAT_AREA])
-            if 4 <= area <= image_area * 0.05 and 2 <= height <= max(64, gray.shape[0] // 3) and width >= 2:
-                filtered[y : y + height, x : x + width] = 255
+    fallback = cv2.morphologyEx(stroke, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2)), iterations=1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fallback, 8)
+    for label in range(1, num_labels):
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 3 or area > image_area * 0.08:
+            continue
+        fill = area / max(width * height, 1)
+        small_stroke = (
+            2 <= height <= max(72, gray.shape[0] // 3)
+            and 2 <= width <= max(180, gray.shape[1] // 2)
+            and 0.04 <= fill <= 0.86
+        )
+        if small_stroke:
+            filtered[y : y + height, x : x + width] = 255
 
     protected = cv2.bitwise_not(highlight_mask(image, value_threshold=218))
     filtered = cv2.bitwise_and(filtered, protected)
     filtered = cv2.morphologyEx(filtered, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)))
+    if float(np.mean(filtered > 0)) > 0.42:
+        filtered = cv2.bitwise_and(filtered, edge_binary)
     return cv2.GaussianBlur(filtered, (0, 0), 0.75).astype("float32") / 255.0
 
 
 def enhance_text_regions(image, strength: float = 0.42):
     """Improve small-text legibility locally while preserving text color."""
-    strength = float(np.clip(strength, 0.0, 0.75))
+    strength = float(np.clip(strength, 0.0, 0.82))
     mask = detect_text_like_regions(image)[:, :, None]
     if float(mask.max()) <= 0:
         return image
@@ -70,9 +89,11 @@ def enhance_text_regions(image, strength: float = 0.42):
     l = lab[:, :, 0]
     blur = cv2.GaussianBlur(l, (0, 0), 0.62)
     detail = l - blur
-    detail = np.sign(detail) * np.minimum(np.maximum(np.abs(detail) - 0.8, 0.0), 12.0)
+    detail = np.sign(detail) * np.minimum(np.maximum(np.abs(detail) - 0.55, 0.0), 10.5)
     local_mean = cv2.blur(l, (9, 9))
-    contrast = (l - local_mean) * 0.11
-    enhanced_l = l + detail * strength + contrast * strength
-    lab[:, :, 0] = l * (1.0 - mask[:, :, 0] * 0.72) + enhanced_l * (mask[:, :, 0] * 0.72)
+    contrast = (l - local_mean) * 0.12
+    polarity = np.sign(l - local_mean) * np.minimum(np.abs(l - local_mean) * 0.045, 2.0)
+    enhanced_l = l + detail * strength + contrast * strength + polarity * strength
+    blend = mask[:, :, 0] * 0.68
+    lab[:, :, 0] = l * (1.0 - blend) + enhanced_l * blend
     return cv2.cvtColor(np.clip(lab, 0, 255).astype("uint8"), cv2.COLOR_LAB2BGR)

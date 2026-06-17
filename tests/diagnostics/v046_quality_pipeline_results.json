@@ -1,0 +1,153 @@
+{
+  "script": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\test_v046_quality_pipeline.py",
+  "project_root": "D:\\Codex\\04_Visual-Master-Pro",
+  "started_at": 1781678033.240981,
+  "duration_sec": 7.629529,
+  "all_passed": true,
+  "results": [
+    {
+      "sample": "JPG",
+      "input_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\outputs\\v036_api_validation\\output\\images\\case_original_jpg_vmp_v036_optimized.jpg",
+      "status": "PASS",
+      "duration_sec": 1.710443,
+      "checks": {
+        "completed": true,
+        "output_exists": true,
+        "keeps_aspect_no_downscale": true,
+        "color_fidelity_ok": true,
+        "artifact_safe": true,
+        "texture_not_high_risk": true,
+        "jpg_stays_1080p_pass": true,
+        "jpg_level_not_failed": true
+      },
+      "metrics": {
+        "image_type": "text_poster",
+        "output_width": 1622,
+        "output_height": 1080,
+        "quality_1080p_pass": true,
+        "quality_1080p_level": "standard",
+        "clarity_score": 23.1782,
+        "text_clarity_score": 46.6452,
+        "text_edge_clean_score": 46.6452,
+        "small_text_readability_score": 41.1161,
+        "color_fidelity_score": 98.8076,
+        "delivery_score": 52.9597,
+        "file_size_ratio": 12.244,
+        "v046_text_engine_active": true,
+        "warnings": [
+          "输出体积异常增大：ratio=12.244，建议评估 JPG/WebP 或压缩参数。"
+        ]
+      },
+      "output_file": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\v046_quality\\JPG\\case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_143353.png",
+      "traceback": ""
+    },
+    {
+      "sample": "普通PNG",
+      "input_path": "D:\\Codex\\04_Visual-Master-Pro\\runtime\\v044_validation\\inputs\\test_1.png",
+      "status": "PASS",
+      "duration_sec": 1.812282,
+      "checks": {
+        "completed": true,
+        "output_exists": true,
+        "keeps_aspect_no_downscale": true,
+        "color_fidelity_ok": true,
+        "artifact_safe": true,
+        "texture_not_high_risk": true
+      },
+      "metrics": {
+        "image_type": "product_kv",
+        "output_width": 1728,
+        "output_height": 1080,
+        "quality_1080p_pass": false,
+        "quality_1080p_level": "failed",
+        "clarity_score": 11.0992,
+        "text_clarity_score": 29.8266,
+        "text_edge_clean_score": 29.8266,
+        "small_text_readability_score": 28.1199,
+        "color_fidelity_score": 97.8592,
+        "delivery_score": 42.984,
+        "file_size_ratio": 54.9439,
+        "v046_text_engine_active": false,
+        "warnings": [
+          "输出体积异常增大：ratio=54.9439，建议评估 JPG/WebP 或压缩参数。",
+          "1080P 质量守门未完全通过，final 已回退到当前质量最稳定图。"
+        ]
+      },
+      "output_file": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\v046_quality\\普通PNG\\test_1_影界高清_1080P_fidelity_20260617_143355.png",
+      "traceback": ""
+    },
+    {
+      "sample": "透明PNG",
+      "input_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\outputs\\v036_backend_validation_final\\input\\realalpha.png",
+      "status": "PASS",
+      "duration_sec": 2.379931,
+      "checks": {
+        "completed": true,
+        "output_exists": true,
+        "keeps_aspect_no_downscale": true,
+        "color_fidelity_ok": true,
+        "artifact_safe": true,
+        "texture_not_high_risk": true
+      },
+      "metrics": {
+        "image_type": "product_kv",
+        "output_width": 1920,
+        "output_height": 1080,
+        "quality_1080p_pass": true,
+        "quality_1080p_level": "standard",
+        "clarity_score": 18.1922,
+        "text_clarity_score": 39.6729,
+        "text_edge_clean_score": 39.6729,
+        "small_text_readability_score": 37.4538,
+        "color_fidelity_score": 97.9791,
+        "delivery_score": 47.7598,
+        "file_size_ratio": 16.4372,
+        "v046_text_engine_active": false,
+        "warnings": [
+          "输出体积异常增大：ratio=16.4372，建议评估 JPG/WebP 或压缩参数。"
+        ]
+      },
+      "output_file": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\v046_quality\\透明PNG\\realalpha_影界高清_1080P_fidelity_20260617_143356.png",
+      "traceback": ""
+    },
+    {
+      "sample": "中文小字图",
+      "input_path": "D:\\Codex\\04_Visual-Master-Pro\\backend\\backend_uploads\\高清测试.png",
+      "status": "PASS",
+      "duration_sec": 1.626987,
+      "checks": {
+        "completed": true,
+        "output_exists": true,
+        "keeps_aspect_no_downscale": true,
+        "color_fidelity_ok": true,
+        "artifact_safe": true,
+        "texture_not_high_risk": true,
+        "small_text_engine_active": true,
+        "small_text_detected": true,
+        "small_text_readability_floor": true,
+        "text_clarity_floor": true
+      },
+      "metrics": {
+        "image_type": "text_poster",
+        "output_width": 1620,
+        "output_height": 1080,
+        "quality_1080p_pass": false,
+        "quality_1080p_level": "failed",
+        "clarity_score": 10.1037,
+        "text_clarity_score": 28.1225,
+        "text_edge_clean_score": 28.1225,
+        "small_text_readability_score": 25.3631,
+        "color_fidelity_score": 98.7969,
+        "delivery_score": 44.0801,
+        "file_size_ratio": 57.8984,
+        "v046_text_engine_active": true,
+        "warnings": [
+          "输出体积异常增大：ratio=57.8984，建议评估 JPG/WebP 或压缩参数。",
+          "1080P 质量守门未完全通过，final 已回退到当前质量最稳定图。"
+        ]
+      },
+      "output_file": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\v046_quality\\中文小字图\\高清测试_影界高清_1080P_text_safe_20260617_143359.png",
+      "traceback": ""
+    }
+  ]
+}
