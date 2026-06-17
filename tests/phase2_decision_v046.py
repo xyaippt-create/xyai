@@ -79,6 +79,10 @@ def summarize_payload(sample: dict[str, Any], input_path: Path, payload: dict[st
         "pseudo_hd_risk": debug_quality.get("pseudo_hd_risk"),
         "over_smoothing_risk": debug_quality.get("over_smoothing_risk"),
         "texture_loss_risk": debug_quality.get("texture_loss_risk"),
+        "phase2_material_eligible": debug_quality.get("phase2_material_eligible"),
+        "phase2_material_strength": debug_quality.get("phase2_material_strength"),
+        "phase2_skip_reason": debug_quality.get("phase2_skip_reason"),
+        "phase2_dark_ratio": debug_quality.get("phase2_dark_ratio"),
         "warnings": task_report.get("warnings") or payload.get("warnings") or [],
         "elapsed_seconds": round(elapsed, 6),
     }
@@ -124,7 +128,7 @@ def write_summary(label: str, records: list[dict[str, Any]]) -> None:
     out_dir = RESULT_ROOT / label
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = {
-        "task": "V0.4.6 Phase 2 round1 decision samples",
+        "task": "V0.4.6 Phase 2 round2 decision samples",
         "label": label,
         "total": len(records),
         "completed": sum(1 for item in records if item.get("status") == "completed"),
@@ -151,6 +155,10 @@ def write_summary(label: str, records: list[dict[str, Any]]) -> None:
         "pseudo_hd_risk",
         "over_smoothing_risk",
         "texture_loss_risk",
+        "phase2_material_eligible",
+        "phase2_material_strength",
+        "phase2_skip_reason",
+        "phase2_dark_ratio",
         "output_path",
         "error",
     ]

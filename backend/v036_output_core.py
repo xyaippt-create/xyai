@@ -557,6 +557,74 @@ def phase2_mid_frequency_strength(profile: str, mode: str, image_type: str, has_
     return float(np.clip(base_strength, 0.0, 0.18))
 
 
+def phase2_material_policy(
+    profile: str,
+    mode: str,
+    image_type: str,
+    has_alpha: bool = False,
+    type_features: dict[str, Any] | None = None,
+    text_density: float = 0.0,
+) -> dict[str, Any]:
+    features = type_features or {}
+    texture_density = float(features.get("texture_density") or 0.0)
+    edge_density = float(features.get("edge_density") or 0.0)
+    dark_ratio = float(features.get("dark_ratio") or 0.0)
+    low_saturation_ratio = float(features.get("low_saturation_ratio") or 0.0)
+    base_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=False)
+    skip_reason = ""
+    eligible = True
+
+    if profile == "preview_light":
+        eligible = False
+        skip_reason = "preview_light_profile"
+    elif mode == "text_safe" or image_type in {"text_poster", "ppt_page"}:
+        eligible = False
+        skip_reason = "text_safe_or_text_poster"
+    elif text_density >= 0.18 and texture_density < 0.035:
+        eligible = False
+        skip_reason = "high_text_or_gradient_risk"
+    elif edge_density >= 0.10 and low_saturation_ratio > 0.65:
+        eligible = False
+        skip_reason = "fine_line_table_risk"
+    elif image_type == "unknown" and dark_ratio > 0.12 and edge_density > 0.025 and texture_density > 0.05:
+        eligible = False
+        skip_reason = "small_text_or_technical_graphic_risk"
+    elif edge_density >= 0.075 and texture_density < 0.035:
+        eligible = False
+        skip_reason = "fine_line_structure_risk"
+    elif texture_density < 0.003 and edge_density < 0.003:
+        eligible = False
+        skip_reason = "synthetic_gradient_risk"
+    elif texture_density < 0.006:
+        base_strength = min(base_strength, 0.025)
+        skip_reason = "very_low_texture_conservative"
+    elif texture_density < 0.018 and image_type not in {"architecture", "landscape"}:
+        base_strength = min(base_strength, 0.055)
+        skip_reason = "low_texture_conservative"
+    elif low_saturation_ratio > 0.92 and texture_density < 0.028:
+        base_strength = min(base_strength, 0.06)
+        skip_reason = "flat_low_saturation_conservative"
+    else:
+        skip_reason = "eligible"
+
+    if has_alpha and eligible:
+        base_strength *= 0.45
+        skip_reason = "alpha_safe_reduced" if skip_reason == "eligible" else f"{skip_reason}+alpha_safe_reduced"
+
+    strength = float(np.clip(base_strength if eligible else 0.0, 0.0, 0.18))
+    if strength <= 0:
+        eligible = False
+    return {
+        "phase2_material_eligible": bool(eligible),
+        "phase2_material_strength": round(strength, 4),
+        "phase2_skip_reason": skip_reason,
+        "phase2_texture_density": round(texture_density, 6),
+        "phase2_edge_density": round(edge_density, 6),
+        "phase2_dark_ratio": round(dark_ratio, 6),
+        "phase2_text_density": round(float(text_density), 6),
+    }
+
+
 def phase2_mid_frequency_material(
     image: np.ndarray,
     strength: float,
@@ -636,6 +704,7 @@ def enhance_fidelity(
     mode: str,
     image_type: str = "general",
     has_alpha: bool = False,
+    phase2_strength: float | None = None,
 ) -> np.ndarray:
     reference = resize_keep_ratio(image, target_width, target_height)
     result = compress_clipped_highlights(reference, amount=0.04)
@@ -672,7 +741,8 @@ def enhance_fidelity(
     if text_intensive:
         result = enhance_text_regions(result, strength=min(text_strength * 0.72, 0.38))
     result = mid_frequency_detail(result, strength=mid_strength)
-    phase2_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=has_alpha)
+    if phase2_strength is None:
+        phase2_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=has_alpha)
     result = phase2_mid_frequency_material(result, strength=phase2_strength, image_type=image_type)
     result = enhance_true_edges(result, strength=max(0.08, min(edge_strength, 0.28 if text_intensive else 0.30)))
     result = enhance_text_regions(result, strength=min(text_strength, 0.52 if text_intensive else 0.42))
@@ -1199,6 +1269,14 @@ def process_v036_output(
     image_type = plan["image_type"]
     paths = plan["paths"]
     target_alpha = resize_alpha(alpha, plan["output_width"], plan["output_height"]) if plan["alpha_used"] else None
+    phase2_policy = phase2_material_policy(
+        profile,
+        mode,
+        image_type,
+        has_alpha=plan["alpha_used"],
+        type_features=plan["image_type_features"],
+        text_density=plan["text_density"],
+    )
 
     start = time.perf_counter()
     enhanced = enhance_fidelity(
@@ -1209,6 +1287,7 @@ def process_v036_output(
         mode,
         image_type,
         has_alpha=plan["alpha_used"],
+        phase2_strength=phase2_policy["phase2_material_strength"],
     )
     timings["enhance_time"] = round(time.perf_counter() - start, 6)
     v046_text_engine_active = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or plan["text_density"] >= 0.015)
@@ -1309,7 +1388,6 @@ def process_v036_output(
     quality_after_compression = round(candidate_metrics["visual_score"], 4)
     compression_quality_drop = round(max(0.0, quality_before_compression - quality_after_compression), 4)
     timings["total_time"] = round(time.perf_counter() - total_start, 6)
-    phase2_mid_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=plan["alpha_used"])
 
     debug_quality = {
         "input_width": plan["input_width"],
@@ -1352,9 +1430,16 @@ def process_v036_output(
         "text_region_density_delta": main_metrics["text_region_density_delta"],
         "v046_text_engine_active": v046_text_engine_active,
         "v046_quality_profile": "1080P+ small text readability",
-        "v046_phase2_mid_frequency_active": bool(phase2_mid_strength > 0),
-        "v046_phase2_mid_frequency_strength": round(phase2_mid_strength, 4),
-        "v046_phase2_profile": "mid-frequency material candidate round1",
+        "v046_phase2_mid_frequency_active": bool(phase2_policy["phase2_material_strength"] > 0),
+        "v046_phase2_mid_frequency_strength": phase2_policy["phase2_material_strength"],
+        "v046_phase2_profile": "mid-frequency material candidate round2",
+        "phase2_material_eligible": phase2_policy["phase2_material_eligible"],
+        "phase2_material_strength": phase2_policy["phase2_material_strength"],
+        "phase2_skip_reason": phase2_policy["phase2_skip_reason"],
+        "phase2_texture_density": phase2_policy["phase2_texture_density"],
+        "phase2_edge_density": phase2_policy["phase2_edge_density"],
+        "phase2_dark_ratio": phase2_policy["phase2_dark_ratio"],
+        "phase2_text_density": phase2_policy["phase2_text_density"],
         "dark_detail_score": main_metrics["dark_detail_score"],
         "dark_detail_gain": main_metrics["dark_detail_gain"],
         "over_smoothing_risk": main_metrics["over_smoothing_risk"],
