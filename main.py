@@ -759,7 +759,8 @@ def build_web_app():
     except ImportError as exc:
         raise RuntimeError("缺少 FastAPI 服务依赖，请先安装 requirements.txt。") from exc
 
-    from backend.v036_output_core import build_output_plan, process_v036_output, sha256_file
+    from backend.v036_output_core import build_output_plan, sha256_file
+    from engine.pipeline import process_v046_delivery
 
     settings_data = load_settings()
     try:
@@ -1096,14 +1097,16 @@ def build_web_app():
         task["status"] = "processing"
         task["task_progress"] = max(int(task.get("task_progress") or 0), 10)
         try:
-            result = process_v036_output(
-                Path(task["input_path"]),
-                Path(task["output_root"]),
-                mode=task["mode"],
-                output_profile=task.get("output_profile") or "delivery_1080p",
-                output_format=task["output_format"],
-                initial_timing=task.get("debug_timing"),
-                debug_keep_intermediate=False,
+            result = process_v046_delivery(
+                {
+                    "input_path": Path(task["input_path"]),
+                    "output_root": Path(task["output_root"]),
+                    "mode": task["mode"],
+                    "output_profile": task.get("output_profile") or "delivery_1080p",
+                    "output_format": task["output_format"],
+                    "debug_timing": task.get("debug_timing"),
+                    "debug_keep_intermediate": False,
+                }
             )
             final_path = Path(result["final_output_path"])
             output_file_index[final_path.name] = final_path

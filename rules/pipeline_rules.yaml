@@ -11,6 +11,9 @@ pipeline_order:
   - high_frequency_control
   - output_encode_unicode_safe
   - quality_report
+v046_1080p_delivery:
+  pipeline_order:
+    - v046_delivery_adapter
 output_policy:
   keep_original: true
   output_format: png

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any, Mapping
 
 from engine.algorithms import upscale_to_width
 from engine.analysis import (
@@ -10,6 +11,7 @@ from engine.analysis import (
 from engine.config import ProcessingResult
 from engine.delivery import apply_delivery_badge, build_compare_image
 from engine.io import collect_images, read_image, write_image
+from engine.rulebook import load_rule_pack
 from engine.rules import interpret_rules_to_strategy, load_visual_rules
 from modes import get_profile
 from pipelines import PipelineContext, run_mode_pipeline
@@ -17,6 +19,8 @@ from pipelines import PipelineContext, run_mode_pipeline
 
 AUTO_MODE = "auto"
 DEFAULT_ANALYSIS_MODE = "ai_commercial_kv"
+V046_DELIVERY_PIPELINE = "v046_1080p_delivery"
+V046_DELIVERY_STAGE = "v046_delivery_adapter"
 
 
 def choose_mode(requested_mode: str | None, analysis) -> str:
@@ -179,3 +183,35 @@ def process_path(
         )
 
     return results
+
+
+def _v046_delivery_order(rule_pack: dict[str, Any]) -> list[str]:
+    pipeline_rules = rule_pack.get("pipeline_rules") or {}
+    pipeline_config = pipeline_rules.get(V046_DELIVERY_PIPELINE) or {}
+    order = pipeline_config.get("pipeline_order") or []
+    if not isinstance(order, list) or not order:
+        raise RuntimeError(f"{V046_DELIVERY_PIPELINE} is not configured in rules/pipeline_rules.yaml")
+    unsupported = [stage for stage in order if stage != V046_DELIVERY_STAGE]
+    if unsupported:
+        raise RuntimeError(f"{V046_DELIVERY_PIPELINE} contains unsupported stages: {unsupported}")
+    return [str(stage) for stage in order]
+
+
+def process_v046_delivery(context: Mapping[str, Any]) -> dict[str, Any]:
+    from engine.adapters import run_v046_delivery
+
+    rule_pack = load_rule_pack(V046_DELIVERY_PIPELINE)
+    order = _v046_delivery_order(rule_pack)
+    result: dict[str, Any] | None = None
+    for stage in order:
+        if stage == V046_DELIVERY_STAGE:
+            result = run_v046_delivery(context)
+    if result is None:
+        raise RuntimeError(f"{V046_DELIVERY_PIPELINE} did not run a delivery stage")
+    result["pipeline_trace"] = {
+        "entered_engine_pipeline": True,
+        "pipeline": V046_DELIVERY_PIPELINE,
+        "stages": order,
+        "adapter": V046_DELIVERY_STAGE,
+    }
+    return result
