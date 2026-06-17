@@ -538,6 +538,84 @@ def mid_frequency_detail(image: np.ndarray, strength: float) -> np.ndarray:
     return cv2.cvtColor(lab.astype("uint8"), cv2.COLOR_LAB2BGR)
 
 
+def phase2_mid_frequency_strength(profile: str, mode: str, image_type: str, has_alpha: bool = False) -> float:
+    if profile == "preview_light" or mode == "text_safe" or image_type in {"text_poster", "ppt_page"}:
+        return 0.0
+    base_strength = {
+        "product_kv": 0.13,
+        "architecture": 0.14,
+        "landscape": 0.13,
+        "mixed": 0.12,
+        "portrait": 0.08,
+        "unknown": 0.10,
+        "general": 0.10,
+    }.get(image_type, 0.10)
+    if mode == "texture":
+        base_strength += 0.03
+    if has_alpha:
+        base_strength *= 0.45
+    return float(np.clip(base_strength, 0.0, 0.18))
+
+
+def phase2_mid_frequency_material(
+    image: np.ndarray,
+    strength: float,
+    image_type: str,
+) -> np.ndarray:
+    """Restore restrained material layers while suppressing text, flat areas, and halos."""
+    strength = float(np.clip(strength, 0.0, 0.18))
+    if strength <= 0:
+        return image
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype("float32")
+    luma = lab[:, :, 0]
+
+    small = cv2.GaussianBlur(luma, (0, 0), 0.95)
+    mid = cv2.GaussianBlur(luma, (0, 0), 2.4)
+    broad = cv2.GaussianBlur(luma, (0, 0), 5.2)
+    band = (small - mid) * 0.72 + (mid - broad) * 0.58
+    band = np.sign(band) * np.minimum(np.maximum(np.abs(band) - 0.55, 0.0), 7.5)
+
+    mean = cv2.GaussianBlur(luma, (0, 0), 2.0)
+    mean_sq = cv2.GaussianBlur(luma * luma, (0, 0), 2.0)
+    local_std = np.sqrt(np.maximum(mean_sq - mean * mean, 0.0))
+    texture_mask = np.clip((local_std - 1.3) / 12.0, 0.0, 1.0)
+    texture_coverage = float(np.mean(texture_mask > 0.22))
+    if texture_coverage < 0.015:
+        strength *= 0.25
+    elif texture_coverage < 0.04:
+        strength *= 0.65
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hard_edges = cv2.Canny(gray, 80, 180)
+    hard_edges = cv2.dilate(hard_edges, np.ones((3, 3), dtype=np.uint8), iterations=1).astype("float32") / 255.0
+    edge_guard = 1.0 - np.clip(hard_edges * 0.62, 0.0, 0.82)
+
+    text_guard = 1.0
+    try:
+        text_mask = detect_text_like_regions(image)
+        if float(np.mean(text_mask > 0.12)) > 0.0005:
+            text_mask = cv2.dilate((text_mask > 0.08).astype("uint8"), np.ones((5, 5), dtype=np.uint8), iterations=1)
+            text_guard = 1.0 - np.clip(text_mask.astype("float32") * 0.92, 0.0, 0.92)
+    except Exception:
+        text_guard = 1.0
+
+    highlight_guard = np.clip((242.0 - luma) / 22.0, 0.0, 1.0)
+    shadow_guard = np.clip((luma - 8.0) / 22.0, 0.0, 1.0)
+    tonal_guard = highlight_guard * shadow_guard
+
+    type_gain = 1.0
+    if image_type == "portrait":
+        type_gain = 0.72
+    elif image_type in {"architecture", "landscape"}:
+        type_gain = 1.08
+
+    blend = np.clip(texture_mask * edge_guard * text_guard * tonal_guard * type_gain, 0.0, 1.0)
+    enhanced_luma = np.clip(luma + band * strength * blend, 0, 255)
+    lab[:, :, 0] = enhanced_luma
+    return cv2.cvtColor(lab.astype("uint8"), cv2.COLOR_LAB2BGR)
+
+
 def light_clean(image: np.ndarray, profile: str, image_type: str, mode: str = "fidelity") -> np.ndarray:
     if profile == "preview_light":
         return cv2.bilateralFilter(image, 3, 5, 5)
@@ -557,6 +635,7 @@ def enhance_fidelity(
     profile: str,
     mode: str,
     image_type: str = "general",
+    has_alpha: bool = False,
 ) -> np.ndarray:
     reference = resize_keep_ratio(image, target_width, target_height)
     result = compress_clipped_highlights(reference, amount=0.04)
@@ -593,6 +672,8 @@ def enhance_fidelity(
     if text_intensive:
         result = enhance_text_regions(result, strength=min(text_strength * 0.72, 0.38))
     result = mid_frequency_detail(result, strength=mid_strength)
+    phase2_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=has_alpha)
+    result = phase2_mid_frequency_material(result, strength=phase2_strength, image_type=image_type)
     result = enhance_true_edges(result, strength=max(0.08, min(edge_strength, 0.28 if text_intensive else 0.30)))
     result = enhance_text_regions(result, strength=min(text_strength, 0.52 if text_intensive else 0.42))
     result = protect_highlights(reference, result, strength=0.92)
@@ -1120,7 +1201,15 @@ def process_v036_output(
     target_alpha = resize_alpha(alpha, plan["output_width"], plan["output_height"]) if plan["alpha_used"] else None
 
     start = time.perf_counter()
-    enhanced = enhance_fidelity(source_image, plan["output_width"], plan["output_height"], profile, mode, image_type)
+    enhanced = enhance_fidelity(
+        source_image,
+        plan["output_width"],
+        plan["output_height"],
+        profile,
+        mode,
+        image_type,
+        has_alpha=plan["alpha_used"],
+    )
     timings["enhance_time"] = round(time.perf_counter() - start, 6)
     v046_text_engine_active = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or plan["text_density"] >= 0.015)
 
@@ -1220,6 +1309,7 @@ def process_v036_output(
     quality_after_compression = round(candidate_metrics["visual_score"], 4)
     compression_quality_drop = round(max(0.0, quality_before_compression - quality_after_compression), 4)
     timings["total_time"] = round(time.perf_counter() - total_start, 6)
+    phase2_mid_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=plan["alpha_used"])
 
     debug_quality = {
         "input_width": plan["input_width"],
@@ -1262,6 +1352,9 @@ def process_v036_output(
         "text_region_density_delta": main_metrics["text_region_density_delta"],
         "v046_text_engine_active": v046_text_engine_active,
         "v046_quality_profile": "1080P+ small text readability",
+        "v046_phase2_mid_frequency_active": bool(phase2_mid_strength > 0),
+        "v046_phase2_mid_frequency_strength": round(phase2_mid_strength, 4),
+        "v046_phase2_profile": "mid-frequency material candidate round1",
         "dark_detail_score": main_metrics["dark_detail_score"],
         "dark_detail_gain": main_metrics["dark_detail_gain"],
         "over_smoothing_risk": main_metrics["over_smoothing_risk"],
