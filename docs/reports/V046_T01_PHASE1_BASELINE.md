@@ -1,63 +1,62 @@
-﻿# V0.4.6 T01 Phase 1 Baseline Freeze Report
+# V0.4.6 T01 Phase 1 Baseline Freeze Report
 
 Date: 2026-06-17
-Project: VisualMasterPro / 褰辩晫
-Task: T01 鍐荤粨 V0.4.6 Phase 1 鍩虹嚎
-Conclusion: PASS_WITH_BLOCKERS
+Project: VisualMasterPro / 影界
+Task: T01 / T01.1 / T01.2A Phase 1 基线冻结与文档收口
+Conclusion: PASS
 
-## 1. Executive Summary
+## 1. 执行摘要
 
-T01 completed the read-only baseline audit for the current V0.4.6 Phase 1 working tree. The four core samples were processed, source hashes were preserved, final outputs were generated in an isolated test directory, diagnostic fields were captured, and the V0.4.5.3 API/SSE regression script passed.
+T01 完成了 V0.4.6 Phase 1 工作区的只读基线审计：四张核心样本已处理，原图 SHA-256 保持不变，最终输出进入隔离测试目录，诊断字段已采集，V0.4.5.3 API/SSE 回归通过。
 
-This is not a fully frozen release baseline yet. The working tree contains uncommitted production-code changes, so the current V0.4.6 Phase 1 state cannot be uniquely reproduced by Git commit alone. Two known quality-gate failures also remain: ordinary PNG and Chinese small-text PNG both report `quality_1080p_pass=false`.
+T01.1 完成了 Git 基线冻结与复测。T01.2A 进一步核对 `8bf051c..e98afe8` 的差异性质，确认该区间只包含报告与轻量 API 诊断证据变化，不包含生产代码、前端、依赖或运行配置变化。
 
-T02 condition: 瀛樺湪闃绘柇锛屾殏涓嶈兘杩涘叆T02
+两级基线关系：
 
-## 2. Git And Code Status
+| 项目 | 值 |
+|---|---|
+| Phase 1 生产代码冻结 Commit | `8bf051cd3fcc6e8f7c363c2b43eac819c1c4e6b3` |
+| Phase 1 生产代码冻结短 Commit | `8bf051c` |
+| Phase 1 完整基线 Commit | `e98afe81ec401f04458fbaccaaa0d80b81f2fda8` |
+| Phase 1 完整基线短 Commit | `e98afe8` |
+| Phase 1 基线 Tag | `v0.4.6-phase1-baseline` |
+| Tag 指向 | `e98afe81ec401f04458fbaccaaa0d80b81f2fda8` |
 
-Baseline commit:
+T02 condition: 可以进入T02
 
-| Item | Value |
+## 2. Git 与代码状态
+
+原始稳定底座：
+
+| 项目 | 值 |
 |---|---|
 | Branch | `main` |
-| HEAD | `780d49bd470a1015245f9d359e03704ea6bcc5c2` |
-| HEAD short | `780d49b` |
+| V0.4.5.3 底座 HEAD | `780d49bd470a1015245f9d359e03704ea6bcc5c2` |
+| V0.4.5.3 短 HEAD | `780d49b` |
 | HEAD time | `2026-06-16 07:54:02 +0800` |
 | HEAD subject | `V0.4.5.3 stable output folder native picker and output_dir pipeline` |
-| Tags at HEAD | none |
-| Stash | none |
-| `780d49b` ancestor of `HEAD` | true |
 
-Current Git status:
+T01 初始状态曾为 `PASS_WITH_BLOCKERS`，原因是当时 Phase 1 生产代码尚未形成可恢复的 Git 提交。T01.1 后该阻断已解除。
 
-```text
- M AGENTS.md
- M backend/v036_output_core.py
- M engine/algorithms/text_clarity.py
- M main.py
-?? docs/03_CURRENT_STATUS_V0.4.5.1.md
-?? docs/09_CODEX_CHANGELOG.md
-?? docs/reports/
-?? docs/sync/
-?? runtime/baseline_validation_20260617/
-?? runtime/diagnostics/
-?? tests/baseline_v046_phase1.py
-?? tests/diagnostics/
-?? tests/results/
-```
+`8bf051c..e98afe8` 差异核对结果：
 
-T01 did not intentionally change production code, image algorithms, API, SSE, frontend, task scheduling, output selection, or `default_input_dir`. The production files already dirty before this freeze audit remain a blocker for true baseline freezing:
+| 文件 | 分类 | 说明 |
+|---|---|---|
+| `docs/reports/V046_T01_PHASE1_BASELINE.md` | B. 基线报告或诊断证据 | 增补 T01.1 复测和基线关系。 |
+| `tests/diagnostics/v0453_api_pipeline_results.json` | B. 基线报告或诊断证据 | 刷新 API/SSE 回归轻量 JSON。 |
 
-| File | Status |
+未发现以下类别变化：
+
+| 类别 | 结果 |
 |---|---|
-| `backend/v036_output_core.py` | modified |
-| `engine/algorithms/text_clarity.py` | modified |
-| `main.py` | modified |
-| `AGENTS.md` | modified |
+| E. 生产代码 | 无 |
+| F. 前端代码 | 无 |
+| G. 影响运行行为的配置或依赖 | 无 |
+| H. 来源不明 | 无 |
 
-## 3. Runtime Environment
+## 3. 运行环境
 
-| Item | Value |
+| 项目 | 值 |
 |---|---|
 | OS | `Windows-11-10.0.26200-SP0` |
 | Python | `3.12.13` |
@@ -78,74 +77,94 @@ T01 did not intentionally change production code, image algorithms, API, SSE, fr
 | Frontend port | `5173` |
 | Env vars captured | `APPDATA=SET` |
 
-## 4. Core Sample List
+## 4. 核心样本清单
 
-All source inputs kept the same SHA-256 hash before and after T01.
+四张原图在 T01 / T01.1 中均保持 SHA-256 不变。
 
-| Sample | Input | Format | Size | Source SHA-256 | Source unchanged |
+| 样本 | 输入 | 格式 | 大小 | 原图 SHA-256 | 原图未变 |
 |---|---|---:|---:|---|---|
 | JPG | `D:\Codex\04_Visual-Master-Pro\tests\outputs\v036_api_validation\output\images\case_original_jpg_vmp_v036_optimized.jpg` | JPEG | 7,743 B | `e63b4d7e91e5bbea6c3a1e70402671381e977e86a4687b90fae5e72121096fb7` | true |
-| 鏅€?PNG | `D:\Codex\04_Visual-Master-Pro\runtime\v044_validation\inputs\test_1.png` | PNG | 3,476 B | `de686150a6bb65246fc308e98c136a300774e776adbb363155f7294a4f71e663` | true |
-| 閫忔槑 PNG | `D:\Codex\04_Visual-Master-Pro\tests\outputs\v036_backend_validation_final\input\realalpha.png` | PNG RGBA | 39,614 B | `886a52a64c1057466bcd1549d4ee7299058e0281782edcd43b21198f21fa4385` | true |
-| 涓枃灏忓瓧鍥?| `D:\Codex\04_Visual-Master-Pro\backend\backend_uploads\楂樻竻娴嬭瘯.png` | PNG | 2,107 B | `178449c424d745333c6c5c476386bf24260772b2e406974f94611e1493a42cfa` | true |
+| 普通 PNG | `D:\Codex\04_Visual-Master-Pro\runtime\v044_validation\inputs\test_1.png` | PNG | 3,476 B | `de686150a6bb65246fc308e98c136a300774e776adbb363155f7294a4f71e663` | true |
+| 透明 PNG | `D:\Codex\04_Visual-Master-Pro\tests\outputs\v036_backend_validation_final\input\realalpha.png` | PNG RGBA | 39,614 B | `886a52a64c1057466bcd1549d4ee7299058e0281782edcd43b21198f21fa4385` | true |
+| 中文小字图 | `D:\Codex\04_Visual-Master-Pro\backend\backend_uploads\高清测试.png` | PNG | 2,107 B | `178449c424d745333c6c5c476386bf24260772b2e406974f94611e1493a42cfa` | true |
 
-## 5. Three-Way Output Comparison
+## 5. 三方输出对照
 
-Historical V0.4.5.3 output selection rule: latest file matching `*20260617_08*.png` in the historical diagnostic output directories. This avoids using post-Phase-1 14:xx rerun outputs as the historical baseline.
+V0.4.5.3 历史输出选择规则：在历史诊断输出目录中选择匹配 `*20260617_08*.png` 的最新文件，避免把 Phase 1 后续 14:xx 复跑输出误作历史基线。
 
-| Sample | V0.4.5.3 historical output | V0.4.6 Phase 1 output | Output exists |
+| 样本 | V0.4.5.3 历史输出 | V0.4.6 Phase 1 输出 | 输出存在 |
 |---|---|---|---|
-| JPG | `tests\diagnostics\output\core\JPG\case_original_jpg_vmp_v036_optimized_褰辩晫楂樻竻_1080P_fidelity_20260617_084128.png` | `tests\results\v046_phase1_baseline\JPG\case_original_jpg_vmp_v036_optimized_褰辩晫楂樻竻_1080P_fidelity_20260617_150222.png` | true |
-| 鏅€?PNG | `tests\diagnostics\output\core\鏅€歅NG\test_1_褰辩晫楂樻竻_1080P_fidelity_20260617_084130.png` | `tests\results\v046_phase1_baseline\鏅€歅NG\test_1_褰辩晫楂樻竻_1080P_fidelity_20260617_150224.png` | true |
-| 閫忔槑 PNG | `tests\diagnostics\output\core\閫忔槑PNG\realalpha_褰辩晫楂樻竻_1080P_fidelity_20260617_084131.png` | `tests\results\v046_phase1_baseline\閫忔槑PNG\realalpha_褰辩晫楂樻竻_1080P_fidelity_20260617_150226.png` | true |
-| 涓枃灏忓瓧鍥?| `tests\diagnostics\output\core\涓枃灏忓瓧鍥綷楂樻竻娴嬭瘯_褰辩晫楂樻竻_1080P_text_safe_20260617_084134.png` | `tests\results\v046_phase1_baseline\涓枃灏忓瓧鍥綷楂樻竻娴嬭瘯_褰辩晫楂樻竻_1080P_text_safe_20260617_150230.png` | true |
+| JPG | `tests\diagnostics\output\core\JPG\case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_084128.png` | `tests\results\v046_phase1_baseline\JPG\case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160604.png` | true |
+| 普通 PNG | `tests\diagnostics\output\core\普通PNG\test_1_影界高清_1080P_fidelity_20260617_084130.png` | `tests\results\v046_phase1_baseline\普通PNG\test_1_影界高清_1080P_fidelity_20260617_160606.png` | true |
+| 透明 PNG | `tests\diagnostics\output\core\透明PNG\realalpha_影界高清_1080P_fidelity_20260617_084131.png` | `tests\results\v046_phase1_baseline\透明PNG\realalpha_影界高清_1080P_fidelity_20260617_160608.png` | true |
+| 中文小字图 | `tests\diagnostics\output\core\中文小字图\高清测试_影界高清_1080P_text_safe_20260617_084134.png` | `tests\results\v046_phase1_baseline\中文小字图\高清测试_影界高清_1080P_text_safe_20260617_160611.png` | true |
 
-## 6. Diagnostic Fields Summary
+## 6. 诊断字段摘要
 
-| Sample | image_type | Output | Output size | Time | quality_1080p_pass | Level | text_clarity | small_text | edge_clean | pseudo_hd | artifact | Result |
+T01.1 复测结果如下，诊断数值保持与 T01 核心结论一致，耗时允许轻微波动。
+
+| 样本 | image_type | 输出 | 输出大小 | 耗时 | quality_1080p_pass | Level | text_clarity | small_text | edge_clean | pseudo_hd | artifact | 结果 |
 |---|---|---:|---:|---:|---|---|---:|---:|---:|---|---|---|
-| JPG | `text_poster` | 1622x1080 PNG | 94,805 B | 2.122s | true | `standard` | 46.6452 | 41.1161 | 46.6452 | low | low | PASS |
-| 鏅€?PNG | `product_kv` | 1728x1080 PNG | 190,985 B | 2.568s | false | `failed` | 29.8266 | 28.1199 | 29.8266 | low | low | PASS_WITH_KNOWN_ISSUE |
-| 閫忔槑 PNG | `product_kv` | 1920x1080 PNG | 651,143 B | 3.507s | true | `standard` | 39.6729 | 37.4538 | 39.6729 | low | low | PASS |
-| 涓枃灏忓瓧鍥?| `text_poster` | 1620x1080 PNG | 121,992 B | 2.608s | false | `failed` | 28.1225 | 25.3631 | 28.1225 | low | low | PASS_WITH_KNOWN_ISSUE |
+| JPG | `text_poster` | 1622x1080 PNG | 94,805 B | 2.221s | true | `standard` | 46.6452 | 41.1161 | 46.6452 | low | low | PASS |
+| 普通 PNG | `product_kv` | 1728x1080 PNG | 190,985 B | 2.050s | false | `failed` | 29.8266 | 28.1199 | 29.8266 | low | low | PASS_WITH_KNOWN_ISSUE |
+| 透明 PNG | `product_kv` | 1920x1080 PNG | 651,143 B | 2.655s | true | `standard` | 39.6729 | 37.4538 | 39.6729 | low | low | PASS |
+| 中文小字图 | `text_poster` | 1620x1080 PNG | 121,992 B | 1.809s | false | `failed` | 28.1225 | 25.3631 | 28.1225 | low | low | PASS_WITH_KNOWN_ISSUE |
 
-Additional captured diagnostics:
+附加诊断字段：
 
-| Sample | `v046_text_engine_active` | `v046_quality_profile` |
+| 样本 | `v046_text_engine_active` | `v046_quality_profile` |
 |---|---|---|
 | JPG | true | `1080P+ small text readability` |
-| 鏅€?PNG | false | `1080P+ small text readability` |
-| 閫忔槑 PNG | false | `1080P+ small text readability` |
-| 涓枃灏忓瓧鍥?| true | `1080P+ small text readability` |
+| 普通 PNG | false | `1080P+ small text readability` |
+| 透明 PNG | false | `1080P+ small text readability` |
+| 中文小字图 | true | `1080P+ small text readability` |
 
-## 7. API And SSE Regression
+T01 初始审计值保留如下，不作为 T01.2A 重新计算结果：
 
-Command:
+| 样本 | 输出 | 输出大小 | 耗时 | quality_1080p_pass | Level | text_clarity | small_text | edge_clean | 结果 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---|
+| JPG | 1622x1080 PNG | 94,805 B | 2.122s | true | `standard` | 46.6452 | 41.1161 | 46.6452 | PASS |
+| 普通 PNG | 1728x1080 PNG | 190,985 B | 2.568s | false | `failed` | 29.8266 | 28.1199 | 29.8266 | PASS_WITH_KNOWN_ISSUE |
+| 透明 PNG | 1920x1080 PNG | 651,143 B | 3.507s | true | `standard` | 39.6729 | 37.4538 | 39.6729 | PASS |
+| 中文小字图 | 1620x1080 PNG | 121,992 B | 2.608s | false | `failed` | 28.1225 | 25.3631 | 28.1225 | PASS_WITH_KNOWN_ISSUE |
+
+T01 初始输出路径保留如下：
+
+| 样本 | T01 初始输出 |
+|---|---|
+| JPG | `tests\results\v046_phase1_baseline\JPG\case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_150222.png` |
+| 普通 PNG | `tests\results\v046_phase1_baseline\普通PNG\test_1_影界高清_1080P_fidelity_20260617_150224.png` |
+| 透明 PNG | `tests\results\v046_phase1_baseline\透明PNG\realalpha_影界高清_1080P_fidelity_20260617_150226.png` |
+| 中文小字图 | `tests\results\v046_phase1_baseline\中文小字图\高清测试_影界高清_1080P_text_safe_20260617_150230.png` |
+
+## 7. API 与 SSE 回归
+
+命令：
 
 ```text
 D:\Codex\04_Visual-Master-Pro\.venv\Scripts\python.exe tests\diagnostics\test_v0453_api_pipeline.py
 ```
 
-Result: PASS
+结果：PASS
 
-| Sample | `/api/upload` | Polling | SSE | SSE reconnect | Double SSE | `final_output_url` |
+| 样本 | `/api/upload` | 任务轮询 | SSE | SSE 重连 | 双 SSE 订阅 | `final_output_url` |
 |---|---|---|---|---|---|---|
 | JPG | PASS | PASS | PASS | PASS | PASS | PASS |
-| 鏅€?PNG | PASS | PASS | PASS | PASS | PASS | PASS |
-| 閫忔槑 PNG | PASS | PASS | PASS | PASS | PASS | PASS |
-| 涓枃灏忓瓧鍥?| PASS | PASS | PASS | PASS | PASS | PASS |
+| 普通 PNG | PASS | PASS | PASS | PASS | PASS | PASS |
+| 透明 PNG | PASS | PASS | PASS | PASS | PASS | PASS |
+| 中文小字图 | PASS | PASS | PASS | PASS | PASS | PASS |
 
-Failure SSE case:
+失败任务 SSE：
 
-| Case | Result | Notes |
+| 用例 | 结果 | 说明 |
 |---|---|---|
-| `diagnostic_failed_task` | PASS | SSE returned failed status and completed with `[DONE]` behavior. |
+| `diagnostic_failed_task` | PASS | SSE 返回 failed 状态，并按 `[DONE]` 行为结束。 |
 
-API regression confirms upload starts background processing, polling reaches `completed`, SSE reconnect/double subscribe do not duplicate processing, and `final_output_url` points to a real served file.
+API 回归确认：上传后会启动后台处理，轮询可到达 `completed`，SSE 重连/双订阅不会重复处理，`final_output_url` 指向可访问的真实输出文件。
 
-## 8. Directory Isolation
+## 8. 目录隔离
 
-| Path role | Path | Exists |
+| 路径角色 | 路径 | 存在 |
 |---|---|---|
 | Runtime uploads legacy path | `D:\Codex\04_Visual-Master-Pro\runtime\uploads` | false |
 | Actual upload cache | `D:\Codex\04_Visual-Master-Pro\runtime\v04_inputs` | true |
@@ -155,110 +174,67 @@ API regression confirms upload starts background processing, polling reaches `co
 | V0.4.6 golden directory | `D:\Codex\04_Visual-Master-Pro\tests\golden_v046` | false |
 | T01 output directory | `D:\Codex\04_Visual-Master-Pro\tests\results\v046_phase1_baseline` | true |
 | API diagnostic output directory | `D:\Codex\04_Visual-Master-Pro\tests\diagnostics\output\api` | true |
-| Formal default output directory | `C:\Users\xyppt\Desktop\闆師Ai澧炲己寮曟搸\杈撳嚭鎴愬搧` | true |
+| Formal default output directory | `C:\Users\xyppt\Desktop\雪原Ai增强引擎\输出成品` | true |
 
-T01 outputs are isolated under `tests\results\v046_phase1_baseline`. API regression outputs are isolated under `tests\diagnostics\output\api`. `runtime\work` remains temporary processing storage and is not used as formal final output storage.
+T01 输出隔离在 `tests\results\v046_phase1_baseline`。API 回归输出隔离在 `tests\diagnostics\output\api`。`runtime\work` 仅作为临时处理目录，不作为正式 final 输出目录。
 
-## 9. Known Failures And Blockers
+## 9. 已知问题
 
-| Severity | Item | Status |
+| 严重性 | 项目 | 状态 |
 |---|---|---|
-| Blocker | V0.4.6 Phase 1 production code is uncommitted | Current baseline cannot be uniquely reproduced by Git commit alone. |
-| Blocker | Dirty production files exist | `backend/v036_output_core.py`, `engine/algorithms/text_clarity.py`, and `main.py` are modified. |
-| Known issue | 鏅€?PNG quality gate | `quality_1080p_pass=false`, `quality_1080p_level=failed`. |
-| Known issue | 涓枃灏忓瓧鍥?quality gate | `quality_1080p_pass=false`, `quality_1080p_level=failed`. |
-| Known issue | Output size warnings | All four samples produced file-size expansion warnings. |
-| Non-blocking audit note | `tests\golden_v046` absent | T01 used isolated result outputs, not a golden set. |
+| Known issue | 普通 PNG quality gate | `quality_1080p_pass=false`，`quality_1080p_level=failed`，本轮未修复。 |
+| Known issue | 中文小字图 quality gate | `quality_1080p_pass=false`，`quality_1080p_level=failed`，本轮未修复。 |
+| Known issue | 输出体积扩张警告 | 四张样本均存在文件体积扩张警告。 |
+| Non-blocking audit note | `tests\golden_v046` absent | T01/T01.1 使用隔离结果输出，不等同于正式黄金测试集。 |
+| Roadmap note | Phase 2 未开始 | 中频细节与材质增强尚未进入 Phase 2 开发。 |
 
-## 10. Differences From History
+## 10. 与历史版本的差异
 
-V0.4.5.3 already fixed the upload/SSE/final output path chain. T01 confirms that those regressions remain passing after the current V0.4.6 Phase 1 working-tree changes.
+V0.4.5.3 已修复上传、SSE、final 输出路径链路。T01/T01.1 确认这些回归项在 V0.4.6 Phase 1 基线上仍然通过。
 
-V0.4.6 Phase 1 adds captured diagnostic fields around the 1080P+ small-text readability path, including `small_text_readability_score`, `text_edge_clean_score`, `v046_text_engine_active`, and `v046_quality_profile`. These fields are visible in the core result JSON. API response field names remain compatible with the existing regression tests.
+V0.4.6 Phase 1 增加了 1080P+ 小字可读性相关诊断字段，包括 `small_text_readability_score`、`text_edge_clean_score`、`v046_text_engine_active` 和 `v046_quality_profile`。这些字段已在核心结果 JSON 中可见，API 字段保持兼容。
 
-The present difference from a release-grade freeze is traceability: V0.4.6 Phase 1 is still represented by dirty working-tree changes on top of `780d49b`, not by a dedicated commit or tag.
+V0.4.5.3 对照目前主要来自历史诊断输出，选择规则为 `*20260617_08*.png`。
 
-## 11. Blockers Before T02
+## 11. T01.1 Git 基线冻结
 
-T02 should not start until the following are resolved:
+T01.1 于 2026-06-17 执行，完成 Phase 1 生产代码冻结和复测。
 
-1. Commit or otherwise explicitly freeze the V0.4.6 Phase 1 production-code state.
-2. Re-run T01 baseline after the freeze point so the baseline maps to an exact commit or tag.
-3. Decide whether `quality_1080p_pass=false` for ordinary PNG and Chinese small-text PNG is acceptable as a known issue, or must be fixed before T02.
-
-T02 condition: 瀛樺湪闃绘柇锛屾殏涓嶈兘杩涘叆T02
-
-## 12. New Or Modified Files From T01
-
-T01 intentionally added read-only audit artifacts only:
-
-| File | Purpose |
+| 项目 | 值 |
 |---|---|
-| `tests/baseline_v046_phase1.py` | Read-only baseline capture script for four core samples. |
-| `runtime/diagnostics/v046_t01/v046_t01_baseline.json` | Machine-readable baseline results, hashes, environment, Git, and directory audit. |
-| `tests/results/v046_phase1_baseline/` | Isolated V0.4.6 Phase 1 sample outputs. |
-| `tests/diagnostics/v0453_api_pipeline_results.json` | Refreshed API/SSE regression evidence. |
-| `docs/reports/V046_T01_PHASE1_BASELINE.md` | This report. |
-
-No production-code file was intentionally edited as part of T01.
-
-## 13. T01.1 Git Baseline Freeze Update
-
-T01.1 executed on 2026-06-17 after the initial T01 audit. The Phase 1 production-code changes were reviewed and frozen into a Git baseline.
-
-| Item | Value |
-|---|---|
-| Initial freeze commit before report refresh | `8bf051cd3fcc6e8f7c363c2b43eac819c1c4e6b3` |
-| Initial freeze short commit | `8bf051c` |
-| Initial freeze commit time | `2026-06-17 16:05:23 +0800` |
+| Phase 1 生产代码冻结 Commit | `8bf051cd3fcc6e8f7c363c2b43eac819c1c4e6b3` |
+| Phase 1 生产代码冻结短 Commit | `8bf051c` |
+| Commit time | `2026-06-17 16:05:23 +0800` |
 | Commit subject | `V0.4.6 Phase 1 small-text readability baseline` |
-| Tag | `v0.4.6-phase1-baseline` |
 | Baseline retest started | `2026-06-17T16:06:04` |
 | Baseline retest finished | `2026-06-17T16:06:13` |
 | Baseline retest result | PASS |
 | API/SSE regression result | PASS |
 
-Diff review result:
+差异审查结果：
 
-| Area | Result |
+| 区域 | 结果 |
 |---|---|
-| Phase 1 small-text readability changes | Confirmed in `backend/v036_output_core.py` and `engine/algorithms/text_clarity.py`. |
-| V0.4.5.3 task/SSE baseline continuity | Confirmed in `main.py`; required for the current Phase 1 baseline to keep upload, polling, SSE, and final output behavior stable. |
-| Phase 2 / mid-frequency algorithm changes | Not found in the T01.1 production diff. |
-| Temporary debug or test-only production logic | Not found. |
-| New hard-coded local preview URL or frontend disk path | Not found. |
-| API/SSE contract drift | Regression PASS; no field rename or frontend contract change found. |
-| Formal output selection drift | Not found; final output path/suffix protection remains intact. |
+| Phase 1 小字可读性变化 | 已确认在 `backend/v036_output_core.py` 与 `engine/algorithms/text_clarity.py` 中。 |
+| V0.4.5.3 task/SSE 基线延续 | 已确认在 `main.py` 中，用于保持上传、轮询、SSE 和 final 输出行为稳定。 |
+| Phase 2 / 中频算法变化 | 未发现。 |
+| 临时 debug 或测试专用生产逻辑 | 未发现。 |
+| 本地盘符预览 URL 或前端硬编码路径 | 未发现。 |
+| API/SSE 契约漂移 | 回归 PASS，未发现字段重命名或前端契约变化。 |
+| 正式输出选择漂移 | 未发现，final 输出路径与后缀保护仍有效。 |
 
-T01.1 sample retest:
+## 12. T01.2A 文档收口
 
-| Sample | image_type | quality_1080p_pass | quality_1080p_level | text_clarity_score | Output size | Time | Source hash unchanged |
-|---|---|---|---|---:|---:|---:|---|
-| JPG | `text_poster` | true | `standard` | 46.6452 | 94,805 B | 2.221s | true |
-| 普通 PNG | `product_kv` | false | `failed` | 29.8266 | 190,985 B | 2.050s | true |
-| 透明 PNG | `product_kv` | true | `standard` | 39.6729 | 651,143 B | 2.655s | true |
-| 中文小字图 | `text_poster` | false | `failed` | 28.1225 | 121,992 B | 1.809s | true |
+T01.2A 采用以下正式基线关系，不移动现有 Tag，不重写 Git 历史：
 
-T01.1 API/SSE retest:
-
-| Check | Result |
+| 项目 | 值 |
 |---|---|
-| `/api/upload` | PASS |
-| Task polling | PASS |
-| SSE success stream | PASS |
-| SSE reconnect | PASS |
-| Double SSE subscribe | PASS |
-| Failure SSE failed status | PASS |
-| Failure SSE `[DONE]` behavior | PASS |
-| `final_output_url` served file | PASS |
+| Phase 1 生产代码冻结 Commit | `8bf051cd3fcc6e8f7c363c2b43eac819c1c4e6b3` |
+| Phase 1 完整基线 Commit | `e98afe81ec401f04458fbaccaaa0d80b81f2fda8` |
+| Phase 1 基线 Tag | `v0.4.6-phase1-baseline` |
+| Tag 指向 | `e98afe81ec401f04458fbaccaaa0d80b81f2fda8` |
+| Tag 与 HEAD 关系 | Tag 固定完整基线提交；T01.2A 文档提交允许位于 Tag 之后。 |
 
-Known issues retained after T01.1:
+T01.2A 只修复文档乱码、版本关系和 Markdown 格式，不修改 Phase 1 生产代码。
 
-| Item | Status |
-|---|---|
-| 普通 PNG quality gate | Still `quality_1080p_pass=false`; not fixed in T01.1. |
-| 中文小字图 quality gate | Still `quality_1080p_pass=false`; not fixed in T01.1. |
-| File-size expansion warnings | Still present for all four samples. |
-| Historical V0.4.5.3 comparison | Still based mainly on historical diagnostic outputs selected by `*20260617_08*.png`. |
-
-T02 condition after T01.1: 可以进入T02
+最终结论：可以进入 T02 黄金测试集建设；T02 不负责修改画质算法，不负责修复 `quality_1080p_pass`，T02 完成前不得进入 Phase 2。
