@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.v036_output_core import process_v036_output  # noqa: E402
+from engine.pipeline import process_v046_delivery  # noqa: E402
 
 
 GOLDEN_ROOT = PROJECT_ROOT / "tests" / "golden_v046"
@@ -157,13 +157,15 @@ def run_sample(sample: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         phase2 = copy_phase2(sample_id, phase2_dir)
-        payload = process_v036_output(
-            input_path,
-            phase3_dir,
-            mode=mode_for(sample),
-            output_profile="delivery_1080p",
-            output_format=output_format_for(input_path, sample),
-            debug_keep_intermediate=False,
+        payload = process_v046_delivery(
+            {
+                "input_path": input_path,
+                "output_root": phase3_dir,
+                "mode": mode_for(sample),
+                "output_profile": "delivery_1080p",
+                "output_format": output_format_for(input_path, sample),
+                "debug_keep_intermediate": False,
+            }
         )
         elapsed = time.perf_counter() - started
         phase3_record = summarize_payload(sample, input_path, payload, elapsed)
