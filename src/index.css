@@ -75,6 +75,14 @@ select {
   border-radius: 2px;
 }
 
+.vmp-path-scroll-container {
+  overflow-x: auto !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  mask-image: linear-gradient(to right, #000 90%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 90%, transparent 100%);
+}
+
 @keyframes fadeInUp {
   from {
     opacity: 0;

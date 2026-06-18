@@ -832,7 +832,7 @@ export default function DashboardPage() {
                   {outputLocationLabel}
                 </span>
               </div>
-              <div className="scrollbar-thin" style={{ overflowX: "auto", whiteSpace: "nowrap", backgroundColor: "#05090a", border: "1px solid #263738", borderRadius: "6px", padding: "8px 9px", color: "#f4f7f8", fontSize: "11px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+              <div className="scrollbar-thin vmp-path-scroll-container" style={{ backgroundColor: "#05090a", border: "1px solid #263738", borderRadius: "6px", padding: "8px 9px", color: "#f4f7f8", fontSize: "11px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
                 {currentOutputDir}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}>
@@ -946,7 +946,7 @@ export default function DashboardPage() {
                 `当前输出：${appliedOutputDir.trim() ? "自定义目录" : "默认输出目录"}`,
                 completedItems.length ? "final_output_url 已绑定" : "质量守门检测流就绪",
               ].map((item) => (
-                <div key={item} style={{ color: "#8be6b1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={item}>
+                <div key={item} className="block max-w-[220px] truncate font-mono text-[11px] text-[#10b981]" title={item}>
                   {item}
                 </div>
               ))}
