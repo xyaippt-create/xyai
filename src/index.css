@@ -15,11 +15,13 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  width: 100%;
+  height: 100%;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
   overflow-x: hidden;
   background: #060b0c;
 }
@@ -28,6 +30,49 @@ button,
 input,
 select {
   font: inherit;
+}
+
+/* 影界全局视窗绝对死锁 */
+.vmp-main-viewport {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #0b0c0e;
+}
+
+/* 主内容格栅区高度动态死锁 */
+.vmp-workspace-container {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: calc(100vh - 48px - 24px);
+  overflow: hidden;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* 细滚动条美化 */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #1c1f26 transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #1c1f26;
+  border-radius: 2px;
 }
 
 @keyframes fadeInUp {
