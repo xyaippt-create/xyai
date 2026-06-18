@@ -1,11 +1,18 @@
 import React, { useMemo } from "react";
 
-const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.4 1080P Stable Delivery Pipeline";
+const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
+
+const deliveryStatusMeta = {
+  PASS: { label: "可交付", tone: "#8be6b1", text: "最终交付门通过，可用于 1080P 本地交付。" },
+  PASS_WITH_LIMITATION: { label: "建议人工复核", tone: "#f0c36f", text: "输出已完成，但存在质量门、体积收益比或平滑区域限制，请人工确认。" },
+  FAIL: { label: "不可交付", tone: "#ff8a8a", text: "最终交付门阻断，不能作为正式成品使用。" },
+};
 
 function getReport(taskConfig) {
   const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || {};
+  const result = taskConfig?.task_result || taskConfig?.compareAssets?.task_result || {};
   const debugQuality = taskConfig?.debug_quality || taskConfig?.task_result?.debug_quality || taskConfig?.compareAssets?.task_result?.debug_quality || {};
-  return { ...debugQuality, ...report };
+  return { ...debugQuality, ...result, ...report };
 }
 
 function getResult(taskConfig) {
@@ -26,9 +33,8 @@ function boolText(value) {
 function GlacierAuditBackdrop() {
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_52%_0%,rgba(60,179,160,0.18),transparent_30rem),radial-gradient(circle_at_16%_18%,rgba(142,255,237,0.08),transparent_26rem),linear-gradient(180deg,#060b0c_0%,#07191f_42%,#02070a_100%)]" />
-      <div className="absolute inset-y-0 left-0 w-[34rem] bg-[repeating-linear-gradient(180deg,rgba(142,255,237,0.06)_0px,transparent_1px,transparent_18px)] opacity-60" />
-      <div className="absolute bottom-[-10rem] left-1/2 h-[26rem] w-[90vw] -translate-x-1/2 rounded-[50%] border-t border-[#3cb3a0]/20 bg-[radial-gradient(ellipse_at_top,rgba(60,179,160,0.12),rgba(3,16,20,0.06)_48%,transparent_70%)]" />
+      <div className="absolute inset-0 bg-[#060b0c]" />
+      <div className="absolute inset-x-0 top-0 h-px bg-[#263738]" />
     </div>
   );
 }
@@ -57,7 +63,7 @@ function ScoreCompareBar({ label, keyName, enhanced }) {
         </span>
       </div>
       <div className="relative h-4 overflow-hidden rounded-full border border-white/10 bg-black/35">
-        <div className="absolute inset-y-1 left-0 rounded-full bg-gradient-to-r from-[#3cb3a0]/80 to-[#8effed]/80" style={{ width: `${width}%` }} />
+        <div className="absolute inset-y-1 left-0 rounded-full bg-[#3f6f68]" style={{ width: `${width}%` }} />
       </div>
     </div>
   );
@@ -66,19 +72,23 @@ function ScoreCompareBar({ label, keyName, enhanced }) {
 function PseudoHDWarning({ report }) {
   const pseudoRisk = report.pseudo_hd_risk == null ? "安全" : report.pseudo_hd_risk;
   const artifactRisk = report.artifact_risk || "低风险";
-  const qualityPreserved = report.quality_preserved === false ? "需要复核" : "通过";
+  const finalDeliveryStatus = report.final_delivery_status || "";
+  const deliveryMeta = deliveryStatusMeta[finalDeliveryStatus] || { label: report.quality_preserved === false ? "建议人工复核" : "等待判定", tone: "#f0c36f", text: "等待后端交付状态或人工确认。" };
 
   return (
     <section className="rounded-lg border border-[#3cb3a0]/25 bg-[#3cb3a0]/[0.07] p-6 backdrop-blur-xl">
       <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Delivery Certification</p>
       <h2 className="mt-3 text-2xl font-semibold text-white">高清影像交付评估</h2>
       <div className="mt-5 rounded-lg border border-[#3cb3a0]/25 bg-[#040708]/55 p-5">
-        <p className="text-lg font-semibold text-[#8effed]">质量守门：{qualityPreserved}</p>
+        <p className="text-lg font-semibold" style={{ color: deliveryMeta.tone }}>最终交付：{deliveryMeta.label}</p>
         <p className="mt-2 text-sm leading-7 text-white/52">
-          当前报告用于评估输出图是否保持文字、边缘、色彩与层次稳定。此处不声明神经网络重建能力，只记录 V0.4 1080P 稳定交付结果。
+          {deliveryMeta.text} 当前报告只记录 V0.4.6 1080P 本地交付结果，不声明重绘或生成能力。
         </p>
       </div>
       <div className="mt-5 grid gap-3 font-mono text-xs">
+        <MetricRow label="交付原因" value={report.final_delivery_reason} />
+        <MetricRow label="风险等级" value={report.final_delivery_risk_level} />
+        <MetricRow label="建议用途" value={report.final_delivery_recommended_usage} />
         <MetricRow label="伪高清风险提示" value={pseudoRisk} />
         <MetricRow label="伪影伪作风险" value={artifactRisk} />
         <MetricRow label="编码提示" value={report.encoding_warning || "暂无数据"} />

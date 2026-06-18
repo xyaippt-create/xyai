@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
 
 const API_BASE = "http://localhost:8787";
-const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.4 1080P Stable Delivery Pipeline";
+const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
 
 const styles = {
   page: { backgroundColor: "#060b0c", fontFamily: "sans-serif" },
@@ -10,9 +10,8 @@ const styles = {
   primaryButton: {
     borderRadius: "4px",
     border: "1px solid #2d665f",
-    background: "linear-gradient(90deg, #1e4742 0%, #102d2a 100%)",
+    background: "#163631",
     color: "#5bf5dc",
-    boxShadow: "0 0 12px rgba(45,102,95,0.2)",
   },
   secondaryButton: { border: "1px solid #193336", color: "#8a999c", borderRadius: "4px" },
 };
@@ -50,13 +49,17 @@ function resolveAssets(taskConfig, compareAssets) {
   const currentTask = unwrapTaskPayload(taskConfig, compareAssets);
   const result = currentTask.task_result || {};
   const report = currentTask.task_report || {};
-  const enhancedImgSrc = result.final_output_url || currentTask.final_output_url || currentTask.enhancedUrl || currentTask.enhanced_url;
+  const enhancedImgSrc = result.preview_output_url || currentTask.preview_output_url || result.final_output_url || currentTask.final_output_url;
   const originalImgSrc = currentTask.originalUrl || currentTask.original_url || currentTask.input_url || result.original_url || result.input_url;
+  const finalDeliveryStatus = result.final_delivery_status || currentTask.final_delivery_status || currentTask.debug_quality?.final_delivery_status || "";
 
   return {
     originalUrl: normalizeUrl(originalImgSrc),
-    enhancedUrl: normalizeUrl(enhancedImgSrc || originalImgSrc),
+    enhancedUrl: normalizeUrl(enhancedImgSrc),
     finalOutputUrl: normalizeUrl(result.final_output_url || currentTask.final_output_url),
+    previewOutputUrl: normalizeUrl(result.preview_output_url || currentTask.preview_output_url),
+    finalDeliveryStatus,
+    finalDeliveryReason: result.final_delivery_reason || currentTask.final_delivery_reason || currentTask.debug_quality?.final_delivery_reason || "",
     fileName: currentTask.fileName || currentTask.filename || result.output_filename || result.input_filename || "等待真实上传资产",
     mode: currentTask.mode || taskConfig?.mode || "fidelity",
     result,
@@ -82,9 +85,8 @@ const qaMetrics = [
 function PolarBackdrop() {
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_6%,rgba(60,179,160,0.2),transparent_31rem),radial-gradient(circle_at_78%_18%,rgba(142,255,237,0.1),transparent_25rem),linear-gradient(180deg,#060b0c_0%,#071415_44%,#030607_100%)]" />
-      <div className="absolute left-0 top-0 h-full w-[34rem] bg-[repeating-linear-gradient(180deg,rgba(142,255,237,0.07)_0px,transparent_1px,transparent_21px)] opacity-60" />
-      <div className="absolute bottom-[9rem] left-1/2 h-px w-[86vw] -translate-x-1/2 bg-gradient-to-r from-transparent via-[#3cb3a0]/45 to-transparent" />
+      <div className="absolute inset-0 bg-[#060b0c]" />
+      <div className="absolute inset-x-0 top-0 h-px bg-[#263738]" />
     </div>
   );
 }
@@ -235,7 +237,7 @@ function QualityPanel({ assets }) {
                   <span className="font-mono text-sm font-bold text-[#8effed]">{value}</span>
                 </div>
                 <div className="mt-3 h-[3px] overflow-hidden rounded-full bg-[#0e1d1f]">
-                  <div className="h-full rounded-full bg-gradient-to-r from-[#173a37] via-[#3cb3a0] to-[#8effed]" style={{ width: `${width}%` }} />
+                  <div className="h-full rounded-full bg-[#3f6f68]" style={{ width: `${width}%` }} />
                 </div>
               </div>
             );
@@ -247,6 +249,8 @@ function QualityPanel({ assets }) {
         <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
         <h2 className="mt-2 text-xl font-semibold text-slate-100">字段绑定</h2>
         <div className="mt-4 space-y-3 font-mono text-xs text-slate-400">
+          <div style={styles.innerCard} className="p-3">交付状态：{assets.finalDeliveryStatus === "PASS_WITH_LIMITATION" ? "建议人工复核" : assets.finalDeliveryStatus === "PASS" ? "可交付" : assets.finalDeliveryStatus === "FAIL" ? "不可交付" : "暂无数据"}</div>
+          <div style={styles.innerCard} className="p-3">交付原因：{assets.finalDeliveryReason || "暂无数据"}</div>
           <div style={styles.innerCard} className="p-3">输出尺寸：{result.output_width || "暂无"} × {result.output_height || "暂无"}</div>
           <div style={styles.innerCard} className="p-3">尺寸策略：{result.resize_policy || "暂无数据"}</div>
           <div style={styles.innerCard} className="p-3">输出格式：{result.output_format || "暂无数据"}</div>
@@ -294,7 +298,7 @@ export default function ImageSliderComparePage({ taskConfig, compareAssets, onBa
       </header>
 
       <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-5">
-        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl || assets.originalUrl} fileName={assets.fileName} />
+        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl} fileName={assets.fileName} />
         <QualityPanel assets={assets} />
       </main>
 

@@ -47,8 +47,21 @@ const statusColor = {
   failed: "#ff8a8a",
 };
 
+const deliveryStatusLabel = {
+  PASS: "可交付",
+  PASS_WITH_LIMITATION: "建议人工复核",
+  FAIL: "不可交付",
+};
+
+const deliveryStatusColor = {
+  PASS: "#8be6b1",
+  PASS_WITH_LIMITATION: "#f0c36f",
+  FAIL: "#ff8a8a",
+};
+
 function normalizeApiUrl(url) {
   if (!url) return "";
+  if (/^[a-zA-Z]:[\\/]/.test(url) || /^\\\\/.test(url)) return "";
   if (/^https?:\/\//i.test(url)) return url;
   return `${API_BASE}${url.startsWith("/") ? url : `/${url}`}`;
 }
@@ -72,15 +85,26 @@ function extractTaskPayload(payload) {
   const task = data.task || payload?.task || {};
   const taskResult = data.task_result || payload?.task_result || task.task_result || {};
   const taskReport = data.task_report || payload?.task_report || task.task_report || {};
+  const debugQuality = data.debug_quality || payload?.debug_quality || task.debug_quality || taskResult.debug_quality || {};
   const taskId = payload?.taskId || payload?.task_id || data.taskId || data.task_id || task.taskId || task.task_id;
   const finalOutputUrl =
+    taskResult.preview_output_url ||
+    task.preview_output_url ||
+    data.preview_output_url ||
+    payload?.preview_output_url ||
     taskResult.final_output_url ||
     task.final_output_url ||
     data.final_output_url ||
-    data.enhancedUrl ||
-    payload?.final_output_url ||
-    payload?.enhancedUrl;
+    payload?.final_output_url;
   const originalUrl = data.originalUrl || payload?.originalUrl || task.originalUrl || taskResult.originalUrl || "";
+  const finalDeliveryStatus =
+    taskResult.final_delivery_status ||
+    debugQuality.final_delivery_status ||
+    taskReport.final_delivery_status ||
+    task.final_delivery_status ||
+    data.final_delivery_status ||
+    payload?.final_delivery_status ||
+    "";
 
   return {
     data,
@@ -90,7 +114,34 @@ function extractTaskPayload(payload) {
     originalUrl: normalizeApiUrl(originalUrl),
     task_result: taskResult,
     task_report: taskReport,
+    debug_quality: debugQuality,
     final_output_url: normalizeApiUrl(finalOutputUrl),
+    preview_output_url: normalizeApiUrl(taskResult.preview_output_url || task.preview_output_url || data.preview_output_url || payload?.preview_output_url),
+    final_delivery_status: finalDeliveryStatus,
+    final_delivery_reason:
+      taskResult.final_delivery_reason ||
+      debugQuality.final_delivery_reason ||
+      taskReport.final_delivery_reason ||
+      task.final_delivery_reason ||
+      data.final_delivery_reason ||
+      payload?.final_delivery_reason ||
+      "",
+    final_delivery_risk_level:
+      taskResult.final_delivery_risk_level ||
+      debugQuality.final_delivery_risk_level ||
+      taskReport.final_delivery_risk_level ||
+      task.final_delivery_risk_level ||
+      data.final_delivery_risk_level ||
+      payload?.final_delivery_risk_level ||
+      "",
+    final_delivery_recommended_usage:
+      taskResult.final_delivery_recommended_usage ||
+      debugQuality.final_delivery_recommended_usage ||
+      taskReport.final_delivery_recommended_usage ||
+      task.final_delivery_recommended_usage ||
+      data.final_delivery_recommended_usage ||
+      payload?.final_delivery_recommended_usage ||
+      "",
   };
 }
 
@@ -242,6 +293,29 @@ function StatusPill({ status }) {
   );
 }
 
+function DeliveryPill({ status }) {
+  const normalized = status || "WAITING";
+  const color = deliveryStatusColor[normalized] || "#6e7d80";
+  const label = deliveryStatusLabel[normalized] || "等待判定";
+  return (
+    <span
+      style={{
+        color,
+        background: "#0d181a",
+        border: `1px solid ${normalized === "PASS" ? "#315342" : normalized === "PASS_WITH_LIMITATION" ? "#66532d" : normalized === "FAIL" ? "#5a2525" : "#263738"}`,
+        borderRadius: "4px",
+        padding: "4px 8px",
+        fontSize: "10px",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        whiteSpace: "nowrap",
+      }}
+      title={normalized}
+    >
+      {label}
+    </span>
+  );
+}
+
 function ParameterPanel({ outputFormat }) {
   const rows = [
     { label: "交付方案", value: "高清交付 1080P" },
@@ -276,16 +350,25 @@ function makeTaskConfig(item) {
     fileName: item.name,
     filename: item.name,
     originalUrl: item.originalUrl,
-    enhancedUrl: item.final_output_url,
     final_output_url: item.final_output_url,
+    preview_output_url: item.preview_output_url,
+    final_delivery_status: item.final_delivery_status,
+    final_delivery_reason: item.final_delivery_reason,
+    final_delivery_risk_level: item.final_delivery_risk_level,
+    final_delivery_recommended_usage: item.final_delivery_recommended_usage,
     mode: item.mode,
     output_format: item.output_format,
     task_status: item.status,
     task_result: {
       ...(item.task_result || {}),
       final_output_url: item.final_output_url || item.task_result?.final_output_url || "",
+      preview_output_url: item.preview_output_url || item.task_result?.preview_output_url || "",
       originalUrl: item.originalUrl || "",
       output_filename: item.output_filename || item.task_result?.output_filename || "",
+      final_delivery_status: item.final_delivery_status || item.task_result?.final_delivery_status || "",
+      final_delivery_reason: item.final_delivery_reason || item.task_result?.final_delivery_reason || "",
+      final_delivery_risk_level: item.final_delivery_risk_level || item.task_result?.final_delivery_risk_level || "",
+      final_delivery_recommended_usage: item.final_delivery_recommended_usage || item.task_result?.final_delivery_recommended_usage || "",
     },
     task_report: item.task_report || {},
     debug_quality: item.debug_quality || item.task_result?.debug_quality || {},
@@ -293,13 +376,20 @@ function makeTaskConfig(item) {
       taskId: item.taskId,
       fileName: item.name,
       originalUrl: item.originalUrl,
-      enhancedUrl: item.final_output_url,
       final_output_url: item.final_output_url,
+      preview_output_url: item.preview_output_url,
+      final_delivery_status: item.final_delivery_status,
+      final_delivery_reason: item.final_delivery_reason,
       mode: item.mode,
       task_result: {
         ...(item.task_result || {}),
         final_output_url: item.final_output_url || item.task_result?.final_output_url || "",
+        preview_output_url: item.preview_output_url || item.task_result?.preview_output_url || "",
         originalUrl: item.originalUrl || "",
+        final_delivery_status: item.final_delivery_status || item.task_result?.final_delivery_status || "",
+        final_delivery_reason: item.final_delivery_reason || item.task_result?.final_delivery_reason || "",
+        final_delivery_risk_level: item.final_delivery_risk_level || item.task_result?.final_delivery_risk_level || "",
+        final_delivery_recommended_usage: item.final_delivery_recommended_usage || item.task_result?.final_delivery_recommended_usage || "",
       },
       task_report: item.task_report || {},
     },
@@ -366,6 +456,13 @@ export default function DashboardPage() {
       output_height: 0,
       resize_policy: "",
       final_output_url: "",
+      preview_output_url: "",
+      final_delivery_status: "",
+      final_delivery_reason: "",
+      final_delivery_risk_level: "",
+      final_delivery_recommended_usage: "",
+      feedback_bundle_status: "",
+      feedback_bundle_path: "",
       output_path: "",
       output_filename: "",
       input_path: "",
@@ -497,8 +594,9 @@ export default function DashboardPage() {
 
       const taskResult = merged.task_result || {};
       const taskReport = merged.task_report || {};
-      const finalOutputUrl = normalizeApiUrl(taskResult.final_output_url || merged.final_output_url);
+      const finalOutputUrl = normalizeApiUrl(taskResult.preview_output_url || merged.preview_output_url || taskResult.final_output_url || merged.final_output_url);
       const debugQuality = taskResult.debug_quality || merged.debug_quality || {};
+      const finalDeliveryStatus = merged.final_delivery_status || taskResult.final_delivery_status || debugQuality.final_delivery_status || "";
 
       updateQueueItem(item.id, {
         status: "completed",
@@ -507,6 +605,11 @@ export default function DashboardPage() {
         task_report: taskReport,
         debug_quality: debugQuality,
         final_output_url: finalOutputUrl,
+        preview_output_url: normalizeApiUrl(taskResult.preview_output_url || merged.preview_output_url),
+        final_delivery_status: finalDeliveryStatus,
+        final_delivery_reason: merged.final_delivery_reason || taskResult.final_delivery_reason || debugQuality.final_delivery_reason || "",
+        final_delivery_risk_level: merged.final_delivery_risk_level || taskResult.final_delivery_risk_level || debugQuality.final_delivery_risk_level || "",
+        final_delivery_recommended_usage: merged.final_delivery_recommended_usage || taskResult.final_delivery_recommended_usage || debugQuality.final_delivery_recommended_usage || "",
         output_path: taskResult.output_path || "",
         output_filename: taskResult.output_filename || "",
         output_dir: taskResult.output_dir || activeOutputDir,
@@ -577,6 +680,23 @@ export default function DashboardPage() {
     if (!item?.task_report && !item?.debug_quality) return;
     setActiveItemId(item.id);
     setActiveScreen("quality_report");
+  };
+
+  const handleCreateFeedbackBundle = async (item) => {
+    if (!item?.taskId) return;
+    try {
+      const payload = await requestJson("POST", `${API_BASE}/api/v1/tasks/${encodeURIComponent(item.taskId)}/feedback-bundle`, {});
+      const bundle = payload?.data || payload || {};
+      updateQueueItem(item.id, {
+        feedback_bundle_status: bundle.feedback_bundle_status || "",
+        feedback_bundle_path: bundle.feedback_bundle_path || "",
+        feedback_bundle_size: bundle.feedback_bundle_size || 0,
+      });
+      setNotice(bundle.feedback_bundle_status === "PASS" ? "诊断反馈包已生成。" : "诊断反馈包生成失败。");
+    } catch (error) {
+      updateQueueItem(item.id, { feedback_bundle_status: "FAIL" });
+      setNotice(error.message || "诊断反馈包生成失败。");
+    }
   };
 
   if (activeScreen === "task_detail") {
@@ -702,7 +822,7 @@ export default function DashboardPage() {
               <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "880px", fontSize: "11px" }}>
                 <thead style={{ position: "sticky", top: 0, backgroundColor: "#0d181a", color: "#6e7d80", zIndex: 1 }}>
                   <tr>
-                    {["文件名", "输入尺寸", "输出尺寸", "处理模式", "输出格式", "当前状态", "输出文件名", "操作"].map((head) => (
+                    {["文件名", "输入尺寸", "输出尺寸", "处理模式", "输出格式", "当前状态", "交付状态", "输出文件名", "操作"].map((head) => (
                       <th key={head} style={{ padding: "9px 8px", textAlign: "left", borderBottom: "1px solid #263738", whiteSpace: "nowrap", fontWeight: 500 }}>{head}</th>
                     ))}
                   </tr>
@@ -710,7 +830,7 @@ export default function DashboardPage() {
                 <tbody>
                   {!fileQueue.length ? (
                     <tr>
-                      <td colSpan={8} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
+                      <td colSpan={9} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
                     </tr>
                   ) : (
                     fileQueue.map((item) => (
@@ -721,11 +841,13 @@ export default function DashboardPage() {
                         <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.mode || activeMode}</td>
                         <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{(item.output_format || outputFormat).toUpperCase()}</td>
                         <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628" }}><StatusPill status={item.status} /></td>
+                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628" }}><DeliveryPill status={item.final_delivery_status} /></td>
                         <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: item.error ? "#ff8a8a" : "#9ba9ab", maxWidth: "190px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.output_filename || item.error}>{item.output_filename || item.error || "等待输出"}</td>
                         <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", whiteSpace: "nowrap" }}>
                           <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} style={{ marginRight: "8px", color: "#6feaf0", background: "none", border: 0, cursor: "pointer", fontSize: "11px" }}>定位</button>
                           <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} style={{ marginRight: "8px", color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看对比</button>
                           <button type="button" disabled={item.status !== "completed"} onClick={() => selectForReport(item)} style={{ color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看报告</button>
+                          <button type="button" disabled={item.status !== "completed"} onClick={() => handleCreateFeedbackBundle(item)} style={{ marginLeft: "8px", color: item.status === "completed" ? "#f0c36f" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>诊断包</button>
                         </td>
                       </tr>
                     ))
@@ -737,11 +859,13 @@ export default function DashboardPage() {
               <summary style={{ cursor: "pointer", color: "#6feaf0" }}>Debug Runtime Monitor</summary>
               <pre style={{ margin: "8px 0 0", maxHeight: "120px", overflow: "auto", backgroundColor: "#040708", border: "1px solid #132628", borderRadius: "4px", padding: "10px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
                 {debugItem ? JSON.stringify({
-                  input_path: debugItem.input_path,
-                  output_path: debugItem.output_path,
-                  hash_equal: debugItem.hash_equal,
-                  pixel_diff_score: debugItem.pixel_diff_score,
-                  debug_timing: debugItem.debug_timing,
+                  taskId: debugItem.taskId,
+                  final_delivery_status: debugItem.final_delivery_status,
+                  final_delivery_reason: debugItem.final_delivery_reason,
+                  final_delivery_risk_level: debugItem.final_delivery_risk_level,
+                  final_output_url: debugItem.final_output_url,
+                  preview_output_url: debugItem.preview_output_url,
+                  feedback_bundle_status: debugItem.feedback_bundle_status,
                 }, null, 2) : "请选择一张队列图片查看运行时字段。"}
               </pre>
             </details>

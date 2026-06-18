@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.4 1080P Stable Delivery Pipeline";
+const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
 
 const checkGroups = [
   {
@@ -51,9 +51,8 @@ function StatusPill({ status }) {
 function CinematicTerrain() {
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_18%,rgba(60,179,160,0.18),transparent_30%),linear-gradient(180deg,rgba(3,16,20,0.05),rgba(3,16,20,0.95))]" />
-      <div className="absolute left-1/2 top-[60%] h-[44rem] w-[140vw] -translate-x-1/2 rotate-[-3deg] rounded-[50%] border border-[#3cb3a0]/20 bg-[radial-gradient(ellipse_at_center,rgba(60,179,160,0.16),rgba(7,25,31,0.12)_36%,transparent_68%)] blur-[1px]" />
-      <div className="absolute bottom-[-14rem] left-1/2 h-[38rem] w-[120vw] -translate-x-1/2 rounded-[50%] border-t border-[#3cb3a0]/30 bg-[linear-gradient(90deg,rgba(60,179,160,0.04)_1px,transparent_1px),linear-gradient(0deg,rgba(60,179,160,0.05)_1px,transparent_1px)] bg-[size:48px_48px]" />
+      <div className="absolute inset-0 bg-[#090e10]" />
+      <div className="absolute inset-x-0 top-0 h-px bg-[#263738]" />
     </div>
   );
 }
@@ -61,14 +60,10 @@ function CinematicTerrain() {
 function SculptedTitle() {
   return (
     <div className="relative mx-auto max-w-5xl px-12 text-center">
-      <p className="font-mono text-xs uppercase tracking-[0.72em] text-[#8effed]/70">Visual Master Pro</p>
+      <p className="font-mono text-xs uppercase tracking-[0.32em] text-[#8aa0a2]">VisualMasterPro</p>
       <div className="relative mt-8">
         <h1
-          className="relative z-10 flex flex-row items-center justify-center whitespace-nowrap bg-gradient-to-b from-white via-slate-100 to-emerald-50/20 bg-clip-text text-4xl font-black leading-none tracking-[0.18em] text-transparent md:text-5xl"
-          style={{
-            WebkitTextStroke: "0.7px rgba(255,255,255,0.72)",
-            textShadow: "0 1px 0 #ffffff, 0 2px 1px rgba(0,0,0,0.4), 0 4px 6px rgba(0,0,0,0.15)",
-          }}
+          className="relative z-10 flex flex-row items-center justify-center whitespace-nowrap text-4xl font-semibold leading-none tracking-[0.08em] text-slate-100 md:text-5xl"
         >
           高清交付引擎
         </h1>
@@ -136,7 +131,7 @@ export default function LaunchPage({ onEnter }) {
             const status = statusMap[group.key];
             const active = index === activeIndex;
             return (
-              <div key={group.key} className={`rounded-lg border p-6 backdrop-blur-xl transition ${active ? "border-[#8effed]/45 bg-[#3cb3a0]/12" : "border-white/10 bg-white/[0.045]"}`}>
+              <div key={group.key} className={`rounded-lg border p-6 transition ${active ? "border-[#6f8f8a] bg-[#101819]" : "border-white/10 bg-white/[0.035]"}`}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="text-left">
                     <p className="font-mono text-xs uppercase tracking-[0.38em] text-[#418c80]">{group.label}</p>

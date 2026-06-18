@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = "http://localhost:8787";
 const EXPECTED_LOG_TOTAL = 11;
-const PAGE_FOOTER = "© 2026 雪原系统. 保留所有权利。 V0.4 1080P Stable Delivery Pipeline";
+const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
 
 const styles = {
   page: { backgroundColor: "#060b0c", fontFamily: "sans-serif" },
@@ -11,8 +11,7 @@ const styles = {
   innerCard: { backgroundColor: "#0d181a", border: "1px solid #193336", borderRadius: "4px" },
   progressBg: { backgroundColor: "#0e1d1f", borderRadius: "9999px" },
   progressBar: {
-    background: "linear-gradient(90deg, #173a37 0%, #3cb3a0 50%, #8effed 100%)",
-    boxShadow: "0 0 10px rgba(60,179,160,0.75)",
+    background: "#3f6f68",
   },
   primaryButton: {
     borderRadius: "4px",
@@ -29,6 +28,12 @@ const styles = {
   },
   secondaryButton: { border: "1px solid #193336", color: "#8a999c", borderRadius: "4px" },
   logBox: { backgroundColor: "#040708", border: "1px solid #0d1a1b", borderRadius: "4px" },
+};
+
+const deliveryStatusMeta = {
+  PASS: { label: "可交付", color: "#8be6b1", border: "#315342", desc: "后台交付门通过，可进入正常 1080P 查看。" },
+  PASS_WITH_LIMITATION: { label: "建议人工复核", color: "#f0c36f", border: "#66532d", desc: "后台已完成输出，但存在质量门、体积或平滑区域限制，需人工查看。" },
+  FAIL: { label: "不可交付", color: "#ff8a8a", border: "#5a2525", desc: "后台交付门阻断，不能作为正式成品使用。" },
 };
 
 const timelines = [
@@ -177,6 +182,12 @@ export default function TaskDetailPage({
   const streamUrl = useMemo(() => normalizeUrl(taskConfig?.streamEndpoint || taskConfig?.compareAssets?.streamEndpoint, taskId), [taskConfig, taskId]);
   const result = taskConfig?.task_result || taskConfig?.compareAssets?.task_result || {};
   const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || null;
+  const debugQuality = taskConfig?.debug_quality || result.debug_quality || taskConfig?.compareAssets?.debug_quality || {};
+  const finalDeliveryStatus = taskConfig?.final_delivery_status || result.final_delivery_status || debugQuality.final_delivery_status || "";
+  const finalDeliveryReason = taskConfig?.final_delivery_reason || result.final_delivery_reason || debugQuality.final_delivery_reason || "";
+  const finalDeliveryRisk = taskConfig?.final_delivery_risk_level || result.final_delivery_risk_level || debugQuality.final_delivery_risk_level || "";
+  const finalDeliveryUsage = taskConfig?.final_delivery_recommended_usage || result.final_delivery_recommended_usage || debugQuality.final_delivery_recommended_usage || "";
+  const deliveryMeta = deliveryStatusMeta[finalDeliveryStatus] || { label: "等待判定", color: "#6e7d80", border: "#263738", desc: "等待后端返回最终交付状态。" };
   const mode = taskConfig?.mode || taskConfig?.compareAssets?.mode || "fidelity";
   const format = result.output_format || taskConfig?.output_format || taskConfig?.format || "auto";
   const target = result.target_resolution || "1080P 稳定交付";
@@ -273,6 +284,18 @@ export default function TaskDetailPage({
             模式: <span className="text-slate-400">{mode}</span> · 目标规格: <span className="text-slate-400">{target}</span> · 格式:{" "}
             <span className="text-slate-400">{format}</span> · 质量报告: <span className="text-slate-400">{report ? "已绑定" : "等待生成"}</span>
           </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+            <span
+              className="rounded border px-3 py-1 font-mono tracking-[0.12em]"
+              style={{ color: deliveryMeta.color, borderColor: deliveryMeta.border, backgroundColor: "#0d181a" }}
+            >
+              {deliveryMeta.label}
+            </span>
+            <span className="text-slate-500">{deliveryMeta.desc}</span>
+            {finalDeliveryReason ? <span className="font-mono text-slate-500">reason: {finalDeliveryReason}</span> : null}
+            {finalDeliveryRisk ? <span className="font-mono text-slate-500">risk: {finalDeliveryRisk}</span> : null}
+            {finalDeliveryUsage ? <span className="font-mono text-slate-500">usage: {finalDeliveryUsage}</span> : null}
+          </div>
         </div>
 
         <div className="mt-1 flex space-x-3">
