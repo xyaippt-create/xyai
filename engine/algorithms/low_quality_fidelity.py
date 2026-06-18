@@ -53,6 +53,50 @@ def phase4_quality_probes(image: np.ndarray) -> dict[str, float]:
     }
 
 
+def _phase4_flat_region_mask(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype("float32")
+    mean = cv2.GaussianBlur(gray, (0, 0), 3.2)
+    mean_sq = cv2.GaussianBlur(gray * gray, (0, 0), 3.2)
+    local_std = np.sqrt(np.maximum(mean_sq - mean * mean, 0.0))
+    edges = cv2.Canny(np.clip(gray, 0, 255).astype("uint8"), 55, 135)
+    edge_soft = cv2.dilate(edges, np.ones((5, 5), dtype=np.uint8), iterations=1).astype("float32") / 255.0
+    flat = np.clip((4.8 - local_std) / 4.8, 0.0, 1.0)
+    flat *= 1.0 - edge_soft * 0.88
+    flat = cv2.GaussianBlur(flat, (0, 0), 3.0)
+    return np.clip(flat, 0.0, 1.0).astype("float32")
+
+
+def phase4_low_frequency_risk(reference: np.ndarray, candidate: np.ndarray) -> float:
+    if reference.shape[:2] != candidate.shape[:2]:
+        reference = cv2.resize(reference, (candidate.shape[1], candidate.shape[0]), interpolation=cv2.INTER_AREA)
+    ref_l = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype("float32")[:, :, 0]
+    out_l = cv2.cvtColor(candidate, cv2.COLOR_BGR2LAB).astype("float32")[:, :, 0]
+    flat = _phase4_flat_region_mask(reference)
+    low_diff = np.abs(cv2.GaussianBlur(out_l - ref_l, (0, 0), 7.0))
+    if float(np.mean(flat > 0.45)) < 0.004:
+        return 0.0
+    risk = float(np.percentile(low_diff[flat > 0.45], 95))
+    return round(float(np.clip(risk / 4.0, 0.0, 1.0)), 6)
+
+
+def phase4_color_drift_metrics(reference: np.ndarray, candidate: np.ndarray) -> dict[str, float]:
+    if reference.shape[:2] != candidate.shape[:2]:
+        reference = cv2.resize(reference, (candidate.shape[1], candidate.shape[0]), interpolation=cv2.INTER_AREA)
+    ref_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype("float32")
+    out_lab = cv2.cvtColor(candidate, cv2.COLOR_BGR2LAB).astype("float32")
+    delta = np.linalg.norm(ref_lab - out_lab, axis=2)
+    ref_hsv = cv2.cvtColor(reference, cv2.COLOR_BGR2HSV).astype("float32")
+    out_hsv = cv2.cvtColor(candidate, cv2.COLOR_BGR2HSV).astype("float32")
+    ref_sat = ref_hsv[:, :, 1] / 255.0
+    out_sat = out_hsv[:, :, 1] / 255.0
+    return {
+        "mean_delta_e": round(float(np.mean(delta)), 6),
+        "p95_delta_e": round(float(np.percentile(delta, 95)), 6),
+        "saturation_delta": round(float(np.mean(out_sat) - np.mean(ref_sat)), 6),
+        "high_saturation_pixel_ratio_delta": round(float(np.mean(out_sat > 0.68) - np.mean(ref_sat > 0.68)), 6),
+    }
+
+
 def phase4_text_protection_stats(image: np.ndarray) -> dict[str, Any]:
     try:
         text_mask = detect_text_like_regions(image)
@@ -105,6 +149,9 @@ def phase4_restoration_masks(image: np.ndarray, policy: dict[str, Any] | None = 
     edges = cv2.Canny(gray, 90, 190)
     small_edges = cv2.dilate(edges, np.ones((3, 3), dtype=np.uint8), iterations=1).astype("float32") / 255.0
     protected = np.maximum(protected, small_edges * 0.42)
+    flat_mask = _phase4_flat_region_mask(image)
+    flat_strength = 0.82 if policy.get("phase4_product_photo_eligible") else 0.94
+    protected = np.maximum(protected, flat_mask * flat_strength)
 
     protected = cv2.GaussianBlur(protected, (0, 0), 2.0)
     protected = np.clip(protected, 0.0, 1.0)
@@ -113,6 +160,7 @@ def phase4_restoration_masks(image: np.ndarray, policy: dict[str, Any] | None = 
     restoration = 1.0 - protected
     return {
         "text_mask": np.clip(text_binary.astype("float32"), 0.0, 1.0),
+        "flat_region_mask": flat_mask.astype("float32"),
         "protected_mask": protected.astype("float32"),
         "restoration_mask": restoration.astype("float32"),
     }
@@ -146,6 +194,15 @@ def phase4_low_quality_policy(
     text_info = text_stats or {}
     text_mask_ratio = float(text_info.get("text_mask_ratio", text_density) or 0.0)
     largest_text_region_ratio = float(text_info.get("largest_text_region_ratio") or 0.0)
+    flat_region_ratio = float(
+        np.clip(
+            low_saturation_ratio * 0.58
+            + (1.0 - min(texture_density / 0.03, 1.0)) * 0.28
+            + (1.0 - min(edge_density / 0.04, 1.0)) * 0.14,
+            0.0,
+            1.0,
+        )
+    )
 
     photographicity_score = float(
         np.clip(
@@ -166,6 +223,16 @@ def phase4_low_quality_policy(
     soft_focus = blur_risk > 0.18
     dirty_shadow = shadow_dirt_risk > 0.18
     jpeg_compression = jpeg_like and (compression_risk > 0.018 or input_size_bytes < max(1, input_width * input_height * 0.18))
+    product_photo_eligible = bool(
+        jpeg_like
+        and min_side >= 640
+        and image_type in {"text_poster", "product_kv", "unknown"}
+        and 0.002 <= text_mask_ratio <= 0.09
+        and largest_text_region_ratio < 0.022
+        and edge_density < 0.018
+        and low_saturation_ratio > 0.34
+        and (jpeg_compression or soft_focus or low_contrast)
+    )
 
     pure_text_layout = bool(
         mode == "text_safe"
@@ -222,7 +289,7 @@ def phase4_low_quality_policy(
     elif alpha_risk:
         active = False
         skip_reason = "alpha_protected"
-    elif gradient_risk:
+    elif gradient_risk and not product_photo_eligible:
         active = False
         skip_reason = "synthetic_gradient_protected"
     elif fine_line_risk:
@@ -250,6 +317,9 @@ def phase4_low_quality_policy(
             strength += 0.008
         if soft_focus:
             strength += 0.006
+        if product_photo_eligible:
+            strength *= 0.45
+            skip_reason = "product_photo_fidelity_safe"
         if image_type == "portrait":
             strength *= 0.56
             skip_reason = "portrait_fidelity_safe"
@@ -277,6 +347,11 @@ def phase4_low_quality_policy(
     return {
         "phase4_photo_eligible": bool(active and not pure_text_layout),
         "phase4_low_quality_active": bool(active),
+        "phase4_product_photo_eligible": product_photo_eligible,
+        "phase4_flat_region_protected": bool(flat_region_ratio >= 0.46 or gradient_risk),
+        "phase4_product_subject_active": bool(active and product_photo_eligible),
+        "phase4_gradient_background_protected": bool(gradient_risk or flat_region_ratio >= 0.58),
+        "phase4_flat_region_ratio": round(flat_region_ratio, 6),
         "phase4_text_mask_ratio": round(text_mask_ratio, 6),
         "phase4_text_protection_mode": text_mode,
         "phase4_nontext_restoration_active": bool(active and text_mode in {"local", "none"}),
@@ -293,6 +368,11 @@ def phase4_low_quality_policy(
         "compression_risk_before": round(compression_risk, 6),
         "shadow_dirt_risk_before": round(shadow_dirt_risk, 6),
         "local_contrast_before": round(local_contrast, 6),
+        "phase4_low_frequency_risk_before": 0.0,
+        "phase4_low_frequency_risk_after": 0.0,
+        "phase4_color_drift_risk": "low",
+        "phase4_fallback_triggered": False,
+        "phase4_fallback_reason": "",
     }
 
 
@@ -342,7 +422,45 @@ def phase4_low_quality_restore(
     restored_luma = luma * (1.0 - clean_blend) + den_luma * clean_blend
     restored_luma = restored_luma * (1.0 - contrast_blend) + contrast * contrast_blend
     restored_luma = restored_luma + structure * structure_blend
+    max_luma_delta = 1.55 if policy.get("phase4_product_photo_eligible") else 2.35
+    restored_luma = np.clip(restored_luma, luma - max_luma_delta, luma + max_luma_delta)
 
     lab[:, :, 0] = np.clip(restored_luma, 0, 255)
     restored = cv2.cvtColor(lab.astype("uint8"), cv2.COLOR_LAB2BGR)
-    return lock_color_to_reference(reference, restored, chroma_strength=0.995, luma_strength=0.018)
+    restored = lock_color_to_reference(image, restored, chroma_strength=1.0, luma_strength=0.0)
+    low_freq_before = phase4_low_frequency_risk(image, image)
+    low_freq_after = phase4_low_frequency_risk(image, restored)
+    color = phase4_color_drift_metrics(image, restored)
+    policy["phase4_low_frequency_risk_before"] = low_freq_before
+    policy["phase4_low_frequency_risk_after"] = low_freq_after
+    is_product_photo = bool(policy.get("phase4_product_photo_eligible"))
+    is_real_photo_like = bool(
+        is_product_photo
+        or policy.get("face_or_person_detected")
+        or float(policy.get("photographicity_score") or 0.0) >= 0.34
+        or float(policy.get("local_texture_score") or 0.0) >= 0.08
+    )
+    low_freq_limit = 0.42 if is_product_photo else (0.34 if is_real_photo_like else 0.22)
+    saturation_limit = 0.025 if is_product_photo else (0.018 if is_real_photo_like else 0.012)
+    high_sat_limit = 0.018 if is_product_photo else (0.014 if is_real_photo_like else 0.01)
+    policy["phase4_color_drift_risk"] = "high" if (
+        color["p95_delta_e"] > 3.0
+        or abs(color["saturation_delta"]) > saturation_limit
+        or abs(color["high_saturation_pixel_ratio_delta"]) > high_sat_limit
+    ) else "low"
+    fallback_reasons: list[str] = []
+    if low_freq_after > low_freq_limit:
+        fallback_reasons.append(f"low_frequency_risk={low_freq_after}")
+    if color["p95_delta_e"] > 3.0:
+        fallback_reasons.append(f"p95_delta_e={color['p95_delta_e']}")
+    if abs(color["saturation_delta"]) > saturation_limit:
+        fallback_reasons.append(f"saturation_delta={color['saturation_delta']}")
+    if fallback_reasons:
+        policy["phase4_fallback_triggered"] = True
+        policy["phase4_fallback_reason"] = ";".join(fallback_reasons)
+        policy["phase4_low_quality_active"] = False
+        policy["phase4_restoration_strength"] = 0.0
+        return image
+    policy["phase4_fallback_triggered"] = False
+    policy["phase4_fallback_reason"] = ""
+    return restored
