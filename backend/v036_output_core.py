@@ -15,6 +15,7 @@ import numpy as np
 
 from engine.algorithms.color_fidelity import lock_color_to_reference
 from engine.algorithms.color_stability import phase5_default_color_stability, phase5_color_metrics
+from engine.algorithms.delivery_guard import phase6_delivery_guard_policy, phase6_smooth_region_metrics
 from engine.algorithms.edge_halo_control import phase3_edge_halo_control, phase3_edge_policy
 from engine.algorithms.edge_safe_enhance import enhance_true_edges
 from engine.algorithms.highlight_protection import compress_clipped_highlights, protect_highlights
@@ -1396,6 +1397,7 @@ def process_v036_output(
     main_visual_pass, main_level, visual_note = visual_gate(main_metrics, plan["text_density"], image_type)
     candidate_metrics = quality_metrics(enhanced, optimized_image, plan["text_density"])
     compression = compression_gate(enhanced, optimized_image, profile, plan["text_density"], candidate_metrics, image_type)
+    phase6_smooth_metrics = phase6_smooth_region_metrics(reference, enhanced)
     timings["quality_gate_time"] = round(time.perf_counter() - start, 6)
 
     main_size = paths["main"].stat().st_size
@@ -1424,6 +1426,19 @@ def process_v036_output(
     file_size_ratio = round(final_size / max(input_size_bytes, 1), 4)
     compression_saved_ratio = round(max(main_size - final_size, 0) / max(main_size, 1), 4)
     final_output_type = final_quality_source
+    phase6_policy = phase6_delivery_guard_policy(
+        input_size_bytes=input_size_bytes,
+        main_size_bytes=main_size,
+        optimized_size_bytes=optimized_size,
+        final_size_bytes=final_size,
+        main_metrics=main_metrics,
+        candidate_metrics=candidate_metrics,
+        compression=compression,
+        quality_1080p_pass=quality_1080p_pass,
+        final_quality_source=final_quality_source,
+        image_type=image_type,
+        smooth_metrics=phase6_smooth_metrics,
+    )
 
     if use_optimized:
         compression_note = "已完成无感体积优化，画质守门通过，文字、边缘和色彩保持稳定。"
@@ -1449,6 +1464,10 @@ def process_v036_output(
         warnings.append("输出图疑似原图复制：output_changed=false，请检查增强管线。")
     if file_size_ratio > 8.0:
         warnings.append(f"输出体积异常增大：ratio={file_size_ratio}，建议评估 JPG/WebP 或压缩参数。")
+    if phase6_policy["phase6_size_fallback_triggered"]:
+        warnings.append(f"Phase 6 size guard: {phase6_policy['phase6_size_fallback_reason']}")
+    if phase6_smooth_metrics["phase6_smooth_region_fallback"]:
+        warnings.append(f"Phase 6 smooth-region guard: {phase6_smooth_metrics['phase6_smooth_region_fallback_reason']}")
     if not quality_1080p_pass:
         warnings.append("1080P 质量守门未完全通过，final 已回退到当前质量最稳定图。")
     if final_path.name.lower().endswith(("_main.png", "_optimized.png")):
@@ -1594,6 +1613,9 @@ def process_v036_output(
         "phase5_highlight_color_delta_after": phase5_policy["phase5_metrics_after"]["highlight_color_delta"],
         "phase5_shadow_color_delta_after": phase5_policy["phase5_metrics_after"]["shadow_color_delta"],
         "phase5_delta_from_phase4": phase5_delta_from_phase4,
+        "v046_phase6_profile": "delivery quality and size guard",
+        **phase6_smooth_metrics,
+        **phase6_policy,
         "photographicity_score": phase4_policy["photographicity_score"],
         "face_or_person_detected": phase4_policy["face_or_person_detected"],
         "local_texture_score": phase4_policy["local_texture_score"],
@@ -1650,6 +1672,10 @@ def process_v036_output(
         "v046_text_engine_active": v046_text_engine_active,
         "encoding_warning": encoding_warning,
         "delivery_score": main_metrics["visual_score"],
+        "final_delivery_status": phase6_policy["final_delivery_status"],
+        "final_delivery_reason": phase6_policy["final_delivery_reason"],
+        "final_delivery_risk_level": phase6_policy["final_delivery_risk_level"],
+        "final_delivery_recommended_usage": phase6_policy["final_delivery_recommended_usage"],
         "warnings": warnings,
     }
     task_result = {
@@ -1673,6 +1699,14 @@ def process_v036_output(
         "input_filename": input_path.name,
         "image_type": image_type,
         "degradation_type": degradation_type,
+        "output_directory": str(final_path.parent),
+        "output_directory_source": "core_output_root",
+        "final_output_path": str(final_path),
+        "final_output_filename": final_path.name,
+        "final_delivery_status": phase6_policy["final_delivery_status"],
+        "final_delivery_reason": phase6_policy["final_delivery_reason"],
+        "final_delivery_risk_level": phase6_policy["final_delivery_risk_level"],
+        "final_delivery_recommended_usage": phase6_policy["final_delivery_recommended_usage"],
     }
 
     result = {
@@ -1714,6 +1748,7 @@ def process_v036_output(
         "compression_saved_ratio": compression_saved_ratio,
         "quality_preserved": bool(quality_1080p_pass),
         "compression_note": compression_note,
+        **phase6_policy,
         "input_hash": input_hash,
         "output_hash": final_hash,
         "hash_equal": hash_equal,

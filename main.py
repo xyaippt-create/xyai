@@ -40,13 +40,15 @@ SUPPORTED_MODES = [
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
-DEFAULT_WORK_DIR_NAME = "\u96ea\u539fAi\u589e\u5f3a\u5f15\u64ce"
+DEFAULT_WORK_DIR_NAME = "影界文件"
 DEFAULT_INPUT_DIR_NAME = "\u8f93\u5165\u56fe\u7247"
 DEFAULT_OUTPUT_DIR_NAME = "\u8f93\u51fa\u6210\u54c1"
 
 
 def default_output_dir() -> Path:
-    return Path.home() / "Desktop" / DEFAULT_WORK_DIR_NAME / DEFAULT_OUTPUT_DIR_NAME
+    if os.name == "nt":
+        return Path("D:/影界文件/输出成品")
+    return Path.home() / DEFAULT_WORK_DIR_NAME / DEFAULT_OUTPUT_DIR_NAME
 
 
 def default_settings() -> dict:
@@ -73,7 +75,7 @@ def load_settings() -> dict:
                 settings.update({key: value for key, value in loaded.items() if value is not None})
         except Exception:
             pass
-    if any(marker in str(settings.get("default_output_dir", "")) for marker in ("闆", "杈", "澧")):
+    if any(marker in str(settings.get("default_output_dir", "")) for marker in ("闆", "杈", "澧", "雪原Ai增强引擎")):
         settings["default_output_dir"] = str(default_output_dir())
     SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     return settings
@@ -90,7 +92,7 @@ def get_desktop_work_dirs() -> tuple[Path, Path]:
 
 
 def get_desktop_work_dirs() -> tuple[Path, Path]:
-    work_dir = Path.home() / "Desktop" / DEFAULT_WORK_DIR_NAME
+    work_dir = Path("D:/影界文件") if os.name == "nt" else Path.home() / DEFAULT_WORK_DIR_NAME
     input_dir = work_dir / DEFAULT_INPUT_DIR_NAME
     output_dir = work_dir / DEFAULT_OUTPUT_DIR_NAME
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -760,6 +762,7 @@ def build_web_app():
         raise RuntimeError("缺少 FastAPI 服务依赖，请先安装 requirements.txt。") from exc
 
     from backend.v036_output_core import build_output_plan, sha256_file
+    from engine.diagnostics.feedback_bundle import generate_feedback_bundle
     from engine.pipeline import process_v046_delivery
 
     settings_data = load_settings()
@@ -948,8 +951,12 @@ def build_web_app():
                 "input_path": str(task["input_path"]),
                 "input_filename": Path(task["input_path"]).name,
                 "output_dir": str(final_path.parent),
+                "output_directory": str(final_path.parent),
+                "output_directory_source": meta.get("output_dir_source") or "default",
                 "output_path": str(final_path),
                 "output_filename": final_path.name,
+                "final_output_path": str(final_path),
+                "final_output_filename": final_path.name,
                 "output_size": final_path.stat().st_size if final_path.exists() else task_result.get("output_size", 0),
                 "final_output_url": public_file_url("outputs", final_path.name),
                 "preview_output_url": public_file_url("outputs", final_path.name),
@@ -1132,6 +1139,19 @@ def build_web_app():
                     "task_result": task_result,
                     "task_report": task_report,
                     "error_message": "",
+                    "output_directory": str(final_path.parent),
+                    "output_directory_source": (task.get("output_dir_meta") or {}).get("output_dir_source") or "default",
+                    "final_output_path": str(final_path),
+                    "final_output_filename": final_path.name,
+                    "final_delivery_status": result.get("final_delivery_status") or (result.get("debug_quality") or {}).get("final_delivery_status"),
+                    "final_delivery_reason": result.get("final_delivery_reason") or (result.get("debug_quality") or {}).get("final_delivery_reason"),
+                    "final_delivery_risk_level": result.get("final_delivery_risk_level") or (result.get("debug_quality") or {}).get("final_delivery_risk_level"),
+                    "final_delivery_recommended_usage": result.get("final_delivery_recommended_usage") or (result.get("debug_quality") or {}).get("final_delivery_recommended_usage"),
+                    "feedback_bundle_status": "",
+                    "feedback_bundle_path": "",
+                    "feedback_bundle_size": 0,
+                    "feedback_bundle_redacted": True,
+                    "feedback_bundle_error": "",
                     "input_width": result.get("input_width"),
                     "input_height": result.get("input_height"),
                     "output_width": result.get("output_width"),
@@ -1508,6 +1528,8 @@ def build_web_app():
             "input_path": saved_path,
             "output_root": output_root,
             "output_dir": str(output_root),
+            "output_directory": str(output_root),
+            "output_directory_source": output_dir_meta.get("output_dir_source") or "default",
             "output_dir_meta": output_dir_meta,
             "expected_output_path": expected_output_path,
             "output_format": requested_output_format,
@@ -1568,6 +1590,25 @@ def build_web_app():
     @app.get("/api/file/{kind}/{filename:path}")
     async def serve_file(kind: str, filename: str):
         return FileResponse(resolve_public_file(kind, filename))
+
+    @app.post("/api/v1/tasks/{task_id}/feedback-bundle")
+    async def feedback_bundle(task_id: str):
+        real_task_id = latest_task_id["value"] if task_id == DEFAULT_TASK_ID else task_id
+        task = task_registry.get(real_task_id or "")
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在。")
+        bundle = generate_feedback_bundle(real_task_id or task_id, task)
+        task.update(bundle)
+        return {
+            "code": 200 if bundle["feedback_bundle_status"] == "PASS" else 500,
+            "status": "success" if bundle["feedback_bundle_status"] == "PASS" else "error",
+            "success": bundle["feedback_bundle_status"] == "PASS",
+            "data": bundle,
+        }
+
+    @app.get("/api/v1/tasks/{task_id}/feedback-bundle")
+    async def feedback_bundle_get(task_id: str):
+        return await feedback_bundle(task_id)
 
     @app.get("/api/v1/tasks/{task_id}")
     async def task_status(task_id: str):
