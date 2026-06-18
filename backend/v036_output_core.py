@@ -17,6 +17,11 @@ from engine.algorithms.color_fidelity import lock_color_to_reference
 from engine.algorithms.edge_halo_control import phase3_edge_halo_control, phase3_edge_policy
 from engine.algorithms.edge_safe_enhance import enhance_true_edges
 from engine.algorithms.highlight_protection import compress_clipped_highlights, protect_highlights
+from engine.algorithms.low_quality_fidelity import (
+    phase4_low_quality_policy,
+    phase4_low_quality_restore,
+    phase4_quality_probes,
+)
 from engine.algorithms.text_clarity import detect_text_like_regions, enhance_text_regions
 from runtime.logger import logs_dir
 
@@ -707,6 +712,7 @@ def enhance_fidelity(
     has_alpha: bool = False,
     phase2_strength: float | None = None,
     phase3_policy: dict[str, Any] | None = None,
+    phase4_policy: dict[str, Any] | None = None,
 ) -> np.ndarray:
     reference = resize_keep_ratio(image, target_width, target_height)
     result = compress_clipped_highlights(reference, amount=0.04)
@@ -746,6 +752,7 @@ def enhance_fidelity(
     if phase2_strength is None:
         phase2_strength = phase2_mid_frequency_strength(profile, mode, image_type, has_alpha=has_alpha)
     result = phase2_mid_frequency_material(result, strength=phase2_strength, image_type=image_type)
+    result = phase4_low_quality_restore(reference, result, phase4_policy)
     phase3_reference = result.copy()
     result = enhance_true_edges(result, strength=max(0.08, min(edge_strength, 0.28 if text_intensive else 0.30)))
     result = enhance_text_regions(result, strength=min(text_strength, 0.52 if text_intensive else 0.42))
@@ -1273,6 +1280,8 @@ def process_v036_output(
     image_type = plan["image_type"]
     paths = plan["paths"]
     target_alpha = resize_alpha(alpha, plan["output_width"], plan["output_height"]) if plan["alpha_used"] else None
+    phase4_reference = resize_keep_ratio(source_image, plan["output_width"], plan["output_height"])
+    phase4_before_probes = phase4_quality_probes(phase4_reference)
     phase2_policy = phase2_material_policy(
         profile,
         mode,
@@ -1289,6 +1298,19 @@ def process_v036_output(
         type_features=plan["image_type_features"],
         text_density=plan["text_density"],
     )
+    phase4_policy = phase4_low_quality_policy(
+        profile,
+        mode,
+        image_type,
+        has_alpha=plan["alpha_used"],
+        type_features=plan["image_type_features"],
+        text_density=plan["text_density"],
+        input_width=plan["input_width"],
+        input_height=plan["input_height"],
+        input_size_bytes=input_size_bytes,
+        input_suffix=input_path.suffix,
+        before_probes=phase4_before_probes,
+    )
 
     start = time.perf_counter()
     enhanced = enhance_fidelity(
@@ -1301,8 +1323,10 @@ def process_v036_output(
         has_alpha=plan["alpha_used"],
         phase2_strength=phase2_policy["phase2_material_strength"],
         phase3_policy=phase3_policy,
+        phase4_policy=phase4_policy,
     )
     timings["enhance_time"] = round(time.perf_counter() - start, 6)
+    phase4_after_probes = phase4_quality_probes(enhanced)
     v046_text_engine_active = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or plan["text_density"] >= 0.015)
 
     start = time.perf_counter()
@@ -1461,6 +1485,17 @@ def process_v036_output(
         "ringing_risk": phase3_policy["ringing_risk"],
         "alpha_edge_risk": phase3_policy["alpha_edge_risk"],
         "text_edge_risk": phase3_policy["text_edge_risk"],
+        "v046_phase4_profile": "low-quality fidelity candidate round1",
+        "phase4_low_quality_active": phase4_policy["phase4_low_quality_active"],
+        "phase4_degradation_profile": phase4_policy["phase4_degradation_profile"],
+        "phase4_restoration_strength": phase4_policy["phase4_restoration_strength"],
+        "phase4_skip_reason": phase4_policy["phase4_skip_reason"],
+        "compression_risk_before": phase4_policy["compression_risk_before"],
+        "compression_risk_after": phase4_after_probes["compression_risk"],
+        "shadow_dirt_risk_before": phase4_policy["shadow_dirt_risk_before"],
+        "shadow_dirt_risk_after": phase4_after_probes["shadow_dirt_risk"],
+        "local_contrast_before": phase4_policy["local_contrast_before"],
+        "local_contrast_after": phase4_after_probes["local_contrast"],
         "dark_detail_score": main_metrics["dark_detail_score"],
         "dark_detail_gain": main_metrics["dark_detail_gain"],
         "over_smoothing_risk": main_metrics["over_smoothing_risk"],
