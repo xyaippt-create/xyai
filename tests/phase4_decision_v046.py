@@ -108,11 +108,23 @@ def phase4_disabled():
 
     def inactive_policy(*args, **kwargs):
         before = kwargs.get("before_probes") or {}
+        text_stats = kwargs.get("text_stats") or {}
         return {
+            "phase4_photo_eligible": False,
             "phase4_low_quality_active": False,
+            "phase4_text_mask_ratio": round(float(text_stats.get("text_mask_ratio") or 0.0), 6),
+            "phase4_text_protection_mode": "disabled",
+            "phase4_nontext_restoration_active": False,
+            "phase4_global_skip_reason": "phase3_frozen_baseline",
             "phase4_degradation_profile": "disabled_for_phase3_baseline",
             "phase4_restoration_strength": 0.0,
             "phase4_skip_reason": "phase3_frozen_baseline",
+            "photographicity_score": 0.0,
+            "face_or_person_detected": False,
+            "local_texture_score": 0.0,
+            "text_region_count": int(text_stats.get("text_region_count") or 0),
+            "largest_text_region_ratio": round(float(text_stats.get("largest_text_region_ratio") or 0.0), 6),
+            "text_region_distribution": text_stats.get("text_region_distribution") or {},
             "compression_risk_before": round(float(before.get("compression_risk") or 0.0), 6),
             "shadow_dirt_risk_before": round(float(before.get("shadow_dirt_risk") or 0.0), 6),
             "local_contrast_before": round(float(before.get("local_contrast") or 0.0), 6),

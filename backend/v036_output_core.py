@@ -21,6 +21,7 @@ from engine.algorithms.low_quality_fidelity import (
     phase4_low_quality_policy,
     phase4_low_quality_restore,
     phase4_quality_probes,
+    phase4_text_protection_stats,
 )
 from engine.algorithms.text_clarity import detect_text_like_regions, enhance_text_regions
 from runtime.logger import logs_dir
@@ -1282,6 +1283,7 @@ def process_v036_output(
     target_alpha = resize_alpha(alpha, plan["output_width"], plan["output_height"]) if plan["alpha_used"] else None
     phase4_reference = resize_keep_ratio(source_image, plan["output_width"], plan["output_height"])
     phase4_before_probes = phase4_quality_probes(phase4_reference)
+    phase4_text_stats = phase4_text_protection_stats(phase4_reference)
     phase2_policy = phase2_material_policy(
         profile,
         mode,
@@ -1310,6 +1312,7 @@ def process_v036_output(
         input_size_bytes=input_size_bytes,
         input_suffix=input_path.suffix,
         before_probes=phase4_before_probes,
+        text_stats=phase4_text_stats,
     )
 
     start = time.perf_counter()
@@ -1486,10 +1489,21 @@ def process_v036_output(
         "alpha_edge_risk": phase3_policy["alpha_edge_risk"],
         "text_edge_risk": phase3_policy["text_edge_risk"],
         "v046_phase4_profile": "low-quality fidelity candidate round1",
+        "phase4_photo_eligible": phase4_policy["phase4_photo_eligible"],
         "phase4_low_quality_active": phase4_policy["phase4_low_quality_active"],
+        "phase4_text_mask_ratio": phase4_policy["phase4_text_mask_ratio"],
+        "phase4_text_protection_mode": phase4_policy["phase4_text_protection_mode"],
+        "phase4_nontext_restoration_active": phase4_policy["phase4_nontext_restoration_active"],
+        "phase4_global_skip_reason": phase4_policy["phase4_global_skip_reason"],
         "phase4_degradation_profile": phase4_policy["phase4_degradation_profile"],
         "phase4_restoration_strength": phase4_policy["phase4_restoration_strength"],
         "phase4_skip_reason": phase4_policy["phase4_skip_reason"],
+        "photographicity_score": phase4_policy["photographicity_score"],
+        "face_or_person_detected": phase4_policy["face_or_person_detected"],
+        "local_texture_score": phase4_policy["local_texture_score"],
+        "text_region_count": phase4_policy["text_region_count"],
+        "largest_text_region_ratio": phase4_policy["largest_text_region_ratio"],
+        "text_region_distribution": phase4_policy["text_region_distribution"],
         "compression_risk_before": phase4_policy["compression_risk_before"],
         "compression_risk_after": phase4_after_probes["compression_risk"],
         "shadow_dirt_risk_before": phase4_policy["shadow_dirt_risk_before"],

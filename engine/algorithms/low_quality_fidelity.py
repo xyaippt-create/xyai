@@ -53,6 +53,71 @@ def phase4_quality_probes(image: np.ndarray) -> dict[str, float]:
     }
 
 
+def phase4_text_protection_stats(image: np.ndarray) -> dict[str, Any]:
+    try:
+        text_mask = detect_text_like_regions(image)
+    except Exception:
+        text_mask = np.zeros(image.shape[:2], dtype="float32")
+    binary = (text_mask > 0.06).astype("uint8")
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    total_area = max(1, binary.shape[0] * binary.shape[1])
+    regions = []
+    largest = 0
+    height, width = binary.shape[:2]
+    thirds = {"top": 0, "middle": 0, "bottom": 0}
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < 12:
+            continue
+        largest = max(largest, area)
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        center_y = y + h * 0.5
+        if center_y < height / 3:
+            thirds["top"] += area
+        elif center_y < height * 2 / 3:
+            thirds["middle"] += area
+        else:
+            thirds["bottom"] += area
+        regions.append(area)
+    ratio = float(np.count_nonzero(binary) / total_area)
+    distribution = {key: round(value / total_area, 6) for key, value in thirds.items()}
+    return {
+        "text_region_count": int(len(regions)),
+        "text_mask_ratio": round(ratio, 6),
+        "largest_text_region_ratio": round(float(largest / total_area), 6),
+        "text_region_distribution": distribution,
+    }
+
+
+def phase4_restoration_masks(image: np.ndarray, policy: dict[str, Any] | None = None) -> dict[str, np.ndarray]:
+    policy = policy or {}
+    try:
+        text_mask = detect_text_like_regions(image)
+    except Exception:
+        text_mask = np.zeros(image.shape[:2], dtype="float32")
+    text_binary = (text_mask > 0.055).astype("uint8")
+    protected = cv2.dilate(text_binary, np.ones((7, 7), dtype=np.uint8), iterations=1).astype("float32")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 90, 190)
+    small_edges = cv2.dilate(edges, np.ones((3, 3), dtype=np.uint8), iterations=1).astype("float32") / 255.0
+    protected = np.maximum(protected, small_edges * 0.42)
+
+    protected = cv2.GaussianBlur(protected, (0, 0), 2.0)
+    protected = np.clip(protected, 0.0, 1.0)
+    if policy.get("phase4_text_protection_mode") == "global":
+        protected = np.ones_like(protected, dtype="float32")
+    restoration = 1.0 - protected
+    return {
+        "text_mask": np.clip(text_binary.astype("float32"), 0.0, 1.0),
+        "protected_mask": protected.astype("float32"),
+        "restoration_mask": restoration.astype("float32"),
+    }
+
+
 def phase4_low_quality_policy(
     profile: str,
     mode: str,
@@ -65,16 +130,34 @@ def phase4_low_quality_policy(
     input_size_bytes: int = 0,
     input_suffix: str = "",
     before_probes: dict[str, float] | None = None,
+    text_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     features = type_features or {}
     probes = before_probes or {}
     texture_density = float(features.get("texture_density") or 0.0)
     edge_density = float(features.get("edge_density") or 0.0)
+    skin_ratio = float(features.get("skin_ratio") or 0.0)
+    dark_ratio = float(features.get("dark_ratio") or 0.0)
     low_saturation_ratio = float(features.get("low_saturation_ratio") or 0.0)
     compression_risk = float(probes.get("compression_risk") or 0.0)
     shadow_dirt_risk = float(probes.get("shadow_dirt_risk") or 0.0)
     local_contrast = float(probes.get("local_contrast") or 0.0)
     blur_risk = float(probes.get("blur_risk") or 0.0)
+    text_info = text_stats or {}
+    text_mask_ratio = float(text_info.get("text_mask_ratio", text_density) or 0.0)
+    largest_text_region_ratio = float(text_info.get("largest_text_region_ratio") or 0.0)
+
+    photographicity_score = float(
+        np.clip(
+            skin_ratio * 1.35
+            + texture_density * 1.05
+            + min(dark_ratio, 0.45) * 0.34
+            + (0.08 if image_type == "portrait" else 0.0),
+            0.0,
+            1.0,
+        )
+    )
+    face_or_person_detected = bool(image_type == "portrait" or skin_ratio >= 0.035)
 
     min_side = min(int(input_width or 0), int(input_height or 0))
     low_resolution = min_side > 0 and min_side < 420
@@ -84,7 +167,25 @@ def phase4_low_quality_policy(
     dirty_shadow = shadow_dirt_risk > 0.18
     jpeg_compression = jpeg_like and (compression_risk > 0.018 or input_size_bytes < max(1, input_width * input_height * 0.18))
 
-    text_risk = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or text_density >= 0.018)
+    pure_text_layout = bool(
+        mode == "text_safe"
+        or (
+            image_type in {"text_poster", "ppt_page"}
+            and photographicity_score < 0.20
+        )
+        or (
+            text_mask_ratio >= 0.16
+            and largest_text_region_ratio >= 0.028
+            and photographicity_score < 0.28
+        )
+    )
+    incidental_text_photo = bool(
+        not pure_text_layout
+        and text_mask_ratio >= 0.006
+        and photographicity_score >= 0.12
+        and (face_or_person_detected or texture_density >= 0.045)
+    )
+    text_risk = bool(pure_text_layout or (text_density >= 0.018 and not incidental_text_photo))
     gradient_risk = bool(texture_density < 0.003 and edge_density < 0.003)
     fine_line_risk = bool(edge_density >= 0.10 and low_saturation_ratio > 0.65)
     high_chroma_brand_risk = bool(low_saturation_ratio < 0.08 and edge_density < 0.025 and texture_density < 0.045)
@@ -112,9 +213,12 @@ def phase4_low_quality_policy(
     if profile == "preview_light":
         active = False
         skip_reason = "preview_light_profile"
-    elif text_risk:
+    elif pure_text_layout:
         active = False
         skip_reason = "text_or_dense_layout_protected"
+    elif text_risk:
+        active = False
+        skip_reason = "text_heavy_non_photo_protected"
     elif alpha_risk:
         active = False
         skip_reason = "alpha_protected"
@@ -156,11 +260,12 @@ def phase4_low_quality_policy(
         if text_density > 0.006:
             strength *= 0.72
             if skip_reason == "eligible":
-                skip_reason = "text_presence_reduced"
+                skip_reason = "local_text_protected"
 
     strength = float(np.clip(strength, 0.0, 0.115))
     if strength <= 0:
         active = False
+    text_mode = "global" if pure_text_layout else ("local" if incidental_text_photo or text_mask_ratio > 0 else "none")
 
     if len(reasons) >= 3:
         profile_name = "mixed_degradation"
@@ -170,10 +275,21 @@ def phase4_low_quality_policy(
         profile_name = "none"
 
     return {
+        "phase4_photo_eligible": bool(active and not pure_text_layout),
         "phase4_low_quality_active": bool(active),
+        "phase4_text_mask_ratio": round(text_mask_ratio, 6),
+        "phase4_text_protection_mode": text_mode,
+        "phase4_nontext_restoration_active": bool(active and text_mode in {"local", "none"}),
+        "phase4_global_skip_reason": skip_reason if not active else "",
         "phase4_degradation_profile": profile_name,
         "phase4_restoration_strength": round(strength, 4),
         "phase4_skip_reason": skip_reason,
+        "photographicity_score": round(photographicity_score, 6),
+        "face_or_person_detected": face_or_person_detected,
+        "local_texture_score": round(texture_density, 6),
+        "text_region_count": int(text_info.get("text_region_count") or 0),
+        "largest_text_region_ratio": round(largest_text_region_ratio, 6),
+        "text_region_distribution": text_info.get("text_region_distribution") or {},
         "compression_risk_before": round(compression_risk, 6),
         "shadow_dirt_risk_before": round(shadow_dirt_risk, 6),
         "local_contrast_before": round(local_contrast, 6),
@@ -215,14 +331,8 @@ def phase4_low_quality_restore(
     highlight_guard = np.clip((242.0 - luma) / 28.0, 0.0, 1.0)
     shadow_guard = np.clip((luma - 6.0) / 26.0, 0.0, 1.0)
 
-    text_guard = 1.0
-    try:
-        text_mask = detect_text_like_regions(image)
-        if float(np.mean(text_mask > 0.08)) > 0.0004:
-            text_mask = cv2.dilate((text_mask > 0.06).astype("uint8"), np.ones((5, 5), dtype=np.uint8), iterations=1)
-            text_guard = 1.0 - np.clip(text_mask.astype("float32") * 0.94, 0.0, 0.94)
-    except Exception:
-        text_guard = 1.0
+    masks = phase4_restoration_masks(image, policy)
+    text_guard = masks["restoration_mask"]
 
     tonal_mask = np.clip(edge_guard * highlight_guard * shadow_guard * text_guard, 0.0, 1.0)
     clean_blend = np.clip((0.16 + texture_mask * 0.24) * tonal_mask * strength, 0.0, 0.04)
