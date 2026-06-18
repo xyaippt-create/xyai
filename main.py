@@ -1106,6 +1106,8 @@ def build_web_app():
                     "output_format": task["output_format"],
                     "debug_timing": task.get("debug_timing"),
                     "debug_keep_intermediate": False,
+                    "color_stability_enabled": task.get("color_stability_enabled", True),
+                    "color_correction_enabled": task.get("color_correction_enabled", False),
                 }
             )
             final_path = Path(result["final_output_path"])
@@ -1429,6 +1431,7 @@ def build_web_app():
         output_profile: str | None = Form(None),
         output_format: str | None = Form(None),
         format: str | None = Form(None),
+        color_correction_enabled: bool = Form(False),
     ):
         task_id = make_task_id()
         mode_value = safe_mode(mode)
@@ -1508,6 +1511,8 @@ def build_web_app():
             "output_dir_meta": output_dir_meta,
             "expected_output_path": expected_output_path,
             "output_format": requested_output_format,
+            "color_stability_enabled": True,
+            "color_correction_enabled": bool(color_correction_enabled),
             "input_size_bytes": input_size_bytes,
             "input_hash": input_hash,
             "input_width": output_plan.get("input_width"),

@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from engine.algorithms.color_fidelity import lock_color_to_reference
+from engine.algorithms.color_stability import phase5_default_color_stability, phase5_color_metrics
 from engine.algorithms.edge_halo_control import phase3_edge_halo_control, phase3_edge_policy
 from engine.algorithms.edge_safe_enhance import enhance_true_edges
 from engine.algorithms.highlight_protection import compress_clipped_highlights, protect_highlights
@@ -22,6 +23,10 @@ from engine.algorithms.low_quality_fidelity import (
     phase4_low_quality_restore,
     phase4_quality_probes,
     phase4_text_protection_stats,
+)
+from engine.algorithms.single_image_color_correction import (
+    apply_phase5_single_image_color_correction,
+    phase5_color_correction_policy,
 )
 from engine.algorithms.text_clarity import detect_text_like_regions, enhance_text_regions
 from runtime.logger import logs_dir
@@ -1244,6 +1249,8 @@ def process_v036_output(
     output_format: str = "auto",
     initial_timing: dict[str, float] | None = None,
     debug_keep_intermediate: bool | str = False,
+    color_stability_enabled: bool | str = True,
+    color_correction_enabled: bool | str = False,
 ) -> dict[str, Any]:
     total_start = time.perf_counter()
     timings = dict(initial_timing or {})
@@ -1284,6 +1291,8 @@ def process_v036_output(
     phase4_reference = resize_keep_ratio(source_image, plan["output_width"], plan["output_height"])
     phase4_before_probes = phase4_quality_probes(phase4_reference)
     phase4_text_stats = phase4_text_protection_stats(phase4_reference)
+    phase5_stability_enabled = parse_bool(color_stability_enabled, True)
+    phase5_correction_enabled = parse_bool(color_correction_enabled, False)
     phase2_policy = phase2_material_policy(
         profile,
         mode,
@@ -1328,6 +1337,44 @@ def process_v036_output(
         phase3_policy=phase3_policy,
         phase4_policy=phase4_policy,
     )
+    phase4_frozen_image = enhanced.copy()
+    phase5_reference = resize_keep_ratio(source_image, plan["output_width"], plan["output_height"])
+    phase5_correction_policy = phase5_color_correction_policy(
+        phase5_reference,
+        enhanced,
+        enabled=phase5_correction_enabled,
+        image_type=image_type,
+        has_alpha=plan["alpha_used"],
+        text_density=plan["text_density"],
+    )
+    if phase5_correction_policy["phase5_correction_active"]:
+        enhanced = apply_phase5_single_image_color_correction(phase5_reference, enhanced, phase5_correction_policy)
+    phase5_brand_kv_protected = bool(
+        phase4_policy.get("phase4_skip_reason") == "clean_brand_kv_protected"
+        and not phase4_policy.get("phase4_low_quality_active")
+    )
+    phase5_layout_protected = bool(
+        phase4_policy.get("phase4_skip_reason") in {
+            "text_or_dense_layout_protected",
+            "text_heavy_non_photo_protected",
+            "fine_line_protected",
+        }
+        and not phase4_policy.get("phase4_low_quality_active")
+    )
+    effective_phase5_stability_enabled = bool(
+        phase5_stability_enabled
+        and not plan["alpha_used"]
+        and not phase5_brand_kv_protected
+        and not phase5_layout_protected
+    )
+    enhanced, phase5_policy = phase5_default_color_stability(
+        phase5_reference,
+        enhanced,
+        image_type=image_type,
+        enabled=effective_phase5_stability_enabled,
+        color_correction_enabled=phase5_correction_enabled,
+    )
+    phase5_delta_from_phase4 = phase5_color_metrics(phase4_frozen_image, enhanced)
     timings["enhance_time"] = round(time.perf_counter() - start, 6)
     phase4_after_probes = phase4_quality_probes(enhanced)
     v046_text_engine_active = bool(mode == "text_safe" or image_type in {"text_poster", "ppt_page"} or plan["text_density"] >= 0.015)
@@ -1508,6 +1555,45 @@ def process_v036_output(
         "phase4_color_drift_risk": phase4_policy["phase4_color_drift_risk"],
         "phase4_fallback_triggered": phase4_policy["phase4_fallback_triggered"],
         "phase4_fallback_reason": phase4_policy["phase4_fallback_reason"],
+        "v046_phase5_profile": "default color stability + user-enabled single-image correction",
+        "phase5_color_stability_active": phase5_policy["phase5_color_stability_active"],
+        "phase5_color_lock_mode": phase5_policy["phase5_color_lock_mode"],
+        "phase5_color_drift_detected": phase5_policy["phase5_color_drift_detected"],
+        "phase5_color_fallback_triggered": phase5_policy["phase5_color_fallback_triggered"],
+        "phase5_color_fallback_reason": phase5_policy["phase5_color_fallback_reason"],
+        "phase5_color_correction_enabled": phase5_correction_policy["phase5_color_correction_enabled"],
+        "phase5_cast_detected": phase5_correction_policy["phase5_cast_detected"],
+        "phase5_cast_direction": phase5_correction_policy["phase5_cast_direction"],
+        "phase5_cast_strength": phase5_correction_policy["phase5_cast_strength"],
+        "phase5_correction_strength": phase5_correction_policy["phase5_correction_strength"],
+        "phase5_correction_skip_reason": phase5_correction_policy["phase5_correction_skip_reason"],
+        "phase5_correction_active": phase5_correction_policy["phase5_correction_active"],
+        "neutral_region_confidence": phase5_correction_policy["neutral_region_confidence"],
+        "global_cast_direction": phase5_correction_policy["global_cast_direction"],
+        "global_cast_strength": phase5_correction_policy["global_cast_strength"],
+        "skin_region_confidence": phase5_correction_policy["skin_region_confidence"],
+        "brand_color_risk": phase5_correction_policy["brand_color_risk"],
+        "highlight_neutrality": phase5_correction_policy["highlight_neutrality"],
+        "shadow_cast": phase5_correction_policy["shadow_cast"],
+        "phase5_mean_delta_e_before": phase5_policy["phase5_metrics_before"]["mean_delta_e"],
+        "phase5_p95_delta_e_before": phase5_policy["phase5_metrics_before"]["p95_delta_e"],
+        "phase5_saturation_delta_before": phase5_policy["phase5_metrics_before"]["saturation_delta"],
+        "phase5_high_saturation_pixel_ratio_delta_before": phase5_policy["phase5_metrics_before"]["high_saturation_pixel_ratio_delta"],
+        "phase5_mean_hue_delta_before": phase5_policy["phase5_metrics_before"]["mean_hue_delta"],
+        "phase5_skin_tone_delta_before": phase5_policy["phase5_metrics_before"]["skin_tone_delta"],
+        "phase5_brand_color_delta_before": phase5_policy["phase5_metrics_before"]["brand_color_delta"],
+        "phase5_highlight_color_delta_before": phase5_policy["phase5_metrics_before"]["highlight_color_delta"],
+        "phase5_shadow_color_delta_before": phase5_policy["phase5_metrics_before"]["shadow_color_delta"],
+        "phase5_mean_delta_e_after": phase5_policy["phase5_metrics_after"]["mean_delta_e"],
+        "phase5_p95_delta_e_after": phase5_policy["phase5_metrics_after"]["p95_delta_e"],
+        "phase5_saturation_delta_after": phase5_policy["phase5_metrics_after"]["saturation_delta"],
+        "phase5_high_saturation_pixel_ratio_delta_after": phase5_policy["phase5_metrics_after"]["high_saturation_pixel_ratio_delta"],
+        "phase5_mean_hue_delta_after": phase5_policy["phase5_metrics_after"]["mean_hue_delta"],
+        "phase5_skin_tone_delta_after": phase5_policy["phase5_metrics_after"]["skin_tone_delta"],
+        "phase5_brand_color_delta_after": phase5_policy["phase5_metrics_after"]["brand_color_delta"],
+        "phase5_highlight_color_delta_after": phase5_policy["phase5_metrics_after"]["highlight_color_delta"],
+        "phase5_shadow_color_delta_after": phase5_policy["phase5_metrics_after"]["shadow_color_delta"],
+        "phase5_delta_from_phase4": phase5_delta_from_phase4,
         "photographicity_score": phase4_policy["photographicity_score"],
         "face_or_person_detected": phase4_policy["face_or_person_detected"],
         "local_texture_score": phase4_policy["local_texture_score"],

@@ -17,5 +17,7 @@ def run_v046_delivery(context: Mapping[str, Any]) -> dict[str, Any]:
         output_format=str(context.get("output_format") or "auto"),
         initial_timing=context.get("debug_timing"),
         debug_keep_intermediate=context.get("debug_keep_intermediate", False),
+        color_stability_enabled=context.get("color_stability_enabled", True),
+        color_correction_enabled=context.get("color_correction_enabled", False),
     )
     return result
