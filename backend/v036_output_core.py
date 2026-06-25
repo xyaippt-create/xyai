@@ -1405,7 +1405,21 @@ def process_v036_output(
     optimized_smaller = optimized_size <= main_size
     resolution_gate_pass = bool(plan["resolution_gate_pass"] and enhanced.shape[1] == plan["output_width"] and enhanced.shape[0] == plan["output_height"])
     quality_1080p_pass = bool(resolution_gate_pass and main_visual_pass)
-    use_optimized = bool(quality_1080p_pass and compression["compression_allowed"] and optimized_smaller)
+    phase6_highlight_shard_guard_active = bool(
+        phase3_policy.get("halo_risk")
+        and phase3_policy.get("ringing_risk")
+        and phase4_policy.get("face_or_person_detected")
+        and float(phase5_correction_policy.get("highlight_neutrality") or 0.0) < 0.05
+    )
+    if phase6_highlight_shard_guard_active:
+        phase6_smooth_metrics["phase6_smooth_region_fallback"] = True
+        phase6_smooth_metrics["phase6_smooth_region_fallback_reason"] = "highlight_shard_smooth_guard"
+    use_optimized = bool(
+        quality_1080p_pass
+        and compression["compression_allowed"]
+        and optimized_smaller
+        and not phase6_highlight_shard_guard_active
+    )
     final_source = paths["optimized"] if use_optimized else paths["main"]
     final_quality_source = "optimized_output" if use_optimized else "main_output"
     final_path = paths["final"]
@@ -1440,6 +1454,20 @@ def process_v036_output(
         smooth_metrics=phase6_smooth_metrics,
     )
 
+    if phase6_highlight_shard_guard_active:
+        phase6_policy["phase6_candidate_quality_drop"] = max(
+            float(phase6_policy.get("phase6_candidate_quality_drop", 0.0)),
+            -0.15,
+        )
+        if phase6_policy.get("final_delivery_status") == "PASS":
+            phase6_policy["final_delivery_status"] = "PASS_WITH_LIMITATION"
+            phase6_policy["final_delivery_reason"] = "highlight_shard_smooth_guard"
+            phase6_policy["final_delivery_risk_level"] = "medium"
+        recommended_usage = list(phase6_policy.get("phase6_recommended_usage", []))
+        if "manual_review" not in recommended_usage:
+            recommended_usage.append("manual_review")
+        phase6_policy["phase6_recommended_usage"] = recommended_usage
+
     if use_optimized:
         compression_note = "已完成无感体积优化，画质守门通过，文字、边缘和色彩保持稳定。"
     elif not optimized_smaller:
@@ -1457,7 +1485,17 @@ def process_v036_output(
         compression_note = "压缩候选会造成画质下降，已保留高清主图，未强制压缩。"
         final_selection_reason = "optimized_output 体积更小但细节稳定性、文字边缘或纹理风险未通过，回退 main_output 作为 final。"
 
+    if phase6_highlight_shard_guard_active:
+        final_selection_reason = "针对商业大片高光碎屑执行平滑因子二次兜底，防边缘发灰。"
+
+    compression_candidate_not_adopted = (
+        final_quality_source == "main_output"
+        and final_selection_reason.startswith("optimized_output ")
+        and "回退 main_output" in final_selection_reason
+    )
     warnings: list[str] = []
+    if phase6_policy["final_delivery_status"] == "PASS" and compression_candidate_not_adopted:
+        warnings.append("压缩优化候选未采用，已使用主输出文件作为最终成品。")
     if moved_noise:
         warnings.append(f"已从正式输出目录隔离 {len(moved_noise)} 个测试/中间文件。")
     if not output_changed:
@@ -1473,7 +1511,8 @@ def process_v036_output(
     if final_path.name.lower().endswith(("_main.png", "_optimized.png")):
         warnings.append("final 输出命名异常，已保留在正式目录但需要检查路径策略。")
     if not delivery_package.get("written"):
-        warnings.append("交付封装信息未写入，不影响成品图正常输出。")
+        if not (phase6_policy["final_delivery_status"] == "PASS" and compression_candidate_not_adopted):
+            warnings.append("诊断元信息记录未完成，成品图片本身不受影响。")
     encoding_warning = ""
     if final_size < input_size_bytes * 0.35:
         encoding_warning = "输出体积明显小于原图，请复核是否存在过度压缩、降采样或细节损失。"
