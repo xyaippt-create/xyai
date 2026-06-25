@@ -56,6 +56,46 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(redact(payload), ensure_ascii=False, indent=2, default=str).encode("utf-8")
 
 
+def _delivery_status_explanation() -> dict[str, Any]:
+    return {
+        "scope": "diagnostic_zip_only",
+        "raw_status_note": (
+            "final_delivery_status 为后端原始交付状态，用于表示任务处理与后端门禁结果；"
+            "前台会根据文字清晰度、纹理保持力、边缘质量、限制原因等指标进行二次解释。"
+        ),
+        "user_visible_status_note": (
+            "若核心指标偏低，即使后端原始状态为 PASS，前台仍会显示为“建议人工复核 / 1080P 本地预览”。"
+            "请以前台交付状态作为面向用户的最终交付口径。"
+        ),
+        "resolution_rules": [
+            {
+                "backend_raw_status": "PASS",
+                "condition": "text_clarity_score >= 60, texture_score >= 60, edge_quality_score >= 65 and no limitation reason",
+                "frontend_status": "可交付",
+                "frontend_badge": "1080P 高清成品",
+            },
+            {
+                "backend_raw_status": "PASS_WITH_LIMITATION",
+                "condition": "any limitation reason from backend delivery guard",
+                "frontend_status": "建议人工复核",
+                "frontend_badge": "1080P 本地预览",
+            },
+            {
+                "backend_raw_status": "PASS",
+                "condition": "text_clarity_score < 60 or texture_score < 60 or edge_quality_score < 65",
+                "frontend_status": "建议人工复核",
+                "frontend_badge": "1080P 本地预览",
+            },
+            {
+                "backend_raw_status": "FAIL or REJECT",
+                "condition": "backend delivery guard failed or rejected",
+                "frontend_status": "不建议交付",
+                "frontend_badge": "不建议交付",
+            },
+        ],
+    }
+
+
 def generate_feedback_bundle(task_id: str, task: dict[str, Any] | None, output_dir: Path | None = None) -> dict[str, Any]:
     target_dir = Path(output_dir) if output_dir else DEFAULT_FEEDBACK_DIR
     try:
@@ -112,16 +152,24 @@ def generate_feedback_bundle(task_id: str, task: dict[str, Any] | None, output_d
         "processor": platform.processor(),
     }
     error_summary = task.get("error_message") or task.get("task_error") or ""
+    delivery_explanation = _delivery_status_explanation()
+    task_summary_payload = dict(task_result or task)
+    task_summary_payload["delivery_status_explanation"] = delivery_explanation
     readme = (
         "VisualMasterPro local feedback bundle.\n"
         "This archive is redacted by default and does not include original images or final outputs.\n"
         "Use it to inspect task status, quality metrics, pipeline trace and errors.\n"
+        "\n"
+        "交付状态说明：\n"
+        "final_delivery_status 为后端原始交付状态，用于表示任务处理与后端门禁结果；前台会根据文字清晰度、纹理保持力、边缘质量、限制原因等指标进行二次解释。\n"
+        "若核心指标偏低，即使后端原始状态为 PASS，前台仍会显示为“建议人工复核 / 1080P 本地预览”。请以前台交付状态作为面向用户的最终交付口径。\n"
+        "映射规则：raw PASS 且核心指标通过 -> 可交付 / 1080P 高清成品；PASS_WITH_LIMITATION -> 建议人工复核 / 1080P 本地预览；raw PASS 但 text_clarity_score < 60 或 texture_score < 60 或 edge_quality_score < 65 -> 建议人工复核 / 1080P 本地预览；FAIL / REJECT -> 不建议交付。\n"
     )
 
     try:
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", _json_bytes(manifest))
-            archive.writestr("task_summary.json", _json_bytes(task_result or task))
+            archive.writestr("task_summary.json", _json_bytes(task_summary_payload))
             archive.writestr("diagnostics.json", _json_bytes(diagnostics))
             archive.writestr("pipeline_trace.json", _json_bytes(pipeline_trace))
             archive.writestr("quality_metrics.json", _json_bytes(task_report))
