@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import TaskDetailPage from "./TaskDetailPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
+import { resolveDeliveryStatus } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
 const OUTPUT_PROFILE = "delivery_1080p";
@@ -26,9 +27,9 @@ const PANEL_STYLE = {
 const TITLE_STYLE = { color: "#f4f7f8" };
 
 const modeCards = [
-  { id: "fidelity", title: "原图忠实增强", desc: "保持构图、色彩与画风，只做高清清洁。" },
+  { id: "fidelity", title: "画质保真", desc: "保持构图、色彩与画风，只做高清清洁。" },
   { id: "text_safe", title: "文字安全清洁", desc: "保护小字边缘，减少压缩毛刺。" },
-  { id: "texture", title: "参数纹理保持", desc: "保留材质层次，避免假锐化。" },
+  { id: "texture", title: "材质增强", desc: "保留材质层次，避免假锐化。" },
 ];
 
 const statusText = {
@@ -50,7 +51,7 @@ const statusColor = {
 const deliveryStatusLabel = {
   PASS: "可交付",
   PASS_WITH_LIMITATION: "建议人工复核",
-  FAIL: "不可交付",
+  FAIL: "不建议交付",
 };
 
 const deliveryStatusColor = {
@@ -58,6 +59,20 @@ const deliveryStatusColor = {
   PASS_WITH_LIMITATION: "#f0c36f",
   FAIL: "#ff8a8a",
 };
+
+function getModeDisplay(mode) {
+  const normalized = mode || "";
+  if (normalized === "fidelity") return { label: "画质保真", className: "text-[#00ffcc]" };
+  if (normalized === "texture") return { label: "材质增强", className: "text-[#94a3b8]" };
+  if (normalized === "text_safe") return { label: "文字安全", className: "text-[#f59e0b]" };
+  return { label: normalized || "未选择", className: "text-[#94a3b8]" };
+}
+
+function getOutputFormatDisplay(format) {
+  const normalized = (format || DEFAULT_OUTPUT_FORMAT).toString().toLowerCase();
+  if (normalized === "auto") return "智能自适应";
+  return normalized.toUpperCase();
+}
 
 function normalizeApiUrl(url) {
   if (!url) return "";
@@ -293,16 +308,27 @@ function StatusPill({ status }) {
   );
 }
 
-function DeliveryPill({ status }) {
-  const normalized = status || "WAITING";
-  const color = deliveryStatusColor[normalized] || "#6e7d80";
-  const label = deliveryStatusLabel[normalized] || "等待判定";
+function resolveQueueDelivery(item, status) {
+  return resolveDeliveryStatus(
+    item?.debug_quality,
+    item?.task_result,
+    item?.task_report,
+    item || {},
+    { final_delivery_status: status || item?.final_delivery_status || "" },
+  );
+}
+
+function DeliveryPill({ status, item }) {
+  const delivery = resolveQueueDelivery(item, status);
+  const normalized = delivery.status || "WAITING";
+  const color = delivery.tone || deliveryStatusColor[normalized] || "#6e7d80";
+  const label = delivery.label || deliveryStatusLabel[normalized] || "等待判定";
   return (
     <span
       style={{
         color,
         background: "#0d181a",
-        border: `1px solid ${normalized === "PASS" ? "#315342" : normalized === "PASS_WITH_LIMITATION" ? "#66532d" : normalized === "FAIL" ? "#5a2525" : "#263738"}`,
+        border: `1px solid ${delivery.border || (normalized === "PASS" ? "#315342" : normalized === "PASS_WITH_LIMITATION" ? "#66532d" : normalized === "FAIL" ? "#5a2525" : "#263738")}`,
         borderRadius: "4px",
         padding: "4px 8px",
         fontSize: "10px",
@@ -313,31 +339,6 @@ function DeliveryPill({ status }) {
     >
       {label}
     </span>
-  );
-}
-
-function ParameterPanel({ outputFormat }) {
-  const rows = [
-    { label: "交付方案", value: "高清交付 1080P" },
-    { label: "目标格式", value: outputFormat === "auto" ? "智能自动选择" : `${outputFormat.toUpperCase()} 格式落盘` },
-    { label: "核心基线", value: "1080P 高清稳定交付" },
-    { label: "尺寸策略", value: "智能无损自适应缩放" },
-  ];
-
-  return (
-    <section style={{ ...PANEL_STYLE, padding: "18px" }}>
-      <p style={DECOR_LABEL}>Output Parameters</p>
-      <h2 style={{ ...TITLE_STYLE, marginTop: "10px", fontSize: "21px", fontWeight: 600 }}>输出图片参数</h2>
-      <div style={{ backgroundColor: "#0e1516", border: "1px solid #263738", borderRadius: "6px", padding: "14px", marginTop: "14px", display: "grid", gap: "8px" }}>
-        {rows.map((row) => (
-          <div key={row.label} style={{ display: "flex", alignItems: "center", fontSize: "12px", lineHeight: 1.25 }}>
-            <span style={{ color: "#6feaf0", marginRight: "6px" }}>·</span>
-            <span style={{ color: "#9ba9ab" }}>{row.label}：</span>
-            <span style={{ color: "#f4f7f8" }}>{row.value}</span>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -699,6 +700,21 @@ export default function DashboardPage() {
     }
   };
 
+  const handleOpenFinalOutput = (item) => {
+    if (!item?.final_output_url) return;
+    window.open(item.final_output_url, "_blank", "noopener,noreferrer");
+  };
+
+  const handleCopyFinalOutputUrl = async (item) => {
+    if (!item?.final_output_url) return;
+    try {
+      await navigator.clipboard.writeText(item.final_output_url);
+      setNotice("已复制成品映射 URL。");
+    } catch (error) {
+      setNotice(error.message || "复制成品映射 URL 失败。");
+    }
+  };
+
   if (activeScreen === "task_detail") {
     return (
       <TaskDetailPage
@@ -736,6 +752,7 @@ export default function DashboardPage() {
 
   const outputLocationLabel = appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
   const currentOutputDir = appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
+  const deliveryActionItem = activeItem?.status === "completed" ? activeItem : completedItems[completedItems.length - 1] || null;
 
   return (
     <section
@@ -763,9 +780,9 @@ export default function DashboardPage() {
       </header>
 
       <div className="vmp-workspace-container">
-        <section className="scrollbar-none flex h-full w-[280px] shrink-0 flex-col justify-between overflow-y-auto border-r border-[#1c1f26] bg-[#121418] p-4">
-          <div className="shrink-0">
-            <section style={{ ...PANEL_STYLE, padding: "14px" }}>
+        <section className="scrollbar-none flex h-full w-[280px] shrink-0 flex-col gap-2.5 overflow-y-auto border-r border-[#1c1f26] bg-[#121418] p-3">
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+            <section>
               <p style={DECOR_LABEL}>Input Field</p>
               <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>图片导入</h2>
               <div
@@ -793,8 +810,8 @@ export default function DashboardPage() {
             </section>
           </div>
 
-          <div className="my-4 shrink-0">
-            <section style={{ ...PANEL_STYLE, padding: "14px", display: "flex", flexDirection: "column" }}>
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+            <section style={{ display: "flex", flexDirection: "column" }}>
               <p style={DECOR_LABEL}>Restoration Modes</p>
               <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>三种增强模式</h2>
               <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
@@ -811,46 +828,26 @@ export default function DashboardPage() {
             </section>
           </div>
 
-          <div className="mt-auto shrink-0 border-t border-[#1c1f26] pt-4">
-            <div style={{ display: "grid", gap: "10px" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
-                <div className="min-w-0">
-                  <p style={DECOR_LABEL}>OUTPUT DIRECTORY</p>
-                  <h3 className="mt-1 text-xs font-medium text-[#94a3b8]">输出文件夹</h3>
-                </div>
-                <span
-                  style={{
-                    border: appliedOutputDir.trim() ? "1px solid #6feaf0" : "1px solid #263738",
-                    backgroundColor: appliedOutputDir.trim() ? "rgba(111,234,240,0.12)" : "#0d181a",
-                    color: appliedOutputDir.trim() ? "#6feaf0" : "#8be6b1",
-                    borderRadius: "999px",
-                    padding: "5px 8px",
-                    fontSize: "11px",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {outputLocationLabel}
-                </span>
-              </div>
-              <div className="scrollbar-thin vmp-path-scroll-container" style={{ backgroundColor: "#05090a", border: "1px solid #263738", borderRadius: "6px", padding: "8px 9px", color: "#f4f7f8", fontSize: "11px", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                {currentOutputDir}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "8px" }}>
-                <button type="button" onClick={handleSelectOutputDir} style={{ border: "1px solid #6feaf0", backgroundColor: "rgba(111,234,240,0.1)", color: "#6feaf0", borderRadius: "5px", padding: "9px 10px", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 700 }}>
-                  更换文件夹
-                </button>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
-                  <button type="button" onClick={handleOpenOutputDir} style={{ border: "1px solid #263738", backgroundColor: "#0d181a", color: "#9ba9ab", borderRadius: "5px", padding: "8px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                    打开
-                  </button>
-                  <button type="button" onClick={handleResetOutputDir} style={{ border: "1px solid #263738", backgroundColor: "#0d181a", color: "#9ba9ab", borderRadius: "5px", padding: "8px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                    默认
-                  </button>
-                </div>
-              </div>
-              {outputDirSuccess ? <p style={{ margin: 0, color: "#8be6b1", fontSize: "12px" }}>{outputDirSuccess}</p> : null}
-              {outputDirError ? <p style={{ margin: 0, color: "#ff8a8a", fontSize: "12px" }}>路径不可用，请检查权限。</p> : null}
-            </div>
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
+            <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
+              输出图片参数
+            </h3>
+            <ul className="space-y-2 font-sans text-xs">
+              {[
+                { label: "交付方案", value: "高清交付 1080P", color: "text-white" },
+                { label: "目标格式", value: getOutputFormatDisplay(outputFormat), color: "text-[#94a3b8]" },
+                { label: "核心总线", value: "1080P 高清稳定交付", color: "text-white font-mono" },
+                { label: "尺寸策略", value: "智能无损自适应缩放", color: "text-[#94a3b8]" },
+              ].map((item) => (
+                <li key={item.label} className="flex w-full items-center">
+                  <span className="w-16 shrink-0 text-left text-[#64748b]">{item.label}</span>
+                  <div className="mx-2 h-2 flex-1 border-b border-dashed border-[#1c1f26]" />
+                  <span className={`shrink-0 text-right ${item.color}`} title={item.value}>
+                    {item.value}
+                  </span>
+                </li>
+              ))}
+            </ul>
           </div>
         </section>
 
@@ -864,35 +861,45 @@ export default function DashboardPage() {
               <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>{fileQueue.length} 张</span>
             </div>
             <div className="scrollbar-thin w-full flex-1 overflow-auto border border-[#263738] bg-[#05090a]">
-              <table className="w-full text-left font-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "900px" }}>
+              <table className="w-full text-left font-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "820px" }}>
                 <thead style={{ position: "sticky", top: 0, backgroundColor: "#0d181a", color: "#6e7d80", zIndex: 1 }}>
-                  <tr>
-                    {["文件名", "输入尺寸", "输出尺寸", "处理模式", "输出格式", "当前状态", "交付状态", "输出文件名", "操作"].map((head) => (
-                      <th key={head} style={{ padding: "9px 8px", textAlign: "left", borderBottom: "1px solid #263738", whiteSpace: "nowrap", fontWeight: 500 }}>{head}</th>
-                    ))}
+                  <tr className="border-b border-[#1c1f26] text-[#64748b]">
+                    <th className="px-3 py-2 text-left font-medium">文件名</th>
+                    <th className="px-3 py-2 text-left font-medium">输出尺寸</th>
+                    <th className="px-3 py-2 text-left font-medium">处理模式</th>
+                    <th className="px-3 py-2 text-left font-medium">输出格式</th>
+                    <th className="px-3 py-2 text-left font-medium">当前状态</th>
+                    <th className="px-3 py-2 text-left font-medium">交付状态</th>
+                    <th className="px-3 py-2 text-left font-medium">输出文件名</th>
+                    <th className="px-3 py-2 text-center font-medium">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {!fileQueue.length ? (
                     <tr>
-                      <td colSpan={9} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
+                      <td colSpan={8} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
                     </tr>
                   ) : (
                     fileQueue.map((item) => (
-                      <tr key={item.id} style={{ backgroundColor: activeItemId === item.id ? "#0d181a" : "transparent" }}>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#f4f7f8" }} title={item.name}>{item.name}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.input_width && item.input_height ? `${item.input_width} × ${item.input_height}` : "待识别"}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{item.mode || activeMode}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: "#9ba9ab", whiteSpace: "nowrap" }}>{(item.output_format || outputFormat).toUpperCase()}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628" }}><StatusPill status={item.status} /></td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628" }}><DeliveryPill status={item.final_delivery_status} /></td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", color: item.error ? "#ff8a8a" : "#9ba9ab", maxWidth: "190px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.output_filename || item.error}>{item.output_filename || item.error || "等待输出"}</td>
-                        <td style={{ padding: "9px 8px", borderBottom: "1px solid #132628", whiteSpace: "nowrap" }}>
-                          <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} style={{ marginRight: "8px", color: "#6feaf0", background: "none", border: 0, cursor: "pointer", fontSize: "11px" }}>定位</button>
-                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} style={{ marginRight: "8px", color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看对比</button>
-                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForReport(item)} style={{ color: item.status === "completed" ? "#8be6b1" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>查看报告</button>
-                          <button type="button" disabled={item.status !== "completed"} onClick={() => handleCreateFeedbackBundle(item)} style={{ marginLeft: "8px", color: item.status === "completed" ? "#f0c36f" : "#4f5d60", background: "none", border: 0, cursor: item.status === "completed" ? "pointer" : "not-allowed", fontSize: "11px" }}>诊断包</button>
+                      <tr key={item.id} className={`border-b border-[#1c1f26]/50 transition-colors hover:bg-[#121418]/50 ${activeItemId === item.id ? "bg-[#0d181a]" : ""}`}>
+                        <td className="max-w-[180px] truncate px-3 py-2 font-mono text-[#e2e8f0]" title={item.name}>{item.name}</td>
+                        <td className="px-3 py-2 font-mono font-medium text-[#00ffcc]">{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
+                        <td className="px-3 py-2 font-sans">
+                          {(() => {
+                            const display = getModeDisplay(item.mode || activeMode);
+                            return <span className={display.className}>{display.label}</span>;
+                          })()}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[#64748b]">
+                          <span className="text-[#64748b]">{getOutputFormatDisplay(item.output_format || outputFormat)}</span>
+                        </td>
+                        <td className="px-3 py-2"><StatusPill status={item.status} /></td>
+                        <td className="px-3 py-2"><DeliveryPill status={item.final_delivery_status} item={item} /></td>
+                        <td className={`max-w-[150px] truncate px-3 py-2 font-mono ${item.error ? "text-[#ff8a8a]" : "text-[#64748b]"}`} title={item.output_filename || item.error}>{item.output_filename || item.error || "等待输出"}</td>
+                        <td className="space-x-2 px-3 py-2 text-center">
+                          <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
+                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]">查看对比</button>
+                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForReport(item)} className="text-[11px] text-[#64748b] transition-colors hover:text-[#94a3b8] disabled:cursor-not-allowed disabled:text-[#475569]">报告</button>
                         </td>
                       </tr>
                     ))
@@ -902,6 +909,9 @@ export default function DashboardPage() {
             </div>
             <details className="shrink-0" style={{ marginTop: "10px", color: "#6e7d80", fontSize: "11px" }}>
               <summary style={{ cursor: "pointer", color: "#6feaf0" }}>Debug Runtime Monitor</summary>
+              <p style={{ margin: "8px 0 0", color: "#7f8c8d", fontSize: "11px", lineHeight: 1.6 }}>
+                技术详情：下方为后端原始运行字段，不代表面向用户的最终交付结论。用户交付口径以队列表格、交付质检看板、任务详情和质量报告中的“建议人工复核 / 可交付 / 不建议交付”为准。
+              </p>
               <pre className="scrollbar-thin" style={{ margin: "8px 0 0", overflow: "auto", backgroundColor: "#040708", border: "1px solid #132628", borderRadius: "4px", padding: "10px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
                 {debugItem ? JSON.stringify({
                   taskId: debugItem.taskId,
@@ -930,35 +940,123 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        <aside className="scrollbar-none flex h-full w-[320px] shrink-0 flex-col gap-4 overflow-y-auto border-l border-[#1c1f26] bg-[#121418] p-4">
-          <div className="shrink-0">
-            <ParameterPanel outputFormat={outputFormat} />
+        <section className="scrollbar-none flex h-full w-[320px] shrink-0 flex-col gap-2.5 overflow-y-auto border-l border-[#1c1f26] bg-[#121418] p-3">
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
+              <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
+                交付质检看板
+              </h3>
+              <div className="space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">当前样本:</span>
+                  <span className="min-w-0 truncate text-right font-mono text-[#e2e8f0]" title={activeItem?.name || "等待任务"}>
+                    {activeItem?.name || "等待任务"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">交付结论:</span>
+                  <DeliveryPill status={activeItem?.final_delivery_status} item={activeItem} />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">输出 URL:</span>
+                  <span className="block max-w-[180px] truncate font-mono text-[11px] text-[#10b981]" title={activeItem?.final_output_url || "等待成品"}>
+                    {activeItem?.final_output_url || "等待成品"}
+                  </span>
+                </div>
+              </div>
           </div>
 
-          <section className="mt-auto shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/50 p-3">
-            <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">Pipeline 状态映射</h3>
-            <div className="scrollbar-thin" style={{ display: "grid", gap: "6px", overflow: "auto", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", fontSize: "11px", color: "#6e7d80" }}>
-              {[
-                "CLIENT ONLINE : http://localhost:5173",
-                "RUNTIME ONLINE : http://localhost:8787",
-                "OUTPUT PROFILE : 高清交付 1080P",
-                "TARGET REZ : 1080P 稳定基线",
-                `当前输出：${appliedOutputDir.trim() ? "自定义目录" : "默认输出目录"}`,
-                completedItems.length ? "final_output_url 已绑定" : "质量守门检测流就绪",
-              ].map((item) => (
-                <div key={item} className="block max-w-[220px] truncate font-mono text-[11px] text-[#10b981]" title={item}>
-                  {item}
-                </div>
-              ))}
-              <div style={{ color: "#6e7d80", borderTop: "1px solid #1c1f26", marginTop: "6px", paddingTop: "8px" }}>
-                已完成：{completedItems.length} / {fileQueue.length} 张
-              </div>
-              <div style={{ color: "#f0c36f" }}>建议人工复核：{fileQueue.filter((item) => item.final_delivery_status === "PASS_WITH_LIMITATION").length} 张</div>
-              <div style={{ color: "#ff8a8a" }}>不可交付：{fileQueue.filter((item) => item.final_delivery_status === "FAIL").length} 张</div>
-              <div style={{ color: "#6e7d80", lineHeight: 1.7 }}>成品预览仅绑定后端映射 URL，不读取本地盘符路径。</div>
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-xs font-medium text-[#94a3b8]">输出文件夹</h3>
+              <span className="rounded-sm border border-[#333] bg-[#1c1f26] px-2 py-0.5 text-[10px] text-[#10b981]">
+                {outputLocationLabel}
+              </span>
             </div>
-          </section>
-        </aside>
+            <div className="scrollbar-none vmp-path-scroll-container mb-3 rounded-sm border border-[#1c1f26] bg-[#0b0c0e] p-2.5 font-mono text-xs text-[#e2e8f0]">
+              {currentOutputDir}
+            </div>
+            <button
+              type="button"
+              onClick={handleSelectOutputDir}
+              className="w-full rounded-sm border border-[#00ffcc]/30 bg-[#1c1f26] px-4 py-2.5 text-xs font-medium tracking-wide text-[#00ffcc] transition-colors hover:bg-[#20242c]"
+            >
+              更换文件夹
+            </button>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 py-1.5 text-[11px] text-[#94a3b8] transition-colors hover:bg-[#1c1f26] hover:text-white">
+                📂 打开当前目录
+              </button>
+              <button type="button" onClick={handleResetOutputDir} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 py-1.5 text-[11px] text-[#64748b] transition-colors hover:bg-[#1c1f26] hover:text-[#94a3b8]">
+                🔄 重置默认路径
+              </button>
+            </div>
+            {outputDirSuccess ? <p className="mt-2 text-xs text-[#8be6b1]">{outputDirSuccess}</p> : null}
+            {outputDirError ? <p className="mt-2 text-xs text-[#ff8a8a]">路径不可用，请检查权限。</p> : null}
+          </div>
+
+          <div className="mt-auto w-full flex-shrink-0 space-y-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/80 p-3">
+            <h3 className="border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
+              Pipeline 状态映射
+            </h3>
+            <div className="space-y-1.5 border-b border-[#1c1f26]/50 pb-1.5 font-mono text-[11px]">
+              <div className="flex items-center justify-between gap-3">
+                <span className="shrink-0 text-[#475569]">前台连接:</span>
+                <span className="max-w-[180px] truncate text-[#10b981]" title="http://localhost:5173">http://localhost:5173</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="shrink-0 text-[#475569]">后台运行:</span>
+                <span className="max-w-[180px] truncate text-[#10b981]" title="http://localhost:8787">http://localhost:8787</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="shrink-0 text-[#475569]">交付方案:</span>
+                <span className="min-w-0 truncate text-[#94a3b8]" title="高清交付 1080P">高清交付 1080P</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="shrink-0 text-[#475569]">目标规格:</span>
+                <span className="min-w-0 truncate text-[#f59e0b]" title="1080P 稳定基线">1080P 稳定基线</span>
+              </div>
+            </div>
+            <div className="space-y-0.5 pt-1.5 text-xs font-medium">
+              <div className="flex items-center justify-between text-[#94a3b8]">
+                <span>已完成任务:</span>
+                <span className="font-mono">{completedItems.length} / {fileQueue.length} 张</span>
+              </div>
+              <div className="flex items-center justify-between text-[#f59e0b]">
+                <span>建议人工复核:</span>
+                <span className="rounded-sm bg-[#f59e0b]/10 px-1.5 font-mono">{fileQueue.filter((item) => resolveQueueDelivery(item).status === "PASS_WITH_LIMITATION").length} 张</span>
+              </div>
+              <div className="flex items-center justify-between text-[#f43f5e]">
+                <span>不建议交付状态:</span>
+                <span className="rounded-sm bg-[#f43f5e]/10 px-1.5 font-mono">{fileQueue.filter((item) => resolveQueueDelivery(item).status === "FAIL").length} 张</span>
+              </div>
+            </div>
+            <div className="space-y-2 border-t border-[#1c1f26]/30 pt-2">
+              <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleOpenFinalOutput(deliveryActionItem)} className="flex w-full items-center justify-center gap-2 rounded-sm bg-[#10b981] px-4 py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569] disabled:shadow-none">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+                  <path d="M12 5v13M5 12l7 7 7-7" />
+                </svg>
+                <span>下载成品高清图片</span>
+              </button>
+              <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleCopyFinalOutputUrl(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition-colors hover:bg-[#2d3139] disabled:cursor-not-allowed disabled:text-[#475569]">
+                <svg className="h-3.5 w-3.5 text-[#64748b] transition-colors group-hover:text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+                  <rect x="9" y="9" width="13" height="13" rx="1" />
+                  <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+                </svg>
+                <span>复制成品映射路径</span>
+              </button>
+              <button type="button" disabled={!deliveryActionItem?.taskId} onClick={() => handleCreateFeedbackBundle(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
+                <svg className="animate-spin-slow h-3.5 w-3.5 text-[#856404] transition-colors group-hover:text-[#ffc107]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+                <span>生成系统脱敏诊断包</span>
+              </button>
+            </div>
+            <p className="border-t border-[#1c1f26]/30 pt-2 text-[10px] leading-relaxed text-[#475569]">
+              成品质检仅依据后端解算映射 URL，不读取本地物理路径。
+            </p>
+          </div>
+        </section>
       </div>
 
       <footer className="flex h-6 shrink-0 items-center justify-center border-t border-[#1c1f26] bg-[#0b0c0e] font-mono text-[10px] tracking-[0.16em] text-[#6e7d80]">

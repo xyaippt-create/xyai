@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { resolveDeliveryStatus } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
 const EXPECTED_LOG_TOTAL = 11;
@@ -33,7 +34,7 @@ const styles = {
 const deliveryStatusMeta = {
   PASS: { label: "可交付", color: "#8be6b1", border: "#315342", desc: "后台交付门通过，可进入正常 1080P 查看。" },
   PASS_WITH_LIMITATION: { label: "建议人工复核", color: "#f0c36f", border: "#66532d", desc: "后台已完成输出，但存在质量门、体积或平滑区域限制，需人工查看。" },
-  FAIL: { label: "不可交付", color: "#ff8a8a", border: "#5a2525", desc: "后台交付门阻断，不能作为正式成品使用。" },
+  FAIL: { label: "不建议交付", color: "#ff8a8a", border: "#5a2525", desc: "后台交付门阻断，不建议作为正式成品使用。" },
 };
 
 const timelines = [
@@ -61,6 +62,14 @@ function getTaskId(taskConfig) {
     taskConfig?.compareAssets?.task_id ||
     ""
   );
+}
+
+function flagEnabled(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function flagDisabled(value) {
+  return value === false || value === "false" || value === 0 || value === "0";
 }
 
 function ProgressTimeline({ currentStageIndex, taskStatus }) {
@@ -183,11 +192,33 @@ export default function TaskDetailPage({
   const result = taskConfig?.task_result || taskConfig?.compareAssets?.task_result || {};
   const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || null;
   const debugQuality = taskConfig?.debug_quality || result.debug_quality || taskConfig?.compareAssets?.debug_quality || {};
-  const finalDeliveryStatus = taskConfig?.final_delivery_status || result.final_delivery_status || debugQuality.final_delivery_status || "";
+  const qualityContext = { ...debugQuality, ...result, ...(report || {}) };
+  const rawFinalDeliveryStatus = taskConfig?.final_delivery_status || result.final_delivery_status || debugQuality.final_delivery_status || "";
   const finalDeliveryReason = taskConfig?.final_delivery_reason || result.final_delivery_reason || debugQuality.final_delivery_reason || "";
   const finalDeliveryRisk = taskConfig?.final_delivery_risk_level || result.final_delivery_risk_level || debugQuality.final_delivery_risk_level || "";
   const finalDeliveryUsage = taskConfig?.final_delivery_recommended_usage || result.final_delivery_recommended_usage || debugQuality.final_delivery_recommended_usage || "";
-  const deliveryMeta = deliveryStatusMeta[finalDeliveryStatus] || { label: "等待判定", color: "#6e7d80", border: "#263738", desc: "等待后端返回最终交付状态。" };
+  const deliveryMetaResolved = resolveDeliveryStatus(debugQuality, result, report || {}, taskConfig || {});
+  const deliveryMeta = {
+    label: deliveryMetaResolved.label,
+    color: deliveryMetaResolved.tone,
+    border: deliveryMetaResolved.border,
+    desc: deliveryMetaResolved.description,
+  };
+  const finalSelectionReason = String(qualityContext.final_selection_reason || "");
+  const compressionCandidateHint =
+    rawFinalDeliveryStatus === "PASS" &&
+    qualityContext.final_quality_source === "main_output" &&
+    finalSelectionReason.includes("optimized_output") &&
+    finalSelectionReason.includes("回退 main_output")
+      ? "压缩优化候选未采用，已使用主输出文件作为最终成品。"
+      : "";
+  const phase5DefaultColorHint =
+    flagEnabled(qualityContext.phase5_color_drift_detected) &&
+    flagDisabled(qualityContext.phase5_color_fallback_triggered) &&
+    flagDisabled(qualityContext.phase5_color_correction_enabled) &&
+    qualityContext.phase5_correction_skip_reason === "disabled_by_user"
+      ? "默认保真色彩稳定已启用；主动色偏修复未开启。"
+      : "";
   const mode = taskConfig?.mode || taskConfig?.compareAssets?.mode || "fidelity";
   const format = result.output_format || taskConfig?.output_format || taskConfig?.format || "auto";
   const target = result.target_resolution || "1080P 稳定交付";
@@ -292,6 +323,16 @@ export default function TaskDetailPage({
               {deliveryMeta.label}
             </span>
             <span className="text-slate-500">{deliveryMeta.desc}</span>
+            {compressionCandidateHint ? (
+              <span className="rounded-sm border border-[#315342] bg-[#102a1c]/60 px-2 py-0.5 text-[#8be6b1]">
+                技术提示：{compressionCandidateHint}
+              </span>
+            ) : null}
+            {phase5DefaultColorHint ? (
+              <span className="rounded-sm border border-[#315342] bg-[#102a1c]/60 px-2 py-0.5 text-[#8be6b1]">
+                {phase5DefaultColorHint}
+              </span>
+            ) : null}
             {finalDeliveryReason ? <span className="font-mono text-slate-500">reason: {finalDeliveryReason}</span> : null}
             {finalDeliveryRisk ? <span className="font-mono text-slate-500">risk: {finalDeliveryRisk}</span> : null}
             {finalDeliveryUsage ? <span className="font-mono text-slate-500">usage: {finalDeliveryUsage}</span> : null}

@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from "react";
+import { resolveDeliveryStatus } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
 const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
@@ -49,16 +50,18 @@ function resolveAssets(taskConfig, compareAssets) {
   const currentTask = unwrapTaskPayload(taskConfig, compareAssets);
   const result = currentTask.task_result || {};
   const report = currentTask.task_report || {};
+  const debugQuality = currentTask.debug_quality || result.debug_quality || {};
+  const deliveryMeta = resolveDeliveryStatus(debugQuality, result, report, currentTask);
   const enhancedImgSrc = result.preview_output_url || currentTask.preview_output_url || result.final_output_url || currentTask.final_output_url;
   const originalImgSrc = currentTask.originalUrl || currentTask.original_url || currentTask.input_url || result.original_url || result.input_url;
-  const finalDeliveryStatus = result.final_delivery_status || currentTask.final_delivery_status || currentTask.debug_quality?.final_delivery_status || "";
 
   return {
     originalUrl: normalizeUrl(originalImgSrc),
     enhancedUrl: normalizeUrl(enhancedImgSrc),
     finalOutputUrl: normalizeUrl(result.final_output_url || currentTask.final_output_url),
     previewOutputUrl: normalizeUrl(result.preview_output_url || currentTask.preview_output_url),
-    finalDeliveryStatus,
+    finalDeliveryStatus: deliveryMeta.status,
+    deliveryMeta,
     finalDeliveryReason: result.final_delivery_reason || currentTask.final_delivery_reason || currentTask.debug_quality?.final_delivery_reason || "",
     fileName: currentTask.fileName || currentTask.filename || result.output_filename || result.input_filename || "等待真实上传资产",
     mode: currentTask.mode || taskConfig?.mode || "fidelity",
@@ -139,7 +142,7 @@ function ZoomGlass({ zoom, originalUrl, enhancedUrl, split }) {
   );
 }
 
-function SliderCompareStage({ originalUrl, enhancedUrl, fileName }) {
+function SliderCompareStage({ originalUrl, enhancedUrl, fileName, deliveryBadge }) {
   const stageRef = useRef(null);
   const [split, setSplit] = useState(50);
   const [dragging, setDragging] = useState(false);
@@ -177,7 +180,7 @@ function SliderCompareStage({ originalUrl, enhancedUrl, fileName }) {
       ) : (
         <>
           <div className="absolute inset-0">
-            <ImagePlane src={enhancedUrl} alt="1080P 高清成品" onError={() => setLoadError(true)} />
+            <ImagePlane src={enhancedUrl} alt={deliveryBadge} onError={() => setLoadError(true)} />
           </div>
           <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(0 ${100 - split}% 0 0)` }}>
             <ImagePlane src={originalUrl} alt="原图" dim onError={() => {}} />
@@ -203,7 +206,7 @@ function SliderCompareStage({ originalUrl, enhancedUrl, fileName }) {
         Original
       </div>
       <div className="absolute right-5 top-5 z-20 rounded border border-[#3cb3a0]/35 bg-[#3cb3a0]/10 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.24em] text-[#8effed] backdrop-blur-md">
-        1080P 高清成品
+        {deliveryBadge}
       </div>
       <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-[10px] tracking-[0.2em] text-white/40 backdrop-blur-md">
         VisualMasterPro V0.4 · {fileName || "等待真实上传资产"} · Fidelity Lock
@@ -216,6 +219,7 @@ function SliderCompareStage({ originalUrl, enhancedUrl, fileName }) {
 function QualityPanel({ assets }) {
   const report = assets.report || {};
   const result = assets.result || {};
+  const deliveryMeta = assets.deliveryMeta || resolveDeliveryStatus(result, report);
 
   return (
     <aside className="flex h-full min-h-0 flex-col gap-4">
@@ -249,11 +253,20 @@ function QualityPanel({ assets }) {
         <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
         <h2 className="mt-2 text-xl font-semibold text-slate-100">字段绑定</h2>
         <div className="mt-4 space-y-3 font-mono text-xs text-slate-400">
-          <div style={styles.innerCard} className="p-3">交付状态：{assets.finalDeliveryStatus === "PASS_WITH_LIMITATION" ? "建议人工复核" : assets.finalDeliveryStatus === "PASS" ? "可交付" : assets.finalDeliveryStatus === "FAIL" ? "不可交付" : "暂无数据"}</div>
-          <div style={styles.innerCard} className="p-3">交付原因：{assets.finalDeliveryReason || "暂无数据"}</div>
-          <div style={styles.innerCard} className="p-3">输出尺寸：{result.output_width || "暂无"} × {result.output_height || "暂无"}</div>
-          <div style={styles.innerCard} className="p-3">尺寸策略：{result.resize_policy || "暂无数据"}</div>
-          <div style={styles.innerCard} className="p-3">输出格式：{result.output_format || "暂无数据"}</div>
+          <div style={styles.innerCard} className="min-w-0 overflow-hidden p-3">
+            <span className="text-slate-500">交付状态：</span>
+            <span style={{ color: deliveryMeta.tone }}>{deliveryMeta.label}</span>
+          </div>
+          <div style={styles.innerCard} className="min-w-0 overflow-hidden p-3">
+            <span className="text-slate-500">交付原因：</span>
+            <span className="break-words" title={assets.finalDeliveryReason || "暂无数据"}>{assets.finalDeliveryReason || "暂无数据"}</span>
+          </div>
+          <div style={styles.innerCard} className="min-w-0 overflow-hidden p-3">输出尺寸：{result.output_width || "暂无"} × {result.output_height || "暂无"}</div>
+          <div style={styles.innerCard} className="min-w-0 overflow-hidden p-3">
+            <span className="text-slate-500">尺寸策略：</span>
+            <span className="break-words" title={result.resize_policy || "暂无数据"}>{result.resize_policy || "暂无数据"}</span>
+          </div>
+          <div style={styles.innerCard} className="min-w-0 overflow-hidden p-3">输出格式：{result.output_format || "暂无数据"}</div>
         </div>
       </div>
 
@@ -298,7 +311,7 @@ export default function ImageSliderComparePage({ taskConfig, compareAssets, onBa
       </header>
 
       <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-5">
-        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl} fileName={assets.fileName} />
+        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl} fileName={assets.fileName} deliveryBadge={assets.deliveryMeta?.badge || "1080P 本地预览"} />
         <QualityPanel assets={assets} />
       </main>
 
