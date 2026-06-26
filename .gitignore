@@ -67,4 +67,3 @@ settings/settings.json
 # Diagnostic generated images
 tests/diagnostics/output/
 tests/results/
-tests/golden_v046/private/
