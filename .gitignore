@@ -67,3 +67,14 @@ settings/settings.json
 # Diagnostic generated images
 tests/diagnostics/output/
 tests/results/
+
+# Local restoration model experiments
+external_tools/
+runtime/experiments/
+models/restoration/*.onnx
+models/restoration/*.pth
+models/restoration/*.pt
+models/restoration/*.safetensors
+models/restoration/*.ckpt
+*.zip
+测试图/
