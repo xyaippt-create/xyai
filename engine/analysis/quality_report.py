@@ -74,7 +74,7 @@ def build_quality_report(
     }
 
 
-def report_to_markdown(report: dict, title: str = "VisualMasterPro Quality Report") -> str:
+def report_to_markdown(report: dict, title: str = "影界 HDDE 高清交付质量报告") -> str:
     problems = report.get("problems_detected") or ["未发现明显问题"]
     actions = report.get("next_actions") or ["保持当前处理方向"]
 
@@ -122,7 +122,7 @@ def write_quality_report_json(path: str | Path, report: dict) -> bool:
     return True
 
 
-def write_quality_report_markdown(path: str | Path, report: dict, title: str = "VisualMasterPro Quality Report") -> bool:
+def write_quality_report_markdown(path: str | Path, report: dict, title: str = "影界 HDDE 高清交付质量报告") -> bool:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report_to_markdown(report, title), encoding="utf-8")

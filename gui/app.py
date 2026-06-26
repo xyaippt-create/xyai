@@ -43,14 +43,14 @@ class VisualMasterProApp:
         self.root.after(600, self.show_first_launch_guide)
 
     def _build(self) -> None:
-        self.root.title("VisualMasterPro V0.3")
+        self.root.title("影界 HDDE V0.3")
         self.root.geometry("980x720")
         self._build_menu()
 
         header = Frame(self.root, padx=16, pady=12)
         header.pack(fill="x")
-        Label(header, text="VisualMasterPro V0.3", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=W)
-        Label(header, text="原图忠实增强 · 4K清晰优化 · 批量处理", font=("Microsoft YaHei UI", 10)).pack(anchor=W)
+        Label(header, text="影界 HDDE V0.3", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=W)
+        Label(header, text="HD Delivery Engine · 中文视觉高清交付引擎", font=("Microsoft YaHei UI", 10)).pack(anchor=W)
 
         input_frame = ttk.LabelFrame(self.root, text="输入图片", padding=10)
         input_frame.pack(fill="both", padx=16, pady=8)
@@ -114,7 +114,7 @@ class VisualMasterProApp:
     def show_help_topic(self, key: str) -> None:
         title, content = read_help_topic(key)
         window = Toplevel(self.root)
-        window.title(f"VisualMasterPro V0.3 - {title}")
+        window.title(f"影界 HDDE V0.3 - {title}")
         window.geometry("720x560")
         frame = Frame(window, padx=12, pady=12)
         frame.pack(fill=BOTH, expand=True)
@@ -133,7 +133,7 @@ class VisualMasterProApp:
             return
         title, content = read_help_topic("quick_start")
         try:
-            messagebox.showinfo(f"VisualMasterPro V0.3 - {title}", content)
+            messagebox.showinfo(f"影界 HDDE V0.3 - {title}", content)
         finally:
             mark_quick_guide_seen()
 
@@ -310,7 +310,7 @@ def run_gui() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="VisualMasterPro V0.3 图形化界面")
+    parser = argparse.ArgumentParser(description="影界 HDDE V0.3 图形化界面")
     parser.add_argument("--self-test", action="store_true", help="仅测试 GUI 模块是否可导入。")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -319,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run_gui()
     except Exception as exc:
-        return handle_exception(exc, title="VisualMasterPro 图形界面启动失败")
+        return handle_exception(exc, title="影界 HDDE 图形界面启动失败")
 
 
 if __name__ == "__main__":

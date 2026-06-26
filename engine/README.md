@@ -1,6 +1,6 @@
 # engine 核心算法模块
 
-`engine` 是 VisualMasterPro 的长期核心。
+`engine` 是影界 HDDE 的长期核心。VisualMasterPro 作为历史开发代号保留。
 
 ## 子目录
 

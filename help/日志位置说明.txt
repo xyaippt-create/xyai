@@ -1,4 +1,4 @@
-VisualMasterPro V0.3 日志位置说明
+影界 HDDE V0.3 日志位置说明
 
 一、日志用途
 

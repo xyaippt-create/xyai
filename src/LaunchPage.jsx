@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
+const PAGE_FOOTER = "影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎";
 
 const checkGroups = [
   {
@@ -60,15 +60,15 @@ function CinematicTerrain() {
 function SculptedTitle() {
   return (
     <div className="relative mx-auto max-w-5xl px-12 text-center">
-      <p className="font-mono text-xs uppercase tracking-[0.32em] text-[#8aa0a2]">VisualMasterPro</p>
+      <p className="font-mono text-xs uppercase tracking-[0.32em] text-[#8aa0a2]">HD Delivery Engine</p>
       <div className="relative mt-8">
         <h1
           className="relative z-10 flex flex-row items-center justify-center whitespace-nowrap text-4xl font-semibold leading-none tracking-[0.08em] text-slate-100 md:text-5xl"
         >
-          高清交付引擎
+          影界 HDDE
         </h1>
         <p className="mx-auto mt-8 max-w-2xl text-sm leading-8 text-white/62">
-          以真实画质恢复为核心，保护构图、色彩与原始风格。当前版本锁定 V0.4 1080P 稳定交付基线。
+          中文视觉高清交付引擎。以真实画质恢复为核心，保护构图、色彩与原始风格。当前版本锁定 V0.4 1080P 稳定交付基线。
         </p>
       </div>
     </div>
@@ -100,7 +100,7 @@ export default function LaunchPage({ onEnter }) {
 
   const snapshot = useMemo(
     () => ({
-      appVersion: "VisualMasterPro V0.4",
+      appVersion: "影界 HDDE V0.4",
       runtimeReady: allDone,
       checks: statusMap,
       gpuInfo: "Local GPU / CPU Adaptive",
@@ -152,7 +152,7 @@ export default function LaunchPage({ onEnter }) {
           })}
         </div>
       </div>
-      <footer className="relative z-10 text-center font-mono text-[10px] tracking-[0.2em] text-white/24">{PAGE_FOOTER}</footer>
+      <footer className="relative z-10 w-full truncate px-3 text-center font-mono text-[10px] tracking-[0.2em] text-white/24">{PAGE_FOOTER}</footer>
     </section>
   );
 }

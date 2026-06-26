@@ -43,7 +43,7 @@ function Read-HelpText([string]$fileName, [string]$fallback) {{
 function Show-HelpWindow([string]$title, [string]$fileName, [string]$fallback) {{
     $content = Read-HelpText $fileName $fallback
     $helpForm = New-Object System.Windows.Forms.Form
-    $helpForm.Text = "VisualMasterPro V0.3 - $title"
+    $helpForm.Text = "影界 HDDE V0.3 - $title"
     $helpForm.Size = New-Object System.Drawing.Size(720, 560)
     $helpForm.StartPosition = 'CenterParent'
 
@@ -66,21 +66,21 @@ function Show-QuickGuideOnce {{
     New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
     $flag = Join-Path $settingsDir 'quick_guide_seen_v03.flag'
     if (-not (Test-Path -LiteralPath $flag)) {{
-        $content = Read-HelpText '快速引导.txt' '欢迎使用 VisualMasterPro V0.3。请先添加图片或选择图片文件夹，再选择输出文件夹，最后点击开始处理。软件不会覆盖原图，默认不添加角标。'
-        [System.Windows.Forms.MessageBox]::Show($content, 'VisualMasterPro V0.3 - 快速引导') | Out-Null
+        $content = Read-HelpText '快速引导.txt' '欢迎使用 影界 HDDE V0.3。请先添加图片或选择图片文件夹，再选择输出文件夹，最后点击开始处理。软件不会覆盖原图，默认不添加角标。'
+        [System.Windows.Forms.MessageBox]::Show($content, '影界 HDDE V0.3 - 快速引导') | Out-Null
         Set-Content -Path $flag -Value 'seen' -Encoding UTF8
     }}
 }}
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'VisualMasterPro V0.3'
+$form.Text = '影界 HDDE V0.3'
 $form.Size = New-Object System.Drawing.Size(760, 540)
 $form.StartPosition = 'CenterScreen'
 
 $menu = New-Object System.Windows.Forms.MenuStrip
 $helpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('帮助')
 $guideItem = New-Object System.Windows.Forms.ToolStripMenuItem('快速引导')
-$guideItem.Add_Click({{ Show-HelpWindow '快速引导' '快速引导.txt' '欢迎使用 VisualMasterPro V0.3。请先添加图片或选择图片文件夹，再选择输出文件夹，最后点击开始处理。' }})
+$guideItem.Add_Click({{ Show-HelpWindow '快速引导' '快速引导.txt' '欢迎使用 影界 HDDE V0.3。请先添加图片或选择图片文件夹，再选择输出文件夹，最后点击开始处理。' }})
 $guideItem | Out-Null
 $userGuideItem = New-Object System.Windows.Forms.ToolStripMenuItem('使用说明')
 $userGuideItem.Add_Click({{ Show-HelpWindow '使用说明' '使用说明.txt' '使用说明文件未找到。请检查 help/使用说明.txt 是否已随软件一起打包。' }})
@@ -105,14 +105,14 @@ $form.MainMenuStrip = $menu
 $form.Controls.Add($menu)
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = 'VisualMasterPro V0.3'
+$title.Text = '影界 HDDE V0.3'
 $title.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 16, [System.Drawing.FontStyle]::Bold)
 $title.Location = New-Object System.Drawing.Point(20, 34)
 $title.Size = New-Object System.Drawing.Size(500, 32)
 $form.Controls.Add($title)
 
 $sub = New-Object System.Windows.Forms.Label
-$sub.Text = '原图忠实增强 · 4K清晰优化 · 批量处理'
+$sub.Text = 'HD Delivery Engine · 中文视觉高清交付引擎'
 $sub.Location = New-Object System.Drawing.Point(22, 72)
 $sub.Size = New-Object System.Drawing.Size(520, 24)
 $form.Controls.Add($sub)
@@ -211,7 +211,7 @@ $btnStart.Location = New-Object System.Drawing.Point(365, 430)
 $btnStart.Size = New-Object System.Drawing.Size(100, 34)
 $btnStart.Add_Click({{
     if ($inputPaths.Count -eq 0) {{
-        [System.Windows.Forms.MessageBox]::Show('请先添加图片或选择图片文件夹。', 'VisualMasterPro')
+        [System.Windows.Forms.MessageBox]::Show('请先添加图片或选择图片文件夹。', '影界 HDDE')
         return
     }}
     New-Item -ItemType Directory -Force -Path $outputBox.Text | Out-Null
@@ -224,11 +224,11 @@ $btnStart.Add_Click({{
         }}
         $p = Start-Process -FilePath $exePath -ArgumentList $arguments -Wait -PassThru
         if ($p.ExitCode -ne 0) {{
-            [System.Windows.Forms.MessageBox]::Show("处理失败，请查看 logs/latest_crash.txt。", 'VisualMasterPro')
+            [System.Windows.Forms.MessageBox]::Show("处理失败，请查看 logs/latest_crash.txt。", '影界 HDDE')
         }}
     }}
     $status.Text = '处理完成'
-    [System.Windows.Forms.MessageBox]::Show('处理完成。', 'VisualMasterPro')
+    [System.Windows.Forms.MessageBox]::Show('处理完成。', '影界 HDDE')
 }})
 $form.Controls.Add($btnStart)
 

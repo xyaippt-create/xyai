@@ -20,7 +20,7 @@ HELP_TOPICS: dict[str, HelpTopic] = {
         title="快速引导",
         file_name="快速引导.txt",
         fallback_text=(
-            "欢迎使用 VisualMasterPro V0.3\n\n"
+            "欢迎使用 影界 HDDE V0.3\n\n"
             "1. 添加图片或选择图片文件夹。\n"
             "2. 选择输出文件夹。\n"
             "3. 首次测试建议使用 fidelity 原图忠实增强模式。\n"

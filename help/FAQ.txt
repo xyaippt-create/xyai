@@ -1,4 +1,4 @@
-VisualMasterPro V0.3 常见问题
+影界 HDDE V0.3 常见问题
 
 一、双击软件没有反应怎么办？
 
@@ -26,7 +26,7 @@ logs/latest_crash.txt
 
 四、为什么输出文件名变长了？
 
-VisualMasterPro 会在原文件名后追加版本标识，便于区分原图和处理结果。
+影界 HDDE 会在原文件名后追加版本标识，便于区分原图和处理结果。
 
 示例：
 

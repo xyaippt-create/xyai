@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from "react";
 import { resolveDeliveryStatus } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
-const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
+const PAGE_FOOTER = "影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎";
 
 const styles = {
   page: { backgroundColor: "#060b0c", fontFamily: "sans-serif" },
@@ -209,7 +209,7 @@ function SliderCompareStage({ originalUrl, enhancedUrl, fileName, deliveryBadge 
         {deliveryBadge}
       </div>
       <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-[10px] tracking-[0.2em] text-white/40 backdrop-blur-md">
-        VisualMasterPro V0.4 · {fileName || "等待真实上传资产"} · Fidelity Lock
+        影界 HDDE V0.4 · {fileName || "等待真实上传资产"} · HD Delivery Engine
       </div>
       <ZoomGlass zoom={zoom} originalUrl={originalUrl} enhancedUrl={enhancedUrl} split={split} />
     </div>
@@ -315,7 +315,7 @@ export default function ImageSliderComparePage({ taskConfig, compareAssets, onBa
         <QualityPanel assets={assets} />
       </main>
 
-      <footer className="relative z-10 mt-3 shrink-0 border-t border-[#0e1d1f] pt-2 text-center font-mono text-[10px] tracking-wider text-slate-600">{PAGE_FOOTER}</footer>
+      <footer className="relative z-10 mt-3 w-full shrink-0 truncate border-t border-[#0e1d1f] px-3 pt-2 text-center font-mono text-[10px] tracking-wider text-slate-600">{PAGE_FOOTER}</footer>
     </section>
   );
 }

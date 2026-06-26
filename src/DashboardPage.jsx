@@ -901,8 +901,8 @@ export default function DashboardPage() {
     >
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#1c1f26] bg-[#0b0c0e] px-4">
         <div className="min-w-0">
-          <p style={DECOR_LABEL}>VisualMasterPro</p>
-          <h1 className="truncate text-base font-semibold tracking-[0.08em]" style={TITLE_STYLE}>画质核心工作台</h1>
+          <p style={DECOR_LABEL}>HD Delivery Engine</p>
+          <h1 className="truncate text-base font-semibold tracking-[0.08em]" style={TITLE_STYLE}>影界 HDDE · 画质核心工作台</h1>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-[#6feaf0]" />
@@ -1207,8 +1207,8 @@ export default function DashboardPage() {
         </section>
       </div>
 
-      <footer className="flex h-6 shrink-0 items-center justify-center border-t border-[#1c1f26] bg-[#0b0c0e] font-mono text-[10px] tracking-[0.16em] text-[#6e7d80]">
-        VisualMasterPro V0.4.6 RC1 · 1080P 本地交付
+      <footer className="flex h-6 w-full shrink-0 items-center justify-center overflow-hidden border-t border-[#1c1f26] bg-[#0b0c0e] px-3 text-center font-mono text-[10px] tracking-[0.16em] text-[#6e7d80]">
+        影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
       </footer>
     </section>
   );

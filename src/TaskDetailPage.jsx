@@ -3,7 +3,7 @@ import { resolveDeliveryStatus } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
 const EXPECTED_LOG_TOTAL = 11;
-const PAGE_FOOTER = "VisualMasterPro V0.4.6 RC1 · 1080P 本地交付";
+const PAGE_FOOTER = "影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎";
 
 const styles = {
   page: { backgroundColor: "#060b0c", fontFamily: "sans-serif" },
@@ -372,7 +372,7 @@ export default function TaskDetailPage({
         <RealtimeLogStream logs={logs} taskStatus={taskStatus} />
       </div>
 
-      <footer className="mt-auto w-full shrink-0 border-t border-[#0e1d1f] py-1 text-center font-mono text-[10px] tracking-wider text-slate-600">{PAGE_FOOTER}</footer>
+      <footer className="mt-auto w-full shrink-0 truncate border-t border-[#0e1d1f] px-3 py-1 text-center font-mono text-[10px] tracking-wider text-slate-600">{PAGE_FOOTER}</footer>
     </div>
   );
 }
