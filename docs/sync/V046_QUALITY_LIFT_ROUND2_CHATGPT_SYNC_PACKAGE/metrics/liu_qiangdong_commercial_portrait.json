@@ -1,0 +1,20 @@
+{
+  "sample_id": "liu_qiangdong_commercial_portrait",
+  "kind": "portrait_poster",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\liu_qiangdong_commercial_portrait.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\liu_qiangdong_commercial_portrait.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\liu_qiangdong_commercial_portrait.png",
+  "original_size_bytes": 2798397,
+  "frozen_size_bytes": 3692370,
+  "candidate_size_bytes": 4198666,
+  "candidate_size_delta_bytes": 506296,
+  "candidate_size_ratio": 1.13712,
+  "round2_strength": 0.055,
+  "mean_delta_e": 0.751695,
+  "p95_delta_e": 2.236068,
+  "saturation_delta": 0.000986,
+  "edge_delta_proxy": 0.55257,
+  "texture_delta_proxy": 0.217462,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

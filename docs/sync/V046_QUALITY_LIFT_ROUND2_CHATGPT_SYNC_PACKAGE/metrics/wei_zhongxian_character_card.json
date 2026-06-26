@@ -1,0 +1,20 @@
+{
+  "sample_id": "wei_zhongxian_character_card",
+  "kind": "character_info_card",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\wei_zhongxian_character_card.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\wei_zhongxian_character_card.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\wei_zhongxian_character_card.png",
+  "original_size_bytes": 2852285,
+  "frozen_size_bytes": 3449182,
+  "candidate_size_bytes": 3874487,
+  "candidate_size_delta_bytes": 425305,
+  "candidate_size_ratio": 1.123306,
+  "round2_strength": 0.058,
+  "mean_delta_e": 0.756657,
+  "p95_delta_e": 2.236068,
+  "saturation_delta": 0.001231,
+  "edge_delta_proxy": 0.55266,
+  "texture_delta_proxy": 0.324381,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

@@ -1,0 +1,23 @@
+{
+  "api_status_code": 200,
+  "task_id": "task_20260626_075609_c519db00",
+  "task_status": "completed",
+  "pipeline_call_count": 1,
+  "pipeline_calls": [
+    {
+      "input_path": "D:\\Codex\\04_Visual-Master-Pro\\runtime\\v04_inputs\\task_20260626_075609_c519db00_original_product_png_legacy.png",
+      "output_root": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\pipeline_entry",
+      "mode": "fidelity",
+      "output_profile": "delivery_1080p",
+      "output_format": "png"
+    }
+  ],
+  "final_output_url": "/api/file/outputs/task_20260626_075609_c519db00_original_product_png_legacy_影界高清_1080P_fidelity_20260626_075609.png",
+  "final_output_url_ok": true,
+  "sse": {
+    "status_code": 200,
+    "done": true,
+    "has_completed_status": true
+  },
+  "passed": true
+}

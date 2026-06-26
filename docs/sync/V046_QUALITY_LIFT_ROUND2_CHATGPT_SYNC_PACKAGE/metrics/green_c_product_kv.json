@@ -1,0 +1,20 @@
+{
+  "sample_id": "green_c_product_kv",
+  "kind": "product_kv",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\green_c_product_kv.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\green_c_product_kv.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\green_c_product_kv.png",
+  "original_size_bytes": 1555504,
+  "frozen_size_bytes": 1469636,
+  "candidate_size_bytes": 1622383,
+  "candidate_size_delta_bytes": 152747,
+  "candidate_size_ratio": 1.103935,
+  "round2_strength": 0.052,
+  "mean_delta_e": 0.122196,
+  "p95_delta_e": 1.0,
+  "saturation_delta": 5.4e-05,
+  "edge_delta_proxy": 0.068722,
+  "texture_delta_proxy": 0.102385,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

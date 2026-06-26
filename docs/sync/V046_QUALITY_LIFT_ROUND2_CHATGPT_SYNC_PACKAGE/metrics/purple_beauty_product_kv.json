@@ -1,0 +1,20 @@
+{
+  "sample_id": "purple_beauty_product_kv",
+  "kind": "product_kv",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\purple_beauty_product_kv.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\purple_beauty_product_kv.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\purple_beauty_product_kv.png",
+  "original_size_bytes": 1571739,
+  "frozen_size_bytes": 1721437,
+  "candidate_size_bytes": 1897033,
+  "candidate_size_delta_bytes": 175596,
+  "candidate_size_ratio": 1.102005,
+  "round2_strength": 0.052,
+  "mean_delta_e": 0.171894,
+  "p95_delta_e": 1.414214,
+  "saturation_delta": 4.7e-05,
+  "edge_delta_proxy": 0.08068,
+  "texture_delta_proxy": 0.113404,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

@@ -1,0 +1,20 @@
+{
+  "sample_id": "wechat_longscreenshot_2026-06-12_111900_080",
+  "kind": "text_dense_long_screenshot",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\wechat_longscreenshot_2026-06-12_111900_080.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\wechat_longscreenshot_2026-06-12_111900_080.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\wechat_longscreenshot_2026-06-12_111900_080.png",
+  "original_size_bytes": 660578,
+  "frozen_size_bytes": 772941,
+  "candidate_size_bytes": 843598,
+  "candidate_size_delta_bytes": 70657,
+  "candidate_size_ratio": 1.091413,
+  "round2_strength": 0.075,
+  "mean_delta_e": 0.138953,
+  "p95_delta_e": 1.414214,
+  "saturation_delta": -5.8e-05,
+  "edge_delta_proxy": 0.08083,
+  "texture_delta_proxy": 0.135424,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

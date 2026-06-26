@@ -1,0 +1,20 @@
+{
+  "sample_id": "andy_lau_commercial_portrait",
+  "kind": "portrait_poster",
+  "original_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\01_original\\andy_lau_commercial_portrait.png",
+  "frozen_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\02_frozen\\andy_lau_commercial_portrait.png",
+  "candidate_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\results\\v046_quality_lift_round2_targeted\\03_candidate\\andy_lau_commercial_portrait.png",
+  "original_size_bytes": 2414753,
+  "frozen_size_bytes": 2479638,
+  "candidate_size_bytes": 2769129,
+  "candidate_size_delta_bytes": 289491,
+  "candidate_size_ratio": 1.116747,
+  "round2_strength": 0.055,
+  "mean_delta_e": 0.546236,
+  "p95_delta_e": 2.0,
+  "saturation_delta": 0.000623,
+  "edge_delta_proxy": 0.327169,
+  "texture_delta_proxy": 0.188796,
+  "visual_judgement": "minor_positive",
+  "risk_notes": "minor edge and texture proxy gain; requires crop review"
+}

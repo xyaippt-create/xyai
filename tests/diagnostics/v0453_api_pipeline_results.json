@@ -3,10 +3,10 @@
   "project_root": "D:\\Codex\\04_Visual-Master-Pro",
   "health": {
     "status_code": 200,
-    "body": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"VisualMasterPro / 影界 V0.4 API 已就绪。\",\"data\":{\"version\":\"V0.4\",\"host\":\"localhost\",\"port\":8787,\"default_output_dir\":\"C:\\\\Users\\\\xyppt\\\\Desktop\\\\雪原Ai增强引擎\\\\输出成品\",\"target_resolution\":\"1080P\",\"uploadEndpoint\":\"/api/upload\",\"taskEndpoint\":\"/api/v1/tasks/{task_id}\",\"streamEndpoint\":\"/api/v1/tasks/{task_id}/stream\",\"modes\":[\"fidelity\",\"texture\",\"text_safe\"],\"outputFormats\":[\"png\",\"jpg\"]}}"
+    "body": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"VisualMasterPro / 影界 V0.4 API 已就绪。\",\"data\":{\"version\":\"V0.4\",\"host\":\"localhost\",\"port\":8787,\"default_output_dir\":\"D:\\\\影界文件\\\\输出成品\",\"target_resolution\":\"1080P\",\"uploadEndpoint\":\"/api/upload\",\"taskEndpoint\":\"/api/v1/tasks/{task_id}\",\"streamEndpoint\":\"/api/v1/tasks/{task_id}/stream\",\"modes\":[\"fidelity\",\"texture\",\"text_safe\"],\"outputFormats\":[\"png\",\"jpg\"]}}"
   },
   "poll_timeout_sec": 20,
-  "duration_sec": 52.591919,
+  "duration_sec": 61.301253,
   "results": [
     {
       "sample": "JPG",
@@ -18,10 +18,10 @@
       "sse_double_subscribe": "PASS",
       "final_output_url_check": "PASS",
       "http_status": 200,
-      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"url\":\"/api/file/uploads/task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"task_id\":\"task_20260617_160635_e9744524\",\"taskId\":\"task_20260617_160635_e9744524\",\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160635_e9744524/stream\",\"data\":{\"task_id\":\"task_20260617_160635_e9744524\",\"taskId\":\"task_20260617_160635_e9744524\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"text_poster\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-17T16:06:35\",\"completed_at\":null,\"fileName\":\"task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"original_filename\":\"case_original_jpg_vmp_v036_optimized.jpg\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.jpg\",\"output_format\":\"jpg\",\"input_size_bytes\":7743,\"input_hash\":\"e63b4d7e91e5bbea6c3a1e70402671381e977e86a4687b90fae5e72121096fb7\",\"input_width\":500,\"input_height\":333,\"output_width\":1622,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":1e-05,\"save_input_time\":0.001543},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160635_e9744524/stream\",\"originalUrl\":\"/api/file/uploads/task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized.jpg\",\"enhancedUrl\":\"/api/file/outputs/task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.jpg\",\"final_output_url\":\"/api/file/outputs/task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.jpg\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
+      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"url\":\"/api/file/uploads/task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"task_id\":\"task_20260626_074713_4c34e6c8\",\"taskId\":\"task_20260626_074713_4c34e6c8\",\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074713_4c34e6c8/stream\",\"data\":{\"task_id\":\"task_20260626_074713_4c34e6c8\",\"taskId\":\"task_20260626_074713_4c34e6c8\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"text_poster\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-26T07:47:13\",\"completed_at\":null,\"fileName\":\"task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"original_filename\":\"case_original_jpg_vmp_v036_optimized.jpg\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory_source\":\"request\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.jpg\",\"output_format\":\"jpg\",\"color_stability_enabled\":true,\"color_correction_enabled\":false,\"input_size_bytes\":7743,\"input_hash\":\"e63b4d7e91e5bbea6c3a1e70402671381e977e86a4687b90fae5e72121096fb7\",\"input_width\":500,\"input_height\":333,\"output_width\":1622,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":1.4e-05,\"save_input_time\":0.000659},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074713_4c34e6c8/stream\",\"originalUrl\":\"/api/file/uploads/task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized.jpg\",\"enhancedUrl\":\"/api/file/outputs/task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.jpg\",\"final_output_url\":\"/api/file/outputs/task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.jpg\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
       "json_complete": true,
-      "task_id": "task_20260617_160635_e9744524",
-      "streamEndpoint": "/api/v1/tasks/task_20260617_160635_e9744524/stream",
+      "task_id": "task_20260626_074713_4c34e6c8",
+      "streamEndpoint": "/api/v1/tasks/task_20260626_074713_4c34e6c8/stream",
       "task_status_history": [
         {
           "status_code": 200,
@@ -35,12 +35,12 @@
       },
       "final_status": "completed",
       "final_output": {
-        "final_output_url": "/api/file/outputs/task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.png",
+        "final_output_url": "/api/file/outputs/task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.png",
         "final_output_url_status": 200,
         "final_output_url_ok": true,
-        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.png",
+        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.png",
         "output_path_exists": true,
-        "output_filename": "task_20260617_160635_e9744524_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260617_160635.png"
+        "output_filename": "task_20260626_074713_4c34e6c8_original_case_original_jpg_vmp_v036_optimized_影界高清_1080P_fidelity_20260626_074713.png"
       },
       "sse_result": {
         "status_code": 200,
@@ -49,7 +49,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160635_e9744524/stream\", \"timestamp\": \"2026-06-17T16:06:36\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:37\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074713_4c34e6c8/stream\", \"timestamp\": \"2026-06-26T07:47:17\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:17\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_reconnect_result": {
         "status_code": 200,
@@ -58,7 +58,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160635_e9744524/stream\", \"timestamp\": \"2026-06-17T16:06:40\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:40\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074713_4c34e6c8/stream\", \"timestamp\": \"2026-06-26T07:47:20\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:20\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_double_subscribe_result": {
         "first": {
@@ -68,7 +68,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160635_e9744524/stream\", \"timestamp\": \"2026-06-17T16:06:43\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:43\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074713_4c34e6c8/stream\", \"timestamp\": \"2026-06-26T07:47:23\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:23\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress"
         },
         "second": {
           "status_code": 200,
@@ -77,7 +77,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160635_e9744524/stream\", \"timestamp\": \"2026-06-17T16:06:43\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:43\", \"done\": false, \"task_id\": \"task_20260617_160635_e9744524\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074713_4c34e6c8/stream\", \"timestamp\": \"2026-06-26T07:47:23\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:23\", \"done\": false, \"task_id\": \"task_20260626_074713_4c34e6c8\", \"task_status\": \"completed\", \"task_progress"
         }
       },
       "exception_type": null,
@@ -93,10 +93,10 @@
       "sse_double_subscribe": "PASS",
       "final_output_url_check": "PASS",
       "http_status": 200,
-      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260617_160647_014446e6_original_test_1.png\",\"url\":\"/api/file/uploads/task_20260617_160647_014446e6_original_test_1.png\",\"task_id\":\"task_20260617_160647_014446e6\",\"taskId\":\"task_20260617_160647_014446e6\",\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160647_014446e6/stream\",\"data\":{\"task_id\":\"task_20260617_160647_014446e6\",\"taskId\":\"task_20260617_160647_014446e6\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"product_kv\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-17T16:06:47\",\"completed_at\":null,\"fileName\":\"task_20260617_160647_014446e6_original_test_1.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260617_160647_014446e6_original_test_1.png\",\"original_filename\":\"test_1.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260617_160647_014446e6_original_test_1.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png\",\"output_format\":\"png\",\"input_size_bytes\":3476,\"input_hash\":\"de686150a6bb65246fc308e98c136a300774e776adbb363155f7294a4f71e663\",\"input_width\":160,\"input_height\":100,\"output_width\":1728,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":5e-06,\"save_input_time\":0.000562},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160647_014446e6/stream\",\"originalUrl\":\"/api/file/uploads/task_20260617_160647_014446e6_original_test_1.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png\",\"final_output_url\":\"/api/file/outputs/task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
+      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260626_074727_43d1a154_original_test_1.png\",\"url\":\"/api/file/uploads/task_20260626_074727_43d1a154_original_test_1.png\",\"task_id\":\"task_20260626_074727_43d1a154\",\"taskId\":\"task_20260626_074727_43d1a154\",\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074727_43d1a154/stream\",\"data\":{\"task_id\":\"task_20260626_074727_43d1a154\",\"taskId\":\"task_20260626_074727_43d1a154\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"product_kv\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-26T07:47:27\",\"completed_at\":null,\"fileName\":\"task_20260626_074727_43d1a154_original_test_1.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260626_074727_43d1a154_original_test_1.png\",\"original_filename\":\"test_1.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260626_074727_43d1a154_original_test_1.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory_source\":\"request\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png\",\"output_format\":\"png\",\"color_stability_enabled\":true,\"color_correction_enabled\":false,\"input_size_bytes\":3476,\"input_hash\":\"de686150a6bb65246fc308e98c136a300774e776adbb363155f7294a4f71e663\",\"input_width\":160,\"input_height\":100,\"output_width\":1728,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":8e-06,\"save_input_time\":0.000364},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074727_43d1a154/stream\",\"originalUrl\":\"/api/file/uploads/task_20260626_074727_43d1a154_original_test_1.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png\",\"final_output_url\":\"/api/file/outputs/task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
       "json_complete": true,
-      "task_id": "task_20260617_160647_014446e6",
-      "streamEndpoint": "/api/v1/tasks/task_20260617_160647_014446e6/stream",
+      "task_id": "task_20260626_074727_43d1a154",
+      "streamEndpoint": "/api/v1/tasks/task_20260626_074727_43d1a154/stream",
       "task_status_history": [
         {
           "status_code": 200,
@@ -110,12 +110,12 @@
       },
       "final_status": "completed",
       "final_output": {
-        "final_output_url": "/api/file/outputs/task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png",
+        "final_output_url": "/api/file/outputs/task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png",
         "final_output_url_status": 200,
         "final_output_url_ok": true,
-        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png",
+        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png",
         "output_path_exists": true,
-        "output_filename": "task_20260617_160647_014446e6_original_test_1_影界高清_1080P_fidelity_20260617_160647.png"
+        "output_filename": "task_20260626_074727_43d1a154_original_test_1_影界高清_1080P_fidelity_20260626_074727.png"
       },
       "sse_result": {
         "status_code": 200,
@@ -124,7 +124,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160647_014446e6/stream\", \"timestamp\": \"2026-06-17T16:06:49\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:49\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074727_43d1a154/stream\", \"timestamp\": \"2026-06-26T07:47:31\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:31\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_reconnect_result": {
         "status_code": 200,
@@ -133,7 +133,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160647_014446e6/stream\", \"timestamp\": \"2026-06-17T16:06:52\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:52\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074727_43d1a154/stream\", \"timestamp\": \"2026-06-26T07:47:35\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:35\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_double_subscribe_result": {
         "first": {
@@ -143,7 +143,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160647_014446e6/stream\", \"timestamp\": \"2026-06-17T16:06:55\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:56\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074727_43d1a154/stream\", \"timestamp\": \"2026-06-26T07:47:38\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:38\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress"
         },
         "second": {
           "status_code": 200,
@@ -152,7 +152,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160647_014446e6/stream\", \"timestamp\": \"2026-06-17T16:06:55\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:06:56\", \"done\": false, \"task_id\": \"task_20260617_160647_014446e6\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074727_43d1a154/stream\", \"timestamp\": \"2026-06-26T07:47:38\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:38\", \"done\": false, \"task_id\": \"task_20260626_074727_43d1a154\", \"task_status\": \"completed\", \"task_progress"
         }
       },
       "exception_type": null,
@@ -168,10 +168,10 @@
       "sse_double_subscribe": "PASS",
       "final_output_url_check": "PASS",
       "http_status": 200,
-      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260617_160659_95e7dac7_original_realalpha.png\",\"url\":\"/api/file/uploads/task_20260617_160659_95e7dac7_original_realalpha.png\",\"task_id\":\"task_20260617_160659_95e7dac7\",\"taskId\":\"task_20260617_160659_95e7dac7\",\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160659_95e7dac7/stream\",\"data\":{\"task_id\":\"task_20260617_160659_95e7dac7\",\"taskId\":\"task_20260617_160659_95e7dac7\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"product_kv\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-17T16:06:59\",\"completed_at\":null,\"fileName\":\"task_20260617_160659_95e7dac7_original_realalpha.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260617_160659_95e7dac7_original_realalpha.png\",\"original_filename\":\"realalpha.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260617_160659_95e7dac7_original_realalpha.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png\",\"output_format\":\"png\",\"input_size_bytes\":39614,\"input_hash\":\"886a52a64c1057466bcd1549d4ee7299058e0281782edcd43b21198f21fa4385\",\"input_width\":320,\"input_height\":180,\"output_width\":1920,\"output_height\":1080,\"resize_policy\":\"upscale_to_1920x1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":9e-06,\"save_input_time\":0.000716},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160659_95e7dac7/stream\",\"originalUrl\":\"/api/file/uploads/task_20260617_160659_95e7dac7_original_realalpha.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png\",\"final_output_url\":\"/api/file/outputs/task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
+      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260626_074741_a58b5560_original_realalpha.png\",\"url\":\"/api/file/uploads/task_20260626_074741_a58b5560_original_realalpha.png\",\"task_id\":\"task_20260626_074741_a58b5560\",\"taskId\":\"task_20260626_074741_a58b5560\",\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074741_a58b5560/stream\",\"data\":{\"task_id\":\"task_20260626_074741_a58b5560\",\"taskId\":\"task_20260626_074741_a58b5560\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"fidelity\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"product_kv\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-26T07:47:41\",\"completed_at\":null,\"fileName\":\"task_20260626_074741_a58b5560_original_realalpha.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260626_074741_a58b5560_original_realalpha.png\",\"original_filename\":\"realalpha.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260626_074741_a58b5560_original_realalpha.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory_source\":\"request\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png\",\"output_format\":\"png\",\"color_stability_enabled\":true,\"color_correction_enabled\":false,\"input_size_bytes\":39614,\"input_hash\":\"886a52a64c1057466bcd1549d4ee7299058e0281782edcd43b21198f21fa4385\",\"input_width\":320,\"input_height\":180,\"output_width\":1920,\"output_height\":1080,\"resize_policy\":\"upscale_to_1920x1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":8e-06,\"save_input_time\":0.000379},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074741_a58b5560/stream\",\"originalUrl\":\"/api/file/uploads/task_20260626_074741_a58b5560_original_realalpha.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png\",\"final_output_url\":\"/api/file/outputs/task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
       "json_complete": true,
-      "task_id": "task_20260617_160659_95e7dac7",
-      "streamEndpoint": "/api/v1/tasks/task_20260617_160659_95e7dac7/stream",
+      "task_id": "task_20260626_074741_a58b5560",
+      "streamEndpoint": "/api/v1/tasks/task_20260626_074741_a58b5560/stream",
       "task_status_history": [
         {
           "status_code": 200,
@@ -185,12 +185,12 @@
       },
       "final_status": "completed",
       "final_output": {
-        "final_output_url": "/api/file/outputs/task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png",
+        "final_output_url": "/api/file/outputs/task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png",
         "final_output_url_status": 200,
         "final_output_url_ok": true,
-        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png",
+        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png",
         "output_path_exists": true,
-        "output_filename": "task_20260617_160659_95e7dac7_original_realalpha_影界高清_1080P_fidelity_20260617_160659.png"
+        "output_filename": "task_20260626_074741_a58b5560_original_realalpha_影界高清_1080P_fidelity_20260626_074741.png"
       },
       "sse_result": {
         "status_code": 200,
@@ -199,7 +199,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160659_95e7dac7/stream\", \"timestamp\": \"2026-06-17T16:07:01\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:02\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074741_a58b5560/stream\", \"timestamp\": \"2026-06-26T07:47:45\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:46\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_reconnect_result": {
         "status_code": 200,
@@ -208,7 +208,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160659_95e7dac7/stream\", \"timestamp\": \"2026-06-17T16:07:05\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:05\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074741_a58b5560/stream\", \"timestamp\": \"2026-06-26T07:47:49\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:49\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_double_subscribe_result": {
         "first": {
@@ -218,7 +218,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160659_95e7dac7/stream\", \"timestamp\": \"2026-06-17T16:07:08\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:09\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074741_a58b5560/stream\", \"timestamp\": \"2026-06-26T07:47:52\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:52\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress"
         },
         "second": {
           "status_code": 200,
@@ -227,7 +227,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160659_95e7dac7/stream\", \"timestamp\": \"2026-06-17T16:07:08\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:09\", \"done\": false, \"task_id\": \"task_20260617_160659_95e7dac7\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074741_a58b5560/stream\", \"timestamp\": \"2026-06-26T07:47:52\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:47:52\", \"done\": false, \"task_id\": \"task_20260626_074741_a58b5560\", \"task_status\": \"completed\", \"task_progress"
         }
       },
       "exception_type": null,
@@ -243,10 +243,10 @@
       "sse_double_subscribe": "PASS",
       "final_output_url_check": "PASS",
       "http_status": 200,
-      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260617_160712_2509d934_original_高清测试.png\",\"url\":\"/api/file/uploads/task_20260617_160712_2509d934_original_高清测试.png\",\"task_id\":\"task_20260617_160712_2509d934\",\"taskId\":\"task_20260617_160712_2509d934\",\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160712_2509d934/stream\",\"data\":{\"task_id\":\"task_20260617_160712_2509d934\",\"taskId\":\"task_20260617_160712_2509d934\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"text_safe\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"text_poster\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-17T16:07:12\",\"completed_at\":null,\"fileName\":\"task_20260617_160712_2509d934_original_高清测试.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260617_160712_2509d934_original_高清测试.png\",\"original_filename\":\"高清测试.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260617_160712_2509d934_original_高清测试.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png\",\"output_format\":\"png\",\"input_size_bytes\":2107,\"input_hash\":\"178449c424d745333c6c5c476386bf24260772b2e406974f94611e1493a42cfa\",\"input_width\":120,\"input_height\":80,\"output_width\":1620,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":4e-06,\"save_input_time\":0.000691},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260617_160712_2509d934/stream\",\"originalUrl\":\"/api/file/uploads/task_20260617_160712_2509d934_original_高清测试.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png\",\"final_output_url\":\"/api/file/outputs/task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
+      "raw_response_text": "{\"code\":200,\"status\":\"success\",\"success\":true,\"message\":\"图片上传完成，已登记为 V0.4 后台处理任务。\",\"filename\":\"task_20260626_074755_03de5e7b_original_高清测试.png\",\"url\":\"/api/file/uploads/task_20260626_074755_03de5e7b_original_高清测试.png\",\"task_id\":\"task_20260626_074755_03de5e7b\",\"taskId\":\"task_20260626_074755_03de5e7b\",\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074755_03de5e7b/stream\",\"data\":{\"task_id\":\"task_20260626_074755_03de5e7b\",\"taskId\":\"task_20260626_074755_03de5e7b\",\"task_status\":\"pending\",\"status\":\"pending\",\"task_progress\":0,\"mode\":\"text_safe\",\"target_resolution\":\"1080P\",\"output_profile\":\"delivery_1080p\",\"image_type\":\"text_poster\",\"degradation_type\":\"unknown\",\"task_result\":null,\"task_report\":{\"clarity_score\":0,\"text_clarity_score\":0,\"edge_quality_score\":0,\"structure_score\":0,\"color_fidelity_score\":0,\"texture_score\":0,\"pseudo_hd_risk\":\"medium\",\"artifact_risk\":\"medium\",\"delivery_score\":0,\"warnings\":[]},\"error_message\":\"\",\"created_at\":\"2026-06-26T07:47:55\",\"completed_at\":null,\"fileName\":\"task_20260626_074755_03de5e7b_original_高清测试.png\",\"input_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\",\"input_filename\":\"task_20260626_074755_03de5e7b_original_高清测试.png\",\"original_filename\":\"高清测试.png\",\"input_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\runtime\\\\v04_inputs\\\\task_20260626_074755_03de5e7b_original_高清测试.png\",\"output_root\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_dir\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\",\"output_directory_source\":\"request\",\"output_dir_meta\":{\"output_dir_source\":\"request\",\"used_custom_output_dir\":true,\"output_dir_created\":false,\"output_dir_message\":\"输出目录可用\"},\"expected_output_path\":\"D:\\\\Codex\\\\04_Visual-Master-Pro\\\\tests\\\\diagnostics\\\\output\\\\api\\\\task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074755.png\",\"output_format\":\"png\",\"color_stability_enabled\":true,\"color_correction_enabled\":false,\"input_size_bytes\":2107,\"input_hash\":\"178449c424d745333c6c5c476386bf24260772b2e406974f94611e1493a42cfa\",\"input_width\":120,\"input_height\":80,\"output_width\":1620,\"output_height\":1080,\"resize_policy\":\"upscale_short_edge_to_1080_keep_aspect\",\"was_upscaled\":true,\"was_downscaled\":false,\"scale\":2,\"debug_timing\":{\"receive_file_time\":1e-05,\"save_input_time\":0.000909},\"execution_started\":true,\"streamEndpoint\":\"/api/v1/tasks/task_20260626_074755_03de5e7b/stream\",\"originalUrl\":\"/api/file/uploads/task_20260626_074755_03de5e7b_original_高清测试.png\",\"enhancedUrl\":\"/api/file/outputs/task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074755.png\",\"final_output_url\":\"/api/file/outputs/task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074755.png\",\"main_output_url\":null,\"optimized_output_url\":null,\"final_output_exists\":false}}",
       "json_complete": true,
-      "task_id": "task_20260617_160712_2509d934",
-      "streamEndpoint": "/api/v1/tasks/task_20260617_160712_2509d934/stream",
+      "task_id": "task_20260626_074755_03de5e7b",
+      "streamEndpoint": "/api/v1/tasks/task_20260626_074755_03de5e7b/stream",
       "task_status_history": [
         {
           "status_code": 200,
@@ -260,12 +260,12 @@
       },
       "final_status": "completed",
       "final_output": {
-        "final_output_url": "/api/file/outputs/task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png",
+        "final_output_url": "/api/file/outputs/task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074756.png",
         "final_output_url_status": 200,
         "final_output_url_ok": true,
-        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png",
+        "output_path": "D:\\Codex\\04_Visual-Master-Pro\\tests\\diagnostics\\output\\api\\task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074756.png",
         "output_path_exists": true,
-        "output_filename": "task_20260617_160712_2509d934_original_高清测试_影界高清_1080P_text_safe_20260617_160712.png"
+        "output_filename": "task_20260626_074755_03de5e7b_original_高清测试_影界高清_1080P_text_safe_20260626_074756.png"
       },
       "sse_result": {
         "status_code": 200,
@@ -274,7 +274,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160712_2509d934/stream\", \"timestamp\": \"2026-06-17T16:07:13\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:14\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074755_03de5e7b/stream\", \"timestamp\": \"2026-06-26T07:48:01\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:48:01\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_reconnect_result": {
         "status_code": 200,
@@ -283,7 +283,7 @@
         "has_failed_status": false,
         "has_completed_status": true,
         "line_count": 31,
-        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160712_2509d934/stream\", \"timestamp\": \"2026-06-17T16:07:17\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:17\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress"
+        "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074755_03de5e7b/stream\", \"timestamp\": \"2026-06-26T07:48:04\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:48:04\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress"
       },
       "sse_double_subscribe_result": {
         "first": {
@@ -293,7 +293,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160712_2509d934/stream\", \"timestamp\": \"2026-06-17T16:07:20\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:21\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074755_03de5e7b/stream\", \"timestamp\": \"2026-06-26T07:48:07\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:48:07\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress"
         },
         "second": {
           "status_code": 200,
@@ -302,7 +302,7 @@
           "has_failed_status": false,
           "has_completed_status": true,
           "line_count": 31,
-          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260617_160712_2509d934/stream\", \"timestamp\": \"2026-06-17T16:07:20\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:21\", \"done\": false, \"task_id\": \"task_20260617_160712_2509d934\", \"task_status\": \"completed\", \"task_progress"
+          "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/task_20260626_074755_03de5e7b/stream\", \"timestamp\": \"2026-06-26T07:48:07\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:48:07\", \"done\": false, \"task_id\": \"task_20260626_074755_03de5e7b\", \"task_status\": \"completed\", \"task_progress"
         }
       },
       "exception_type": null,
@@ -319,7 +319,7 @@
       "has_failed_status": true,
       "has_completed_status": false,
       "line_count": 31,
-      "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/diagnostic_failed_task/stream\", \"timestamp\": \"2026-06-17T16:07:24\", \"done\": false, \"task_id\": \"diagnostic_failed_task\", \"task_status\": \"failed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-17T16:07:24\", \"done\": false, \"task_id\": \"diagnostic_failed_task\", \"task_status\": \"failed\", \"task_progress\": 100}\n\nevent: restoration"
+      "text_head": "event: restoration.log\ndata: {\"index\": 1, \"total\": 14, \"message\": \"SSE CONNECTED /api/v1/tasks/diagnostic_failed_task/stream\", \"timestamp\": \"2026-06-26T07:48:11\", \"done\": false, \"task_id\": \"diagnostic_failed_task\", \"task_status\": \"failed\", \"task_progress\": 100}\n\nevent: restoration.log\ndata: {\"index\": 2, \"total\": 14, \"message\": \"读取前端上传的真实输入图片\", \"timestamp\": \"2026-06-26T07:48:11\", \"done\": false, \"task_id\": \"diagnostic_failed_task\", \"task_status\": \"failed\", \"task_progress\": 100}\n\nevent: restoration"
     },
     "reason": ""
   }
