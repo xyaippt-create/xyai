@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import TaskDetailPage from "./TaskDetailPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
-import { resolveDeliveryStatus } from "./deliveryStatus.js";
+import { resolveDeliveryStatus, resolveReportCenterMeta } from "./deliveryStatus.js";
 
 const API_BASE = "http://localhost:8787";
 const OUTPUT_PROFILE = "delivery_1080p";
@@ -322,7 +322,7 @@ function DeliveryPill({ status, item }) {
   const delivery = resolveQueueDelivery(item, status);
   const normalized = delivery.status || "WAITING";
   const color = delivery.tone || deliveryStatusColor[normalized] || "#6e7d80";
-  const label = delivery.label || deliveryStatusLabel[normalized] || "等待判定";
+  const label = normalized === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : delivery.label || deliveryStatusLabel[normalized] || "等待判定";
   return (
     <span
       style={{
@@ -335,11 +335,124 @@ function DeliveryPill({ status, item }) {
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
         whiteSpace: "nowrap",
       }}
-      title={normalized}
+      title={`${delivery.label || label} · ${normalized}`}
     >
       {label}
     </span>
   );
+}
+
+function readScore(payload, key) {
+  const value = payload?.[key];
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function buildQualityPayload(item) {
+  return {
+    ...(item?.debug_quality || {}),
+    ...(item?.task_result || {}),
+    ...(item?.task_report || {}),
+    ...(item || {}),
+  };
+}
+
+function resolveReviewType(meta) {
+  if (meta.delivery.status === "FAIL") return "不可交付复核";
+  const labels = meta.reviewReasons.map((item) => item.label).join(" ");
+  if (labels.includes("颜色") || labels.includes("品牌色")) return "颜色与品牌保护复核";
+  if (labels.includes("文字")) return "文字与 Logo 保护复核";
+  if (labels.includes("体积") || labels.includes("收益")) return "低收益复核";
+  if (labels.includes("平滑")) return "低频平滑区复核";
+  if (meta.delivery.status === "PASS_WITH_LIMITATION") return "安全保护复核";
+  return "常规交付确认";
+}
+
+function resolveSuggestedUsage(meta, item) {
+  const rawUsage = item?.final_delivery_recommended_usage || item?.task_result?.final_delivery_recommended_usage || "";
+  if (meta.delivery.status === "PASS") return rawUsage || "可用于 1080P 本地交付，正式使用前建议快速查看成品。";
+  if (meta.delivery.status === "PASS_WITH_LIMITATION") return rawUsage || "已生成本地预览，建议查看文字、Logo、边缘、品牌色和关键局部后使用。";
+  if (meta.delivery.status === "FAIL") return rawUsage || "不建议作为正式成品使用，请回到原图或调整输入后重新处理。";
+  return rawUsage || "等待任务完成后再判断用途。";
+}
+
+function resolvePositiveSignals(payload) {
+  const signals = [];
+  const clarity = readScore(payload, "clarity_score");
+  const text = readScore(payload, "text_clarity_score");
+  const edge = readScore(payload, "edge_quality_score");
+  const texture = readScore(payload, "texture_score");
+  const color = readScore(payload, "color_fidelity_score");
+  const benefit = readScore(payload, "phase6_visible_benefit_score");
+
+  if (clarity !== null && clarity >= 70) signals.push(`清晰度基础较好：${clarity.toFixed(2)}`);
+  if (text !== null && text >= 60) signals.push(`文字清晰度通过：${text.toFixed(2)}`);
+  if (edge !== null && edge >= 65) signals.push(`边缘质量通过：${edge.toFixed(2)}`);
+  if (texture !== null && texture >= 60) signals.push(`材质保持通过：${texture.toFixed(2)}`);
+  if (color !== null && color >= 95) signals.push(`默认保真色彩稳定：${color.toFixed(2)}`);
+  if (benefit !== null && benefit >= 2) signals.push(`存在可见收益信号：${benefit.toFixed(2)}`);
+  if (!signals.length) signals.push("当前更偏保护型输出，建议查看局部后判断收益。");
+  return signals;
+}
+
+function buildBatchReport(fileQueue) {
+  const items = fileQueue.map((item, index) => {
+    const payload = buildQualityPayload(item);
+    const meta = resolveReportCenterMeta(payload);
+    const userStatusLabel = meta.delivery.status === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : meta.delivery.label;
+    return {
+      index: index + 1,
+      filename: item.name,
+      task_id: item.taskId || "",
+      task_status: item.status,
+      image_type: payload.image_type || "",
+      image_type_label: meta.imageType.label,
+      raw_delivery_status: payload.final_delivery_status || item.final_delivery_status || "",
+      resolved_delivery_status: meta.delivery.status,
+      user_status_label: userStatusLabel,
+      review_type: resolveReviewType(meta),
+      review_reasons: meta.reviewReasons.map((reason) => ({ label: reason.label, detail: reason.detail })),
+      positive_signals: resolvePositiveSignals(payload),
+      suggested_usage: resolveSuggestedUsage(meta, item),
+      benefit_label: meta.benefit.label,
+      final_output_url: item.final_output_url || "",
+      preview_output_url: item.preview_output_url || "",
+      output_filename: item.output_filename || "",
+      metrics: {
+        clarity_score: readScore(payload, "clarity_score"),
+        text_clarity_score: readScore(payload, "text_clarity_score"),
+        edge_quality_score: readScore(payload, "edge_quality_score"),
+        texture_score: readScore(payload, "texture_score"),
+        color_fidelity_score: readScore(payload, "color_fidelity_score"),
+        delivery_score: readScore(payload, "delivery_score"),
+        phase6_visible_benefit_score: readScore(payload, "phase6_visible_benefit_score"),
+        phase6_size_growth_ratio: readScore(payload, "phase6_size_growth_ratio") ?? readScore(payload, "file_size_ratio"),
+      },
+    };
+  });
+  const summary = items.reduce(
+    (acc, item) => {
+      acc.total += 1;
+      if (item.task_status === "completed") acc.completed += 1;
+      if (item.task_status === "failed") acc.failed += 1;
+      if (item.resolved_delivery_status === "PASS") acc.pass += 1;
+      if (item.resolved_delivery_status === "PASS_WITH_LIMITATION") acc.manual_review += 1;
+      if (item.resolved_delivery_status === "FAIL") acc.not_recommended += 1;
+      return acc;
+    },
+    { total: 0, completed: 0, failed: 0, pass: 0, manual_review: 0, not_recommended: 0 },
+  );
+
+  return {
+    report_name: "batch_report.json",
+    product: "影界 / VisualMasterPro",
+    version: "V0.4.6 RC1",
+    scope: "local_report_center_mvp",
+    generated_at: new Date().toISOString(),
+    note: "本报告为前台解释层导出，不改变后端 raw 字段、delivery guard 或真实交付判断逻辑。",
+    summary,
+    items,
+  };
 }
 
 function makeTaskConfig(item) {
@@ -715,6 +828,24 @@ export default function DashboardPage() {
     }
   };
 
+  const handleDownloadBatchReport = () => {
+    if (!fileQueue.length) {
+      setNotice("当前没有可导出的批次报告。");
+      return;
+    }
+    const report = buildBatchReport(fileQueue);
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "batch_report.json";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setNotice("已生成 batch_report.json，本地报告中心导出完成。");
+  };
+
   if (activeScreen === "task_detail") {
     return (
       <TaskDetailPage
@@ -914,8 +1045,22 @@ export default function DashboardPage() {
               </p>
               <pre className="scrollbar-thin" style={{ margin: "8px 0 0", overflow: "auto", backgroundColor: "#040708", border: "1px solid #132628", borderRadius: "4px", padding: "10px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
                 {debugItem ? JSON.stringify({
-                  taskId: debugItem.taskId,
-                  final_delivery_status: debugItem.final_delivery_status,
+                  task_id: debugItem.taskId,
+                  raw_delivery_status: buildQualityPayload(debugItem).final_delivery_status || debugItem.final_delivery_status,
+                  resolved_delivery_status: resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.status,
+                  user_status_label: resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.status === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.label,
+                  image_type: buildQualityPayload(debugItem).image_type || "",
+                  image_type_label: resolveReportCenterMeta(buildQualityPayload(debugItem)).imageType.label,
+                  review_type: resolveReviewType(resolveReportCenterMeta(buildQualityPayload(debugItem))),
+                  review_reasons: resolveReportCenterMeta(buildQualityPayload(debugItem)).reviewReasons,
+                  delivery_score: readScore(buildQualityPayload(debugItem), "delivery_score"),
+                  metrics: {
+                    clarity_score: readScore(buildQualityPayload(debugItem), "clarity_score"),
+                    text_clarity_score: readScore(buildQualityPayload(debugItem), "text_clarity_score"),
+                    edge_quality_score: readScore(buildQualityPayload(debugItem), "edge_quality_score"),
+                    texture_score: readScore(buildQualityPayload(debugItem), "texture_score"),
+                    color_fidelity_score: readScore(buildQualityPayload(debugItem), "color_fidelity_score"),
+                  },
                   final_delivery_reason: debugItem.final_delivery_reason,
                   final_delivery_risk_level: debugItem.final_delivery_risk_level,
                   final_output_url: debugItem.final_output_url,
@@ -1022,7 +1167,7 @@ export default function DashboardPage() {
                 <span className="font-mono">{completedItems.length} / {fileQueue.length} 张</span>
               </div>
               <div className="flex items-center justify-between text-[#f59e0b]">
-                <span>建议人工复核:</span>
+                <span>已生成｜建议查看后使用:</span>
                 <span className="rounded-sm bg-[#f59e0b]/10 px-1.5 font-mono">{fileQueue.filter((item) => resolveQueueDelivery(item).status === "PASS_WITH_LIMITATION").length} 张</span>
               </div>
               <div className="flex items-center justify-between text-[#f43f5e]">
@@ -1050,6 +1195,9 @@ export default function DashboardPage() {
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                 </svg>
                 <span>生成系统脱敏诊断包</span>
+              </button>
+              <button type="button" disabled={!fileQueue.length} onClick={handleDownloadBatchReport} className="w-full rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/50 px-4 py-2 text-[11px] font-medium tracking-wide text-[#94a3b8] transition-colors hover:border-[#00ffcc]/30 hover:text-[#00ffcc] disabled:cursor-not-allowed disabled:text-[#475569]">
+                生成 batch_report.json
               </button>
             </div>
             <p className="border-t border-[#1c1f26]/30 pt-2 text-[10px] leading-relaxed text-[#475569]">
