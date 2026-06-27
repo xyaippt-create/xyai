@@ -9,6 +9,32 @@ const OUTPUT_PROFILE = "delivery_1080p";
 const DEFAULT_OUTPUT_FORMAT = "auto";
 const DEFAULT_SCALE = "2";
 const DEFAULT_LEGACY_FORMAT = "png";
+const PROCESSING_MODE_STANDARD = "standard";
+const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
+const DEFAULT_SAFE_BETA_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
+const DEFAULT_SAFE_BETA_OUTPUT_DIR = "runtime/experiments/safe_1080p_beta";
+
+const processingModeOptions = [
+  {
+    id: PROCESSING_MODE_STANDARD,
+    label: "标准优化",
+    desc: "沿用当前高清交付流程，适合通用图片优化。",
+  },
+  {
+    id: PROCESSING_MODE_SAFE_BETA,
+    label: "1080P安全增强 Beta",
+    desc: "适用于中文商业非人像图，使用 35% protected 策略进行安全增强。",
+  },
+];
+
+const safeBetaBoundaryItems = [
+  "当前仅建议用于中文商业非人像图",
+  "适合中文信息图、产品图、文旅地图、城市科技主视觉、PPT封面",
+  "人像 / 面部主体图暂不建议使用",
+  "不支持通用4K超分",
+  "不支持低清照片真实修复",
+  "输出结果需要人工查看后决定是否使用",
+];
 
 const DECOR_LABEL = {
   color: "#6e7d80",
@@ -72,6 +98,10 @@ function getOutputFormatDisplay(format) {
   const normalized = (format || DEFAULT_OUTPUT_FORMAT).toString().toLowerCase();
   if (normalized === "auto") return "智能自适应";
   return normalized.toUpperCase();
+}
+
+function getProcessingModeDisplay(mode) {
+  return processingModeOptions.find((item) => item.id === mode) || processingModeOptions[0];
 }
 
 function normalizeApiUrl(url) {
@@ -517,8 +547,10 @@ export default function DashboardPage() {
   const [activeItemId, setActiveItemId] = useState("");
   const [debugItemId, setDebugItemId] = useState("");
   const [fileQueue, setFileQueue] = useState([]);
+  const [processingMode, setProcessingMode] = useState(PROCESSING_MODE_STANDARD);
   const [activeMode, setActiveMode] = useState("fidelity");
   const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
+  const [safeBetaResult, setSafeBetaResult] = useState(null);
   const [appliedOutputDir, setAppliedOutputDir] = useState("");
   const [defaultOutputDir, setDefaultOutputDir] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
@@ -540,6 +572,7 @@ export default function DashboardPage() {
   const activeItem = useMemo(() => fileQueue.find((item) => item.id === activeItemId) || fileQueue.find((item) => item.status === "processing") || fileQueue.find((item) => item.status === "completed") || null, [fileQueue, activeItemId]);
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
   const completedItems = fileQueue.filter((item) => item.status === "completed");
+  const canStartExecution = (processingMode === PROCESSING_MODE_SAFE_BETA || fileQueue.length > 0) && !isProcessingQueue;
 
   const updateQueueItem = (id, patch) => {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -653,6 +686,59 @@ export default function DashboardPage() {
     setNotice("已恢复默认输出位置。");
   };
 
+  const runSafeBetaMode = async () => {
+    processingRef.current = true;
+    setIsProcessingQueue(true);
+    setCurrentIndex(1);
+    setSafeBetaResult({
+      status: "RUNNING",
+      processed_count: 0,
+      skipped_count: 0,
+      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      has_enhanced: false,
+      has_contact_sheet: false,
+      message: "运行中",
+    });
+    setNotice("1080P安全增强 Beta 运行中。");
+    try {
+      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/enhance`, {
+        input_dir: DEFAULT_SAFE_BETA_INPUT_DIR,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        mode: "safe_1080p",
+      });
+      const data = payload?.data || {};
+      const processedItems = Array.isArray(data.processed) ? data.processed : [];
+      const hasEnhanced = processedItems.length > 0 && processedItems.every((row) => Boolean(row.enhanced));
+      const hasContactSheet = processedItems.length > 0 && processedItems.every((row) => Boolean(row.contact_sheet));
+      setSafeBetaResult({
+        status: payload.verification_result || data.verification_result || "PASS_WITH_NOTES",
+        processed_count: data.processed_count || 0,
+        skipped_count: data.skipped_count || 0,
+        output_dir: data.output_dir || "",
+        has_enhanced: hasEnhanced,
+        has_contact_sheet: hasContactSheet,
+        message: payload.message || "",
+      });
+      setNotice(`1080P安全增强 Beta 完成：${payload.verification_result || data.verification_result || "PASS_WITH_NOTES"}`);
+    } catch (error) {
+      setSafeBetaResult({
+        status: "BLOCKED",
+        processed_count: 0,
+        skipped_count: 0,
+        output_dir: "",
+        has_enhanced: false,
+        has_contact_sheet: false,
+        message: error.message,
+      });
+      setNotice(`1080P安全增强 Beta 阻断：${error.message}`);
+    } finally {
+      processingRef.current = false;
+      setIsProcessingQueue(false);
+      setCurrentIndex(0);
+      setActiveScreen("dashboard");
+    }
+  };
+
   const processOneItem = async (item, index, total, queueOutputDir) => {
     const activeOutputDir = (queueOutputDir || defaultOutputDir || "").trim();
     setCurrentIndex(index + 1);
@@ -754,6 +840,10 @@ export default function DashboardPage() {
 
   const handleStartQueue = async () => {
     if (processingRef.current) return;
+    if (processingMode === PROCESSING_MODE_SAFE_BETA) {
+      await runSafeBetaMode();
+      return;
+    }
     const runnable = fileQueue.filter((item) => item.status === "queued" || item.status === "failed");
     if (!runnable.length) {
       setNotice("队列中没有待处理图片。");
@@ -943,6 +1033,72 @@ export default function DashboardPage() {
 
           <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
             <section style={{ display: "flex", flexDirection: "column" }}>
+              <p style={DECOR_LABEL}>Processing Mode</p>
+              <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>处理模式</h2>
+              <select
+                value={processingMode}
+                onChange={(event) => setProcessingMode(event.target.value)}
+                style={{
+                  marginTop: "12px",
+                  width: "100%",
+                  backgroundColor: "#05090a",
+                  border: "1px solid #263738",
+                  borderRadius: "6px",
+                  color: "#e2e8f0",
+                  padding: "9px 10px",
+                  fontSize: "12px",
+                  outline: "none",
+                }}
+              >
+                {processingModeOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+              <p style={{ margin: "10px 0 0", color: "#7f8f91", fontSize: "12px", lineHeight: 1.7 }}>
+                {getProcessingModeDisplay(processingMode).desc}
+              </p>
+            </section>
+          </div>
+
+          {processingMode === PROCESSING_MODE_SAFE_BETA ? (
+            <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
+              <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
+                1080P安全增强 Beta
+              </h3>
+              <div className="space-y-2 text-xs text-[#94a3b8]">
+                <div className="flex items-center justify-between gap-3">
+                  <span>运行状态:</span>
+                  <span className="font-mono text-[#6feaf0]">{safeBetaResult?.status || "WAITING"}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>enhanced:</span>
+                  <span className={safeBetaResult?.has_enhanced ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.has_enhanced ? "是" : "否"}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>contact sheet:</span>
+                  <span className={safeBetaResult?.has_contact_sheet ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.has_contact_sheet ? "是" : "否"}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>跳过图片:</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.skipped_count ?? 0}</span>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">输出目录:</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
+                </div>
+              </div>
+              <div className="mt-3 space-y-1.5">
+                {safeBetaBoundaryItems.map((item) => (
+                  <div key={item} className="rounded border border-white/8 bg-black/15 px-2 py-1.5 text-[11px] leading-5 text-white/52">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+            <section style={{ display: "flex", flexDirection: "column" }}>
               <p style={DECOR_LABEL}>Restoration Modes</p>
               <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>三种增强模式</h2>
               <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
@@ -1079,8 +1235,8 @@ export default function DashboardPage() {
                 {notice}
               </p>
             </div>
-            <button type="button" onClick={handleStartQueue} disabled={isProcessingQueue} style={{ backgroundColor: fileQueue.length && !isProcessingQueue ? "#132f33" : "#0d181a", border: fileQueue.length && !isProcessingQueue ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: fileQueue.length && !isProcessingQueue ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: isProcessingQueue ? "not-allowed" : "pointer", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
-              开启核心修复管线
+            <button type="button" onClick={handleStartQueue} disabled={!canStartExecution} style={{ backgroundColor: canStartExecution ? "#132f33" : "#0d181a", border: canStartExecution ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: canStartExecution ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: canStartExecution ? "pointer" : "not-allowed", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
+              {processingMode === PROCESSING_MODE_SAFE_BETA ? "开始安全增强 Beta" : "开启核心修复管线"}
             </button>
           </div>
         </section>
