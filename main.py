@@ -1442,6 +1442,89 @@ def build_web_app():
             "data": checked,
         }
 
+    def run_safe_1080p_beta(payload: dict) -> dict:
+        import importlib.util
+
+        module_path = PROJECT_ROOT / "tools" / "experiments" / "safe_1080p_enhance.py"
+        if not module_path.exists():
+            return {
+                "status": "blocked",
+                "verification_result": "BLOCKED",
+                "reason": "missing_safe_1080p_module",
+            }
+
+        spec = importlib.util.spec_from_file_location("safe_1080p_enhance", module_path)
+        if spec is None or spec.loader is None:
+            return {
+                "status": "blocked",
+                "verification_result": "BLOCKED",
+                "reason": "cannot_load_safe_1080p_module",
+            }
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        input_dir_value = payload.get("input_dir") or "D:/影界文件/真实业务测试_6张"
+        output_dir_value = payload.get("output_dir") or "runtime/experiments/safe_1080p_beta"
+        mode_value = payload.get("mode") or "safe_1080p"
+        if mode_value != "safe_1080p":
+            return {
+                "status": "blocked",
+                "verification_result": "BLOCKED",
+                "reason": "unsupported_beta_mode",
+            }
+
+        input_path = Path(str(input_dir_value)).expanduser()
+        output_path = Path(str(output_dir_value)).expanduser()
+        if not input_path.is_absolute():
+            input_path = (PROJECT_ROOT / input_path).resolve()
+        if not output_path.is_absolute():
+            output_path = (PROJECT_ROOT / output_path).resolve()
+
+        args = argparse.Namespace(
+            input_dir=input_path,
+            output_dir=output_path,
+            mode="safe_1080p",
+            tool_dir=PROJECT_ROOT / "external_tools" / "realesrgan-ncnn-vulkan",
+            model="realesrgan-x4plus",
+            scale="4",
+        )
+        result = module.process(args)
+        processed_count = int(result.get("processed_count") or 0)
+        skipped_count = int(result.get("skipped_count") or 0)
+        if result.get("status") != "ok" or processed_count <= 0:
+            result["verification_result"] = "BLOCKED"
+            return result
+
+        result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
+        result["beta_policy"] = {
+            "mode": "safe_1080p",
+            "strategy": "35% protected",
+            "scope": "Chinese commercial non-portrait visuals only",
+            "main_pipeline": False,
+        }
+        return result
+
+    @app.post("/api/beta/safe-1080p/enhance")
+    async def beta_safe_1080p_enhance(payload: dict = Body(default_factory=dict)):
+        try:
+            result = await asyncio.to_thread(run_safe_1080p_beta, payload if isinstance(payload, dict) else {})
+        except Exception as exc:
+            result = {
+                "status": "blocked",
+                "verification_result": "BLOCKED",
+                "reason": str(exc),
+            }
+        verification_result = result.get("verification_result") or "BLOCKED"
+        success = verification_result in {"PASS", "PASS_WITH_NOTES"}
+        return {
+            "code": 200 if success else 400,
+            "status": "success" if success else "blocked",
+            "success": success,
+            "message": "1080P safe enhance Beta completed." if success else "1080P safe enhance Beta blocked.",
+            "verification_result": verification_result,
+            "data": result,
+        }
+
     @app.post("/api/upload")
     async def upload_file(
         file: UploadFile = File(...),

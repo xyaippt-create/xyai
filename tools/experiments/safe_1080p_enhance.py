@@ -1,0 +1,336 @@
+"""Offline 1080P safe enhance candidate module.
+
+This entry stays outside the production pipeline. It runs Real-ESRGAN x4plus
+and applies a conservative 35% protected blend for non-portrait Chinese
+commercial visuals.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
+DEFAULT_OUTPUT_DIR = Path("runtime/experiments/safe_1080p_enhance_v1")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run offline 1080P safe enhancement candidates.")
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--mode", choices=["safe_1080p"], default="safe_1080p")
+    parser.add_argument("--tool-dir", type=Path, default=DEFAULT_TOOL_DIR)
+    parser.add_argument("--model", default="realesrgan-x4plus")
+    parser.add_argument("--scale", default="4")
+    return parser.parse_args()
+
+
+def image_files(input_dir: Path) -> list[Path]:
+    if not input_dir.exists() or not input_dir.is_dir():
+        return []
+    return sorted(
+        [
+            item
+            for item in input_dir.iterdir()
+            if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+        ],
+        key=lambda item: item.name,
+    )
+
+
+def read_image(path: Path) -> np.ndarray:
+    data = np.fromfile(str(path), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Cannot decode image: {path}")
+    return image
+
+
+def write_image(path: Path, image: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, encoded = cv2.imencode(path.suffix, image)
+    if not ok:
+        raise RuntimeError(f"Cannot encode image: {path}")
+    encoded.tofile(str(path))
+
+
+def fit_height(image: np.ndarray, height: int) -> np.ndarray:
+    scale = height / image.shape[0]
+    width = max(1, int(round(image.shape[1] * scale)))
+    return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def labeled_panel(image: np.ndarray, label: str, height: int) -> np.ndarray:
+    panel = fit_height(image, height)
+    label_bar = np.full((42, panel.shape[1], 3), 245, dtype=np.uint8)
+    cv2.putText(
+        label_bar,
+        label,
+        (14, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (30, 30, 30),
+        2,
+        cv2.LINE_AA,
+    )
+    return np.vstack([label_bar, panel])
+
+
+def make_contact_sheet(original: np.ndarray, blend35: np.ndarray, protected35: np.ndarray, path: Path) -> None:
+    rendered = [
+        labeled_panel(original, "original", 720),
+        labeled_panel(blend35, "35% blend", 720),
+        labeled_panel(protected35, "35% protected", 720),
+    ]
+    max_height = max(panel.shape[0] for panel in rendered)
+    normalized: list[np.ndarray] = []
+    for panel in rendered:
+        if panel.shape[0] == max_height:
+            normalized.append(panel)
+            continue
+        canvas = np.full((max_height, panel.shape[1], 3), 245, dtype=np.uint8)
+        canvas[: panel.shape[0], : panel.shape[1]] = panel
+        normalized.append(canvas)
+
+    spacer = np.full((max_height, 12, 3), 235, dtype=np.uint8)
+    sheet = normalized[0]
+    for panel in normalized[1:]:
+        sheet = np.hstack([sheet, spacer, panel])
+    write_image(path, sheet)
+
+
+def resize_to_match(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    if source.shape[:2] == target.shape[:2]:
+        return source
+    return cv2.resize(source, (target.shape[1], target.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+
+def linear_blend(original: np.ndarray, model_output: np.ndarray, amount: float) -> np.ndarray:
+    original_up = resize_to_match(original, model_output)
+    blended = original_up.astype(np.float32) * (1.0 - amount) + model_output.astype(np.float32) * amount
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def build_protection_masks(original_up: np.ndarray) -> dict[str, np.ndarray]:
+    gray = cv2.cvtColor(original_up, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(original_up, cv2.COLOR_BGR2HSV)
+    ycrcb = cv2.cvtColor(original_up, cv2.COLOR_BGR2YCrCb)
+
+    edges = cv2.Canny(gray, 70, 170)
+    adaptive = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        8,
+    )
+    dark_strokes = ((gray < 135) & (edges > 0)).astype(np.uint8) * 255
+    text_like = cv2.bitwise_or(dark_strokes, cv2.bitwise_and(adaptive, edges))
+    text_like = cv2.dilate(text_like, np.ones((7, 7), np.uint8), iterations=1)
+
+    h, s, v = cv2.split(hsv)
+    high_sat = ((s > 105) & (v > 80)).astype(np.uint8) * 255
+    high_sat = cv2.dilate(high_sat, np.ones((5, 5), np.uint8), iterations=1)
+
+    skin = (
+        (ycrcb[:, :, 1] > 132)
+        & (ycrcb[:, :, 1] < 178)
+        & (ycrcb[:, :, 2] > 84)
+        & (ycrcb[:, :, 2] < 138)
+        & (s > 20)
+        & (v > 80)
+    ).astype(np.uint8) * 255
+    skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8), iterations=1)
+
+    high_contrast_edge = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    return {
+        "text_like": text_like,
+        "high_sat": high_sat,
+        "skin": skin,
+        "high_contrast_edge": high_contrast_edge,
+    }
+
+
+def classify_image(path: Path, original: np.ndarray) -> tuple[str, str, dict[str, float]]:
+    name = path.stem
+    gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(original, cv2.COLOR_BGR2HSV)
+    _, s, v = cv2.split(hsv)
+    masks = build_protection_masks(original)
+    edges = cv2.Canny(gray, 70, 170)
+
+    skin_ratio = float(np.mean(masks["skin"] > 0))
+    text_ratio = float(np.mean(masks["text_like"] > 0))
+    edge_ratio = float(np.mean(edges > 0))
+    high_sat_ratio = float(np.mean(masks["high_sat"] > 0))
+    light_bg_ratio = float(np.mean((s < 65) & (v > 175)))
+
+    metrics = {
+        "skin_ratio": round(skin_ratio, 4),
+        "text_ratio": round(text_ratio, 4),
+        "edge_ratio": round(edge_ratio, 4),
+        "high_sat_ratio": round(high_sat_ratio, 4),
+        "light_bg_ratio": round(light_bg_ratio, 4),
+    }
+
+    commercial_name_tokens = ("指南", "清单", "服务", "护肤", "地图", "广告", "产品", "包装", "海报")
+    portrait_name_tokens = ("人像", "头像", "面部", "写真", "证件照")
+    if any(token in name for token in portrait_name_tokens):
+        return "portrait", "skip_portrait_name", metrics
+    if any(token in name for token in commercial_name_tokens):
+        return "commercial_non_portrait", "commercial_name", metrics
+
+    if text_ratio > 0.018 and light_bg_ratio > 0.35:
+        return "commercial_non_portrait", "info_poster_metrics", metrics
+    if edge_ratio > 0.08 and light_bg_ratio > 0.20:
+        return "commercial_non_portrait", "city_or_map_metrics", metrics
+    if high_sat_ratio > 0.08 and edge_ratio > 0.045:
+        return "commercial_non_portrait", "product_metrics", metrics
+    if 0.035 < skin_ratio < 0.70 and edge_ratio < 0.075 and light_bg_ratio < 0.70:
+        return "portrait", "skip_portrait_metrics", metrics
+    return "uncertain", "skip_uncertain", metrics
+
+
+def protected_35_blend(original: np.ndarray, model_output: np.ndarray) -> np.ndarray:
+    original_up = resize_to_match(original, model_output)
+    masks = build_protection_masks(original_up)
+
+    alpha = np.full(original_up.shape[:2], 0.35, dtype=np.float32)
+    text_mask = cv2.dilate(masks["text_like"], np.ones((11, 11), np.uint8), iterations=1)
+    edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((5, 5), np.uint8), iterations=1)
+    alpha[edge_mask > 0] = 0.20
+    alpha[masks["high_sat"] > 0] = 0.14
+    alpha[text_mask > 0] = 0.05
+
+    alpha = cv2.GaussianBlur(alpha, (0, 0), 1.2)[:, :, None]
+    blended = original_up.astype(np.float32) * (1.0 - alpha) + model_output.astype(np.float32) * alpha
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def find_exe(tool_dir: Path) -> Path | None:
+    exe = tool_dir / "realesrgan-ncnn-vulkan.exe"
+    return exe if exe.exists() else None
+
+
+def has_model_files(tool_dir: Path) -> bool:
+    model_dir = tool_dir / "models"
+    if not model_dir.exists():
+        return False
+    return any(item.suffix.lower() in {".param", ".bin"} for item in model_dir.rglob("*") if item.is_file())
+
+
+def run_realesrgan(exe: Path, tool_dir: Path, source: Path, output: Path, model: str, scale: str) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(exe),
+        "-i",
+        str(source.resolve()),
+        "-o",
+        str(output.resolve()),
+        "-n",
+        model,
+        "-s",
+        scale,
+        "-f",
+        "png",
+    ]
+    completed = subprocess.run(command, cwd=str(tool_dir.resolve()), check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Real-ESRGAN failed for {source.name}: {completed.stderr.strip() or completed.stdout.strip()}"
+        )
+
+
+def relative_or_name(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def process(args: argparse.Namespace) -> dict[str, object]:
+    input_dir = args.input_dir
+    tool_dir = args.tool_dir
+    exe = find_exe(tool_dir)
+    if exe is None:
+        return {"status": "blocked", "reason": "missing_realesrgan_exe"}
+    if not has_model_files(tool_dir):
+        return {"status": "blocked", "reason": "missing_realesrgan_model_files"}
+
+    inputs = image_files(input_dir)
+    if not inputs:
+        return {"status": "blocked", "reason": "missing_input_images"}
+
+    run_dir = args.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+    after_dir = run_dir / "after_x4plus"
+    enhanced_dir = run_dir / "enhanced"
+    contact_dir = run_dir / "contact_sheet"
+    skipped: list[dict[str, object]] = []
+    processed: list[dict[str, object]] = []
+
+    for image_path in inputs:
+        original = read_image(image_path)
+        image_type, reason, metrics = classify_image(image_path, original)
+        base = image_path.stem
+        if image_type != "commercial_non_portrait":
+            skipped.append({"file": image_path.name, "type": image_type, "reason": reason, "metrics": metrics})
+            continue
+
+        after_path = after_dir / f"{base}_x4plus.png"
+        enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
+        contact_path = contact_dir / f"{base}_contact_sheet.png"
+
+        run_realesrgan(exe, tool_dir, image_path, after_path, args.model, args.scale)
+        model_output = read_image(after_path)
+        blend35 = linear_blend(original, model_output, 0.35)
+        protected35 = protected_35_blend(original, model_output)
+
+        write_image(enhanced_path, protected35)
+        make_contact_sheet(original, blend35, protected35, contact_path)
+        processed.append(
+            {
+                "file": image_path.name,
+                "type": image_type,
+                "reason": reason,
+                "metrics": metrics,
+                "after": relative_or_name(after_path, run_dir),
+                "enhanced": relative_or_name(enhanced_path, run_dir),
+                "contact_sheet": relative_or_name(contact_path, run_dir),
+            }
+        )
+
+    summary = {
+        "status": "ok" if processed else "blocked",
+        "mode": args.mode,
+        "model": args.model,
+        "input_dir": str(input_dir),
+        "output_dir": str(run_dir),
+        "processed_count": len(processed),
+        "skipped_count": len(skipped),
+        "processed": processed,
+        "skipped": skipped,
+    }
+    summary_path = run_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def main() -> int:
+    args = parse_args()
+    result = process(args)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("status") == "ok" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

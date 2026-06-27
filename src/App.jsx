@@ -4,16 +4,24 @@ import DashboardPage from "./DashboardPage.jsx";
 import TaskDetailPage from "./TaskDetailPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
+import Safe1080pBetaPage from "./Safe1080pBetaPage.jsx";
 
 export default function App() {
-  const [viewState, setViewState] = useState("launch");
+  const [viewState, setViewState] = useState(() => (window.location.pathname === "/safe-1080p-beta" ? "safe_1080p_beta" : "launch"));
   const [runtimeSnapshot, setRuntimeSnapshot] = useState(null);
   const [taskConfig, setTaskConfig] = useState(null);
   const [compareAssets, setCompareAssets] = useState(null);
 
+  const navigateTo = (nextView, path = "/") => {
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, "", path);
+    }
+    setViewState(nextView);
+  };
+
   const handleEnterDashboard = (snapshot) => {
     setRuntimeSnapshot(snapshot);
-    setViewState("dashboard");
+    navigateTo("dashboard");
   };
 
   const handleStartTask = (config) => {
@@ -34,13 +42,21 @@ export default function App() {
   const handleArchiveAndReset = () => {
     setTaskConfig(null);
     setCompareAssets(null);
-    setViewState("dashboard");
+    navigateTo("dashboard");
   };
 
   if (viewState === "launch") {
     return (
       <main className="min-h-screen bg-polar-950 text-polar-100">
-        <LaunchPage onEnter={handleEnterDashboard} />
+        <LaunchPage onEnter={handleEnterDashboard} onOpenSafeBeta={() => navigateTo("safe_1080p_beta", "/safe-1080p-beta")} />
+      </main>
+    );
+  }
+
+  if (viewState === "safe_1080p_beta") {
+    return (
+      <main className="min-h-screen bg-polar-950 text-polar-100">
+        <Safe1080pBetaPage onBackToDashboard={() => navigateTo("dashboard")} />
       </main>
     );
   }

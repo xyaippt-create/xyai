@@ -75,7 +75,7 @@ function SculptedTitle() {
   );
 }
 
-export default function LaunchPage({ onEnter }) {
+export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
   const [statusMap, setStatusMap] = useState(initialStatus);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isExiting, setIsExiting] = useState(false);
@@ -151,6 +151,19 @@ export default function LaunchPage({ onEnter }) {
             );
           })}
         </div>
+        <button
+          type="button"
+          onClick={() => {
+            autoEnteredRef.current = true;
+            setIsExiting(false);
+            onOpenSafeBeta?.();
+          }}
+          className="mt-6 w-full max-w-7xl rounded-lg border border-[#3cb3a0]/45 bg-[#101819] px-6 py-5 text-left transition hover:border-[#7af4df]/70 hover:bg-[#132022]"
+        >
+          <span className="font-mono text-xs uppercase tracking-[0.28em] text-[#7af4df]">Beta Entry</span>
+          <span className="mt-2 block text-xl font-semibold text-white">1080P安全增强 Beta</span>
+          <span className="mt-2 block text-sm leading-6 text-white/58">适用于中文商业非人像图，当前为独立 Beta 功能</span>
+        </button>
       </div>
       <footer className="relative z-10 w-full truncate px-3 text-center font-mono text-[10px] tracking-[0.2em] text-white/24">{PAGE_FOOTER}</footer>
     </section>
