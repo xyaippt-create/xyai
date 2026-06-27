@@ -152,6 +152,7 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
           })}
         </div>
         <button
+          style={{ display: "none" }}
           type="button"
           onClick={() => {
             autoEnteredRef.current = true;

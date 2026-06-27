@@ -1464,7 +1464,7 @@ def build_web_app():
         spec.loader.exec_module(module)
 
         input_dir_value = payload.get("input_dir") or "D:/影界文件/真实业务测试_6张"
-        output_dir_value = payload.get("output_dir") or "runtime/experiments/safe_1080p_beta"
+        output_dir_value = payload.get("output_dir") or "D:/影界文件/1080P安全增强输出"
         mode_value = payload.get("mode") or "safe_1080p"
         if mode_value != "safe_1080p":
             return {
@@ -1487,6 +1487,9 @@ def build_web_app():
             tool_dir=PROJECT_ROOT / "external_tools" / "realesrgan-ncnn-vulkan",
             model="realesrgan-x4plus",
             scale="4",
+            flat_output=True,
+            business_output=True,
+            diagnostic_dir=Path("D:/影界文件/影界测试反馈包"),
         )
         result = module.process(args)
         processed_count = int(result.get("processed_count") or 0)

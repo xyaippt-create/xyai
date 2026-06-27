@@ -1,8 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 const API_BASE = "http://localhost:8787";
 const DEFAULT_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
-const DEFAULT_OUTPUT_DIR = "runtime/experiments/safe_1080p_beta";
+const DEFAULT_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
 
 function statusTone(status) {
   if (status === "PASS") return "border-emerald-400/45 bg-emerald-400/10 text-emerald-200";
@@ -27,14 +27,26 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
   const [result, setResult] = useState(null);
   const [feedbackResult, setFeedbackResult] = useState(null);
   const [error, setError] = useState("");
+  const [startedAt, setStartedAt] = useState(null);
+  const [tick, setTick] = useState(0);
 
   const summary = result?.data || {};
   const verification = result?.verification_result || summary?.verification_result || "";
   const processed = summary?.processed_count ?? 0;
   const skipped = summary?.skipped_count ?? 0;
   const outputPath = summary?.output_dir || "";
-  const hasEnhanced = processed > 0;
-  const hasContactSheet = Array.isArray(summary?.processed) && summary.processed.every((item) => item.contact_sheet);
+  const processedItems = Array.isArray(summary?.processed) ? summary.processed : [];
+  const enhancedCount = summary?.enhanced_count ?? processedItems.filter((item) => item.enhanced).length;
+  const contactSheetCount = summary?.contact_sheet_count ?? processedItems.filter((item) => item.contact_sheet).length;
+  const hasEnhanced = running || enhancedCount > 0;
+  const hasContactSheet = running || contactSheetCount > 0;
+  const elapsedSeconds = running && startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000) + tick * 0) : summary?.elapsed_seconds || 0;
+
+  useEffect(() => {
+    if (!running) return () => {};
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
 
   const boundaryItems = useMemo(
     () => [
@@ -50,10 +62,39 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
   );
 
   const runBeta = async () => {
+    const started = Date.now();
     setRunning(true);
+    setStartedAt(started);
+    setTick(0);
     setError("");
-    setResult(null);
+    setResult({
+      verification_result: "RUNNING",
+      data: {
+        status: "running",
+        verification_result: "RUNNING",
+        mode: "safe_1080p",
+        input_dir: inputDir,
+        output_dir: outputDir,
+        progress: 1,
+        current_file: "正在连接 Beta 后端",
+        processed_count: 0,
+        enhanced_count: 0,
+        contact_sheet_count: 0,
+        skipped_count: 0,
+        elapsed_seconds: 0,
+        processed: [],
+        skipped: [],
+      },
+    });
     setFeedbackResult(null);
+    const stageTimers = [
+      window.setTimeout(() => {
+        setResult((prev) => (prev?.verification_result === "RUNNING" ? { ...prev, data: { ...prev.data, progress: 15, current_file: "正在读取图片" } } : prev));
+      }, 250),
+      window.setTimeout(() => {
+        setResult((prev) => (prev?.verification_result === "RUNNING" ? { ...prev, data: { ...prev.data, progress: 35, current_file: "正在执行 1080P安全增强，处理中请稍候" } } : prev));
+      }, 1000),
+    ];
     try {
       const response = await fetch(`${API_BASE}/api/beta/safe-1080p/enhance`, {
         method: "POST",
@@ -62,20 +103,53 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
           input_dir: inputDir,
           output_dir: outputDir,
           mode: "safe_1080p",
+          flat_output: true,
+          business_output: true,
         }),
       });
       const payload = await response.json();
-      setResult(payload);
+      const data = payload?.data || {};
+      const items = Array.isArray(data.processed) ? data.processed : [];
+      setResult({
+        ...payload,
+        data: {
+          ...data,
+          progress: 100,
+          current_file: items[items.length - 1]?.file || "处理完成",
+          enhanced_count: items.filter((item) => item.enhanced).length,
+          contact_sheet_count: items.filter((item) => item.contact_sheet).length,
+          elapsed_seconds: data.elapsed_seconds || Math.round((Date.now() - started) / 1000),
+        },
+      });
       if (!response.ok || payload.success === false) {
-        setError(payload.message || "Beta 运行失败");
+        setError(payload.message || "Beta run failed");
       }
     } catch (requestError) {
-      setError(requestError.message || "无法连接 Beta 接口");
+      setResult({
+        verification_result: "BLOCKED",
+        data: {
+          status: "blocked",
+          verification_result: "BLOCKED",
+          mode: "safe_1080p",
+          input_dir: inputDir,
+          output_dir: outputDir,
+          progress: 100,
+          current_file: "BLOCKED",
+          processed_count: 0,
+          enhanced_count: 0,
+          contact_sheet_count: 0,
+          skipped_count: 0,
+          elapsed_seconds: Math.round((Date.now() - started) / 1000),
+          processed: [],
+          skipped: [],
+        },
+      });
+      setError(requestError.message || "Cannot connect to Beta API");
     } finally {
+      stageTimers.forEach((timer) => window.clearTimeout(timer));
       setRunning(false);
     }
   };
-
   const exportFeedbackPackage = async () => {
     if (!summary?.output_dir) return;
     setError("");
@@ -143,7 +217,7 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
             disabled={running}
             className="mt-5 w-full rounded-md bg-[#7af4df] px-4 py-3 text-sm font-semibold text-[#06211d] transition hover:bg-[#9cffef] disabled:cursor-not-allowed disabled:bg-white/18 disabled:text-white/38"
           >
-            {running ? "运行中..." : "开始安全增强 Beta"}
+            {running ? "安全增强处理中..." : "开始安全增强 Beta"}
           </button>
 
           <button
@@ -188,9 +262,14 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
             <ResultLine label="输出目录" value={outputPath || outputDir} />
             <ResultLine label="模式" value={summary.mode || "safe_1080p"} />
             <ResultLine label="状态" value={verification || (running ? "RUNNING" : "WAITING")} />
-            <ResultLine label="生成 enhanced 图" value={hasEnhanced ? `是，${processed} 张` : "否"} />
-            <ResultLine label="生成 contact sheet" value={hasContactSheet ? `是，${processed} 张` : "否"} />
+            <ResultLine label="生成 enhanced 图" value={running ? "处理中" : hasEnhanced ? `是，${processed} 张` : "否"} />
+            <ResultLine label="生成 contact sheet" value={running ? "生成中" : hasContactSheet ? `是，${processed} 张` : "否"} />
             <ResultLine label="跳过图片" value={skipped ? `${skipped} 张` : "无"} />
+            <ResultLine label="progress" value={`${summary.progress ?? 0}%`} />
+            <ResultLine label="current file" value={summary.current_file || "WAITING"} />
+            <ResultLine label="enhanced count" value={running ? "处理中" : String(enhancedCount)} />
+            <ResultLine label="contact sheet count" value={running ? "生成中" : String(contactSheetCount)} />
+            <ResultLine label="elapsed" value={`${elapsedSeconds}s`} />
             <ResultLine label="BLOCKED 原因" value={summary.reason || result?.message || ""} />
             <ResultLine label="测试反馈包" value={feedbackResult?.feedback_zip_path || ""} />
           </div>

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,8 @@ import numpy as np
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
-DEFAULT_OUTPUT_DIR = Path("runtime/experiments/safe_1080p_enhance_v1")
+DEFAULT_OUTPUT_DIR = Path("D:/影界文件/1080P安全增强输出")
+DEFAULT_DIAGNOSTIC_DIR = Path("D:/影界文件/影界测试反馈包")
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-dir", type=Path, default=DEFAULT_TOOL_DIR)
     parser.add_argument("--model", default="realesrgan-x4plus")
     parser.add_argument("--scale", default="4")
+    parser.add_argument("--flat-output", action="store_true")
+    parser.add_argument("--business-output", action="store_true")
+    parser.add_argument("--diagnostic-dir", type=Path, default=DEFAULT_DIAGNOSTIC_DIR)
     return parser.parse_args()
 
 
@@ -258,6 +263,20 @@ def relative_or_name(path: Path, root: Path) -> str:
         return str(path)
 
 
+def unique_business_path(path: Path, token: str) -> Path:
+    if not path.exists():
+        return path
+    candidate = path.with_name(f"{path.stem}_{token}{path.suffix}")
+    if not candidate.exists():
+        return candidate
+    index = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_{token}_{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def process(args: argparse.Namespace) -> dict[str, object]:
     started_at = datetime.now().isoformat(timespec="seconds")
     start_time = time.perf_counter()
@@ -273,45 +292,66 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     if not inputs:
         return {"status": "blocked", "reason": "missing_input_images"}
 
-    run_dir = args.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
-    after_dir = run_dir / "after_x4plus"
-    enhanced_dir = run_dir / "enhanced"
-    contact_dir = run_dir / "contact_sheet"
+    run_token = datetime.now().strftime("%H%M%S")
+    flat_output = bool(getattr(args, "flat_output", False) or getattr(args, "business_output", False))
+    if flat_output:
+        run_dir = args.output_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
+        enhanced_dir = run_dir
+        diagnostic_dir = Path(getattr(args, "diagnostic_dir", DEFAULT_DIAGNOSTIC_DIR))
+        contact_dir = diagnostic_dir / "contact_sheets"
+        summary_dir = diagnostic_dir / "summaries"
+        temp_context = tempfile.TemporaryDirectory(prefix="safe_1080p_beta_")
+        after_dir = Path(temp_context.name)
+    else:
+        run_dir = args.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+        after_dir = run_dir / "after_x4plus"
+        enhanced_dir = run_dir / "enhanced"
+        contact_dir = run_dir / "contact_sheet"
+        summary_dir = run_dir
     skipped: list[dict[str, object]] = []
     processed: list[dict[str, object]] = []
 
-    for image_path in inputs:
-        image_start = time.perf_counter()
-        original = read_image(image_path)
-        image_type, reason, metrics = classify_image(image_path, original)
-        base = image_path.stem
-        if image_type != "commercial_non_portrait":
-            skipped.append({"file": image_path.name, "type": image_type, "reason": reason, "metrics": metrics})
-            continue
+    try:
+        for image_path in inputs:
+            image_start = time.perf_counter()
+            original = read_image(image_path)
+            image_type, reason, metrics = classify_image(image_path, original)
+            base = image_path.stem
+            if image_type != "commercial_non_portrait":
+                skipped.append({"file": image_path.name, "type": image_type, "reason": reason, "metrics": metrics})
+                continue
 
-        after_path = after_dir / f"{base}_x4plus.png"
-        enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
-        contact_path = contact_dir / f"{base}_contact_sheet.png"
+            after_path = after_dir / f"{base}_x4plus.png"
+            if flat_output:
+                enhanced_path = unique_business_path(enhanced_dir / f"{base}_1080p_beta.png", run_token)
+                contact_path = unique_business_path(contact_dir / f"{base}_contact_sheet.png", run_token)
+            else:
+                enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
+                contact_path = contact_dir / f"{base}_contact_sheet.png"
 
-        run_realesrgan(exe, tool_dir, image_path, after_path, args.model, args.scale)
-        model_output = read_image(after_path)
-        blend35 = linear_blend(original, model_output, 0.35)
-        protected35 = protected_35_blend(original, model_output)
+            run_realesrgan(exe, tool_dir, image_path, after_path, args.model, args.scale)
+            model_output = read_image(after_path)
+            blend35 = linear_blend(original, model_output, 0.35)
+            protected35 = protected_35_blend(original, model_output)
 
-        write_image(enhanced_path, protected35)
-        make_contact_sheet(original, blend35, protected35, contact_path)
-        processed.append(
-            {
-                "file": image_path.name,
-                "type": image_type,
-                "reason": reason,
-                "metrics": metrics,
-                "after": relative_or_name(after_path, run_dir),
-                "enhanced": relative_or_name(enhanced_path, run_dir),
-                "contact_sheet": relative_or_name(contact_path, run_dir),
-                "elapsed_seconds": round(time.perf_counter() - image_start, 3),
-            }
-        )
+            write_image(enhanced_path, protected35)
+            make_contact_sheet(original, blend35, protected35, contact_path)
+            processed.append(
+                {
+                    "file": image_path.name,
+                    "type": image_type,
+                    "reason": reason,
+                    "metrics": metrics,
+                    "after": "" if flat_output else relative_or_name(after_path, run_dir),
+                    "enhanced": relative_or_name(enhanced_path, run_dir),
+                    "contact_sheet": relative_or_name(contact_path, run_dir),
+                    "elapsed_seconds": round(time.perf_counter() - image_start, 3),
+                }
+            )
+    finally:
+        if flat_output:
+            temp_context.cleanup()
 
     finished_at = datetime.now().isoformat(timespec="seconds")
     summary = {
@@ -320,6 +360,8 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "model": args.model,
         "input_dir": str(input_dir),
         "output_dir": str(run_dir),
+        "diagnostic_dir": str(summary_dir.parent if flat_output else run_dir),
+        "flat_output": flat_output,
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_seconds": round(time.perf_counter() - start_time, 3),
@@ -328,7 +370,9 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "processed": processed,
         "skipped": skipped,
     }
-    summary_path = run_dir / "summary.json"
+    summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
+    summary_path = summary_dir / summary_name
+    summary["summary_path"] = str(summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary

@@ -12,7 +12,7 @@ const DEFAULT_LEGACY_FORMAT = "png";
 const PROCESSING_MODE_STANDARD = "standard";
 const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
 const DEFAULT_SAFE_BETA_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
-const DEFAULT_SAFE_BETA_OUTPUT_DIR = "runtime/experiments/safe_1080p_beta";
+const DEFAULT_SAFE_BETA_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
 
 const processingModeOptions = [
   {
@@ -52,17 +52,11 @@ const PANEL_STYLE = {
 
 const TITLE_STYLE = { color: "#f4f7f8" };
 
-const modeCards = [
-  { id: "fidelity", title: "画质保真", desc: "保持构图、色彩与画风，只做高清清洁。" },
-  { id: "text_safe", title: "文字安全清洁", desc: "保护小字边缘，减少压缩毛刺。" },
-  { id: "texture", title: "材质增强", desc: "保留材质层次，避免假锐化。" },
-];
-
 const statusText = {
   queued: "待处理",
   uploading: "上传中",
   processing: "处理中",
-  completed: "已完成",
+  completed: "已生成",
   failed: "失败",
 };
 
@@ -88,12 +82,11 @@ const deliveryStatusColor = {
 
 function getModeDisplay(mode) {
   const normalized = mode || "";
-  if (normalized === "fidelity") return { label: "画质保真", className: "text-[#00ffcc]" };
-  if (normalized === "texture") return { label: "材质增强", className: "text-[#94a3b8]" };
-  if (normalized === "text_safe") return { label: "文字安全", className: "text-[#f59e0b]" };
+  if (["fidelity", "texture", "text_safe"].includes(normalized)) {
+    return { label: "标准优化", className: "text-[#00ffcc]" };
+  }
   return { label: normalized || "未选择", className: "text-[#94a3b8]" };
 }
-
 function getOutputFormatDisplay(format) {
   const normalized = (format || DEFAULT_OUTPUT_FORMAT).toString().toLowerCase();
   if (normalized === "auto") return "智能自适应";
@@ -548,10 +541,12 @@ export default function DashboardPage() {
   const [debugItemId, setDebugItemId] = useState("");
   const [fileQueue, setFileQueue] = useState([]);
   const [processingMode, setProcessingMode] = useState(PROCESSING_MODE_STANDARD);
-  const [activeMode, setActiveMode] = useState("fidelity");
+  const [activeMode] = useState("fidelity");
   const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
   const [safeBetaResult, setSafeBetaResult] = useState(null);
   const [safeBetaFeedbackResult, setSafeBetaFeedbackResult] = useState(null);
+  const [safeBetaStartedAt, setSafeBetaStartedAt] = useState(null);
+  const [safeBetaTick, setSafeBetaTick] = useState(0);
   const [appliedOutputDir, setAppliedOutputDir] = useState("");
   const [defaultOutputDir, setDefaultOutputDir] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
@@ -569,6 +564,12 @@ export default function DashboardPage() {
       })
       .catch(() => setDefaultOutputDir(""));
   }, []);
+
+  useEffect(() => {
+    if (safeBetaResult?.status !== "RUNNING") return () => {};
+    const timer = window.setInterval(() => setSafeBetaTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [safeBetaResult?.status]);
 
   const activeItem = useMemo(() => fileQueue.find((item) => item.id === activeItemId) || fileQueue.find((item) => item.status === "processing") || fileQueue.find((item) => item.status === "completed") || null, [fileQueue, activeItemId]);
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
@@ -662,7 +663,7 @@ export default function DashboardPage() {
   };
 
   const handleOpenOutputDir = () => {
-    const target = appliedOutputDir.trim() || defaultOutputDir;
+    const target = processingMode === PROCESSING_MODE_SAFE_BETA ? DEFAULT_SAFE_BETA_OUTPUT_DIR : appliedOutputDir.trim() || defaultOutputDir;
     if (!target) {
       setOutputDirError("当前没有可打开的输出目录。");
       return;
@@ -747,6 +748,143 @@ export default function DashboardPage() {
     }
   };
 
+  const runSafeBetaModeV2 = async () => {
+    const startedAt = Date.now();
+    const betaItems = fileQueue.filter((item) => item.status === "queued" || item.status === "failed" || item.status === "processing");
+    const betaItemIds = betaItems.map((item) => item.id);
+    const firstFileName = betaItems[0]?.name || "";
+    const firstCurrentFile = firstFileName || "正在连接 Beta 后端";
+    const setBetaQueuePatch = (patch) => {
+      if (!betaItemIds.length) return;
+      setFileQueue((prev) => prev.map((item) => (betaItemIds.includes(item.id) ? { ...item, ...patch } : item)));
+    };
+    const setBetaStage = (progress, currentFile, message) => {
+      setSafeBetaResult((prev) => (prev?.status === "RUNNING" ? { ...prev, progress, current_file: currentFile, message } : prev));
+      setBetaQueuePatch({ status: "processing", progress, error: "", logs: [message], output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR, mode: PROCESSING_MODE_SAFE_BETA });
+      if (currentFile) setNotice(`${message}：${currentFile}`);
+    };
+    processingRef.current = true;
+    setIsProcessingQueue(true);
+    setCurrentIndex(1);
+    if (betaItems[0]) {
+      setActiveItemId(betaItems[0].id);
+      setDebugItemId(betaItems[0].id);
+    }
+    setSafeBetaStartedAt(startedAt);
+    setSafeBetaTick(0);
+    setSafeBetaFeedbackResult(null);
+    setBetaQueuePatch({
+      status: "processing",
+      progress: 5,
+      mode: PROCESSING_MODE_SAFE_BETA,
+      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      output_filename: "",
+      final_delivery_status: "",
+      final_delivery_reason: "Beta 处理中",
+      final_output_url: "",
+      error: "",
+      logs: ["正在连接 Beta 后端"],
+    });
+    setSafeBetaResult({
+      status: "RUNNING",
+      progress: 5,
+      current_file: firstCurrentFile,
+      processed_count: 0,
+      enhanced_count: "处理中",
+      contact_sheet_count: "生成中",
+      skipped_count: 0,
+      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      has_enhanced: false,
+      has_contact_sheet: false,
+      elapsed_seconds: 0,
+      message: "正在连接 Beta 后端",
+    });
+    setNotice("1080P安全增强 Beta：正在连接 Beta 后端。");
+    const stageTimers = [
+      window.setTimeout(() => setBetaStage(15, firstFileName || "正在读取图片", "正在读取图片"), 250),
+      window.setTimeout(() => setBetaStage(35, firstFileName || "正在执行 1080P安全增强", "正在执行 1080P安全增强，处理中请稍候"), 1000),
+    ];
+    try {
+      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/enhance`, {
+        input_dir: DEFAULT_SAFE_BETA_INPUT_DIR,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        mode: "safe_1080p",
+        flat_output: true,
+        business_output: true,
+      });
+      const data = payload?.data || {};
+      const processedItems = Array.isArray(data.processed) ? data.processed : [];
+      const enhancedCount = processedItems.filter((row) => Boolean(row.enhanced)).length;
+      const contactSheetCount = processedItems.filter((row) => Boolean(row.contact_sheet)).length;
+      const firstEnhanced = processedItems.find((row) => row.enhanced)?.enhanced || "";
+      const firstOutputName = firstEnhanced ? firstEnhanced.split(/[\\/]/).pop() : "";
+      const resultStatus = payload.verification_result || data.verification_result || "PASS_WITH_NOTES";
+      setSafeBetaResult({
+        status: resultStatus,
+        progress: 100,
+        current_file: processedItems[processedItems.length - 1]?.file || firstFileName || "处理完成",
+        processed_count: data.processed_count || 0,
+        enhanced_count: enhancedCount,
+        contact_sheet_count: contactSheetCount,
+        skipped_count: data.skipped_count || 0,
+        output_dir: data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        has_enhanced: enhancedCount > 0,
+        has_contact_sheet: contactSheetCount > 0,
+        input_dir: data.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
+        processed: processedItems,
+        skipped: Array.isArray(data.skipped) ? data.skipped : [],
+        started_at: data.started_at || "",
+        finished_at: data.finished_at || "",
+        elapsed_seconds: data.elapsed_seconds || Math.round((Date.now() - startedAt) / 1000),
+        message: payload.message || "处理完成",
+      });
+      setBetaQueuePatch({
+        status: "completed",
+        progress: 100,
+        output_dir: data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_filename: firstOutputName || "已生成",
+        output_path: firstEnhanced,
+        final_delivery_status: "PASS_WITH_LIMITATION",
+        final_delivery_reason: "1080P安全增强 Beta 已生成，建议查看后使用。",
+        final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
+        error: "",
+        logs: ["处理完成"],
+      });
+      setNotice(`1080P安全增强 Beta 完成：${resultStatus}`);
+    } catch (error) {
+      setSafeBetaResult({
+        status: "BLOCKED",
+        progress: 100,
+        current_file: firstFileName || "处理失败",
+        processed_count: 0,
+        enhanced_count: 0,
+        contact_sheet_count: 0,
+        skipped_count: 0,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        has_enhanced: false,
+        has_contact_sheet: false,
+        elapsed_seconds: Math.round((Date.now() - startedAt) / 1000),
+        message: error.message,
+      });
+      setBetaQueuePatch({
+        status: "failed",
+        progress: 100,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_filename: "",
+        final_delivery_status: "FAIL",
+        final_delivery_reason: error.message,
+        error: error.message,
+        logs: [error.message],
+      });
+      setNotice(`1080P安全增强 Beta 处理失败：${error.message}`);
+    } finally {
+      stageTimers.forEach((timer) => window.clearTimeout(timer));
+      processingRef.current = false;
+      setIsProcessingQueue(false);
+      setCurrentIndex(0);
+      setActiveScreen("dashboard");
+    }
+  };
   const exportSafeBetaFeedbackPackage = async () => {
     if (!safeBetaResult?.output_dir) return;
     try {
@@ -880,7 +1018,7 @@ export default function DashboardPage() {
   const handleStartQueue = async () => {
     if (processingRef.current) return;
     if (processingMode === PROCESSING_MODE_SAFE_BETA) {
-      await runSafeBetaMode();
+      await runSafeBetaModeV2();
       return;
     }
     const runnable = fileQueue.filter((item) => item.status === "queued" || item.status === "failed");
@@ -1010,8 +1148,37 @@ export default function DashboardPage() {
     );
   }
 
-  const outputLocationLabel = appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
-  const currentOutputDir = appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
+  const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA ? "当前状态：Beta输出目录" : appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
+  const currentOutputDir = processingMode === PROCESSING_MODE_SAFE_BETA ? DEFAULT_SAFE_BETA_OUTPUT_DIR : appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
+  const safeBetaElapsedSeconds =
+    safeBetaResult?.status === "RUNNING" && safeBetaStartedAt
+      ? Math.max(0, Math.round((Date.now() - safeBetaStartedAt) / 1000) + safeBetaTick * 0)
+      : safeBetaResult?.elapsed_seconds || 0;
+  const isSafeBetaSelected = processingMode === PROCESSING_MODE_SAFE_BETA;
+  const safeBetaDeliveryConclusion =
+    safeBetaResult?.status === "RUNNING"
+      ? "处理中"
+      : safeBetaResult?.status === "BLOCKED"
+        ? "处理失败"
+        : safeBetaResult?.status
+          ? "建议查看后使用"
+          : "等待任务";
+  const safeBetaOutputUrlText =
+    safeBetaResult?.status === "RUNNING"
+      ? "等待生成"
+      : safeBetaResult?.status === "BLOCKED"
+        ? safeBetaResult?.message || "处理失败"
+        : safeBetaResult?.status
+          ? "请打开输出目录查看"
+          : "等待生成";
+  const safeBetaCurrentState =
+    safeBetaResult?.status === "RUNNING"
+      ? "Beta 处理中"
+      : safeBetaResult?.status === "BLOCKED"
+        ? safeBetaResult?.message || "处理失败"
+        : safeBetaResult?.status
+          ? "处理完成"
+          : "等待任务";
   const deliveryActionItem = activeItem?.status === "completed" ? activeItem : completedItems[completedItems.length - 1] || null;
 
   return (
@@ -1111,11 +1278,11 @@ export default function DashboardPage() {
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span>enhanced:</span>
-                  <span className={safeBetaResult?.has_enhanced ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.has_enhanced ? "是" : "否"}</span>
+                  <span className={safeBetaResult?.has_enhanced || safeBetaResult?.status === "RUNNING" ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.status === "RUNNING" ? "处理中" : safeBetaResult?.has_enhanced ? "是" : "否"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span>contact sheet:</span>
-                  <span className={safeBetaResult?.has_contact_sheet ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.has_contact_sheet ? "是" : "否"}</span>
+                  <span className={safeBetaResult?.has_contact_sheet || safeBetaResult?.status === "RUNNING" ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.status === "RUNNING" ? "生成中" : safeBetaResult?.has_contact_sheet ? "是" : "否"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span>跳过图片:</span>
@@ -1124,6 +1291,26 @@ export default function DashboardPage() {
                 <div className="flex items-start justify-between gap-3">
                   <span className="shrink-0">输出目录:</span>
                   <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>progress:</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.progress ?? 0}%</span>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">current file:</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.current_file || "WAITING"}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>enhanced count:</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.status === "RUNNING" ? "处理中" : safeBetaResult?.enhanced_count ?? 0}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>contact sheet count:</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.status === "RUNNING" ? "生成中" : safeBetaResult?.contact_sheet_count ?? 0}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>elapsed:</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaElapsedSeconds}s</span>
                 </div>
               </div>
               <button
@@ -1151,24 +1338,6 @@ export default function DashboardPage() {
               </div>
             </div>
           ) : null}
-
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
-            <section style={{ display: "flex", flexDirection: "column" }}>
-              <p style={DECOR_LABEL}>Restoration Modes</p>
-              <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>三种增强模式</h2>
-              <div style={{ marginTop: "12px", display: "grid", gap: "8px" }}>
-                {modeCards.map((mode) => {
-                  const active = activeMode === mode.id;
-                  return (
-                    <button key={mode.id} type="button" onClick={() => setActiveMode(mode.id)} style={{ width: "100%", minWidth: 0, textAlign: "left", background: active ? "#102629" : "#0d181a", border: active ? "1px solid #6feaf0" : "1px solid #263738", color: active ? "#6feaf0" : "#9ba9ab", padding: "9px 10px", borderRadius: "4px", fontSize: "12px", cursor: "pointer", transition: "all 0.2s" }}>
-                      {mode.title}
-                    </button>
-                  );
-                })}
-              </div>
-              <p style={{ margin: "12px 0 0", color: "#7f8f91", fontSize: "12px", lineHeight: 1.7 }}>{modeCards.find((mode) => mode.id === activeMode)?.desc}</p>
-            </section>
-          </div>
 
           <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
             <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
@@ -1291,7 +1460,7 @@ export default function DashboardPage() {
               </p>
             </div>
             <button type="button" onClick={handleStartQueue} disabled={!canStartExecution} style={{ backgroundColor: canStartExecution ? "#132f33" : "#0d181a", border: canStartExecution ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: canStartExecution ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: canStartExecution ? "pointer" : "not-allowed", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
-              {processingMode === PROCESSING_MODE_SAFE_BETA ? "开始安全增强 Beta" : "开启核心修复管线"}
+              {processingMode === PROCESSING_MODE_SAFE_BETA ? (isProcessingQueue ? "安全增强处理中..." : "开始安全增强 Beta") : "开启核心修复管线"}
             </button>
           </div>
         </section>
@@ -1304,20 +1473,34 @@ export default function DashboardPage() {
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-[#94a3b8]">当前样本:</span>
-                  <span className="min-w-0 truncate text-right font-mono text-[#e2e8f0]" title={activeItem?.name || "等待任务"}>
-                    {activeItem?.name || "等待任务"}
+                  <span className="min-w-0 truncate text-right font-mono text-[#e2e8f0]" title={isSafeBetaSelected ? safeBetaResult?.current_file || activeItem?.name || "等待任务" : activeItem?.name || "等待任务"}>
+                    {isSafeBetaSelected ? safeBetaResult?.current_file || activeItem?.name || "等待任务" : activeItem?.name || "等待任务"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-[#94a3b8]">交付结论:</span>
-                  <DeliveryPill status={activeItem?.final_delivery_status} item={activeItem} />
+                  {isSafeBetaSelected ? (
+                    <span className="rounded border border-[#263738] bg-[#0d181a] px-2 py-1 font-mono text-[10px] text-[#6feaf0]">
+                      {safeBetaDeliveryConclusion}
+                    </span>
+                  ) : (
+                    <DeliveryPill status={activeItem?.final_delivery_status} item={activeItem} />
+                  )}
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-[#94a3b8]">输出 URL:</span>
-                  <span className="block max-w-[180px] truncate font-mono text-[11px] text-[#10b981]" title={activeItem?.final_output_url || "等待成品"}>
-                    {activeItem?.final_output_url || "等待成品"}
+                  <span className="block max-w-[180px] truncate font-mono text-[11px] text-[#10b981]" title={isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}>
+                    {isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}
                   </span>
                 </div>
+                {isSafeBetaSelected ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[#94a3b8]">当前状态:</span>
+                    <span className="block max-w-[180px] truncate text-right font-mono text-[11px] text-[#6feaf0]" title={safeBetaCurrentState}>
+                      {safeBetaCurrentState}
+                    </span>
+                  </div>
+                ) : null}
               </div>
           </div>
 

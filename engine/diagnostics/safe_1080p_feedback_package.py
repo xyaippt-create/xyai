@@ -211,8 +211,8 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
     )
     writer.writeheader()
     for item in run_result.get("processed") or []:
-        enhanced = run_dir / str(item.get("enhanced") or "")
-        contact = run_dir / str(item.get("contact_sheet") or "")
+        enhanced = _resolve_run_file(run_dir, str(item.get("enhanced") or ""))
+        contact = _resolve_run_file(run_dir, str(item.get("contact_sheet") or ""))
         metrics = item.get("metrics") or {}
         risk_tags = []
         if float(metrics.get("text_ratio") or 0) > 0.22:
@@ -304,6 +304,12 @@ def _tool_check_text(tool_checks: dict[str, Any]) -> str:
 def _path_check_text(path_checks: dict[str, Any]) -> str:
     return "\n".join(f"{key}: {value}" for key, value in path_checks.items()) + "\n"
 
+
+def _resolve_run_file(run_dir: Path, value: str) -> Path:
+    path = Path(str(value or ""))
+    if path.is_absolute():
+        return path
+    return run_dir / path
 
 def _environment_text(env: dict[str, Any], tool_checks: dict[str, Any], path_checks: dict[str, Any]) -> str:
     merged = {**env, **tool_checks, **path_checks}
@@ -410,7 +416,7 @@ def generate_safe_1080p_feedback_package(
                 contact_rel = str(item.get("contact_sheet") or "")
                 if not contact_rel:
                     continue
-                contact_path = output_dir / contact_rel
+                contact_path = _resolve_run_file(output_dir, contact_rel)
                 if contact_path.exists() and contact_path.is_file():
                     arcname = f"contact_sheets/{contact_path.name}"
                     archive.write(contact_path, arcname)
