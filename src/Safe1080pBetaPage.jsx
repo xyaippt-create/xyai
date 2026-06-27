@@ -25,6 +25,7 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
   const [outputDir, setOutputDir] = useState(DEFAULT_OUTPUT_DIR);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
+  const [feedbackResult, setFeedbackResult] = useState(null);
   const [error, setError] = useState("");
 
   const summary = result?.data || {};
@@ -52,6 +53,7 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
     setRunning(true);
     setError("");
     setResult(null);
+    setFeedbackResult(null);
     try {
       const response = await fetch(`${API_BASE}/api/beta/safe-1080p/enhance`, {
         method: "POST",
@@ -71,6 +73,27 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
       setError(requestError.message || "无法连接 Beta 接口");
     } finally {
       setRunning(false);
+    }
+  };
+
+  const exportFeedbackPackage = async () => {
+    if (!summary?.output_dir) return;
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/beta/safe-1080p/feedback-package`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json;charset=UTF-8" },
+        body: JSON.stringify({
+          run_result: summary,
+        }),
+      });
+      const payload = await response.json();
+      setFeedbackResult(payload?.data || payload);
+      if (!response.ok || payload.success === false) {
+        setError(payload.message || "反馈包导出失败");
+      }
+    } catch (requestError) {
+      setError(requestError.message || "无法导出测试反馈包");
     }
   };
 
@@ -123,6 +146,18 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
             {running ? "运行中..." : "开始安全增强 Beta"}
           </button>
 
+          <button
+            type="button"
+            onClick={exportFeedbackPackage}
+            disabled={!summary?.output_dir || running}
+            className="mt-3 w-full rounded-md border border-[#7af4df]/45 px-4 py-3 text-sm font-semibold text-[#7af4df] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/12 disabled:text-white/30"
+          >
+            导出测试反馈包
+          </button>
+          <p className="mt-2 text-xs leading-5 text-white/42">
+            生成本次测试的运行报告、错误日志、系统环境和对比图，用于发送给开发者定位问题。
+          </p>
+
           <div className="mt-6">
             <div className="text-xs uppercase tracking-[0.22em] text-white/42">功能边界</div>
             <div className="mt-3 space-y-2">
@@ -157,6 +192,7 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
             <ResultLine label="生成 contact sheet" value={hasContactSheet ? `是，${processed} 张` : "否"} />
             <ResultLine label="跳过图片" value={skipped ? `${skipped} 张` : "无"} />
             <ResultLine label="BLOCKED 原因" value={summary.reason || result?.message || ""} />
+            <ResultLine label="测试反馈包" value={feedbackResult?.feedback_zip_path || ""} />
           </div>
 
           <div className="mt-5 grid gap-3">

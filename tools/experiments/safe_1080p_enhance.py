@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -258,6 +259,8 @@ def relative_or_name(path: Path, root: Path) -> str:
 
 
 def process(args: argparse.Namespace) -> dict[str, object]:
+    started_at = datetime.now().isoformat(timespec="seconds")
+    start_time = time.perf_counter()
     input_dir = args.input_dir
     tool_dir = args.tool_dir
     exe = find_exe(tool_dir)
@@ -278,6 +281,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     processed: list[dict[str, object]] = []
 
     for image_path in inputs:
+        image_start = time.perf_counter()
         original = read_image(image_path)
         image_type, reason, metrics = classify_image(image_path, original)
         base = image_path.stem
@@ -305,15 +309,20 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 "after": relative_or_name(after_path, run_dir),
                 "enhanced": relative_or_name(enhanced_path, run_dir),
                 "contact_sheet": relative_or_name(contact_path, run_dir),
+                "elapsed_seconds": round(time.perf_counter() - image_start, 3),
             }
         )
 
+    finished_at = datetime.now().isoformat(timespec="seconds")
     summary = {
         "status": "ok" if processed else "blocked",
         "mode": args.mode,
         "model": args.model,
         "input_dir": str(input_dir),
         "output_dir": str(run_dir),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": round(time.perf_counter() - start_time, 3),
         "processed_count": len(processed),
         "skipped_count": len(skipped),
         "processed": processed,

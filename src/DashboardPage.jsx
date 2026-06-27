@@ -551,6 +551,7 @@ export default function DashboardPage() {
   const [activeMode, setActiveMode] = useState("fidelity");
   const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
   const [safeBetaResult, setSafeBetaResult] = useState(null);
+  const [safeBetaFeedbackResult, setSafeBetaFeedbackResult] = useState(null);
   const [appliedOutputDir, setAppliedOutputDir] = useState("");
   const [defaultOutputDir, setDefaultOutputDir] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
@@ -690,6 +691,7 @@ export default function DashboardPage() {
     processingRef.current = true;
     setIsProcessingQueue(true);
     setCurrentIndex(1);
+    setSafeBetaFeedbackResult(null);
     setSafeBetaResult({
       status: "RUNNING",
       processed_count: 0,
@@ -717,6 +719,12 @@ export default function DashboardPage() {
         output_dir: data.output_dir || "",
         has_enhanced: hasEnhanced,
         has_contact_sheet: hasContactSheet,
+        input_dir: data.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
+        processed: processedItems,
+        skipped: Array.isArray(data.skipped) ? data.skipped : [],
+        started_at: data.started_at || "",
+        finished_at: data.finished_at || "",
+        elapsed_seconds: data.elapsed_seconds || "",
         message: payload.message || "",
       });
       setNotice(`1080P安全增强 Beta 完成：${payload.verification_result || data.verification_result || "PASS_WITH_NOTES"}`);
@@ -736,6 +744,37 @@ export default function DashboardPage() {
       setIsProcessingQueue(false);
       setCurrentIndex(0);
       setActiveScreen("dashboard");
+    }
+  };
+
+  const exportSafeBetaFeedbackPackage = async () => {
+    if (!safeBetaResult?.output_dir) return;
+    try {
+      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/feedback-package`, {
+        run_result: {
+          status: "ok",
+          verification_result: safeBetaResult.status,
+          mode: "safe_1080p",
+          input_dir: safeBetaResult.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
+          output_dir: safeBetaResult.output_dir,
+          processed_count: safeBetaResult.processed_count || 0,
+          skipped_count: safeBetaResult.skipped_count || 0,
+          processed: safeBetaResult.processed || [],
+          skipped: safeBetaResult.skipped || [],
+          started_at: safeBetaResult.started_at || "",
+          finished_at: safeBetaResult.finished_at || "",
+          elapsed_seconds: safeBetaResult.elapsed_seconds || "",
+        },
+      });
+      setSafeBetaFeedbackResult(payload?.data || payload);
+      setNotice("测试反馈包已导出。");
+    } catch (error) {
+      setSafeBetaFeedbackResult({
+        feedback_bundle_status: "BLOCKED",
+        feedback_zip_path: "",
+        feedback_bundle_error: error.message,
+      });
+      setNotice(`测试反馈包导出失败：${error.message}`);
     }
   };
 
@@ -1087,6 +1126,22 @@ export default function DashboardPage() {
                   <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={exportSafeBetaFeedbackPackage}
+                disabled={!safeBetaResult?.output_dir || isProcessingQueue}
+                className="mt-3 w-full rounded border border-[#6feaf0]/50 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
+              >
+                导出测试反馈包
+              </button>
+              <p className="mt-2 text-[11px] leading-5 text-white/42">
+                生成本次测试的运行报告、错误日志、系统环境和对比图，用于发送给开发者定位问题。
+              </p>
+              {safeBetaFeedbackResult?.feedback_zip_path ? (
+                <p className="mt-2 break-all font-mono text-[11px] leading-5 text-[#64748b]">
+                  {safeBetaFeedbackResult.feedback_zip_path}
+                </p>
+              ) : null}
               <div className="mt-3 space-y-1.5">
                 {safeBetaBoundaryItems.map((item) => (
                   <div key={item} className="rounded border border-white/8 bg-black/15 px-2 py-1.5 text-[11px] leading-5 text-white/52">

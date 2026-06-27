@@ -1525,6 +1525,41 @@ def build_web_app():
             "data": result,
         }
 
+    @app.post("/api/beta/safe-1080p/feedback-package")
+    async def beta_safe_1080p_feedback_package(payload: dict = Body(default_factory=dict)):
+        from engine.diagnostics.safe_1080p_feedback_package import generate_safe_1080p_feedback_package
+
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            run_result = payload.get("run_result") if isinstance(payload.get("run_result"), dict) else None
+            if not run_result:
+                run_result = await asyncio.to_thread(run_safe_1080p_beta, payload)
+            feedback_dir_value = payload.get("feedback_dir") or None
+            feedback_dir = Path(str(feedback_dir_value)).expanduser() if feedback_dir_value else None
+            package = await asyncio.to_thread(
+                generate_safe_1080p_feedback_package,
+                run_result,
+                PROJECT_ROOT,
+                feedback_dir,
+            )
+        except Exception as exc:
+            package = {
+                "feedback_bundle_status": "BLOCKED",
+                "feedback_zip_path": "",
+                "feedback_bundle_error": str(exc),
+                "problem_code": "FAILED_FEEDBACK_ZIP",
+                "problem_stage": "反馈包生成",
+                "entries": [],
+            }
+        success = package.get("feedback_bundle_status") in {"PASS", "PASS_WITH_NOTES"}
+        return {
+            "code": 200 if success else 400,
+            "status": "success" if success else "blocked",
+            "success": success,
+            "message": "Diagnostic feedback package exported." if success else "Diagnostic feedback package blocked.",
+            "data": package,
+        }
+
     @app.post("/api/upload")
     async def upload_file(
         file: UploadFile = File(...),
