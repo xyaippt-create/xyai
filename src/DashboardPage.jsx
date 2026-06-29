@@ -217,6 +217,55 @@ function requestJson(method, url, body) {
   });
 }
 
+function requestBetaSafeEnhance(url, items) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append("mode", "safe_1080p");
+    formData.append("output_dir", DEFAULT_SAFE_BETA_OUTPUT_DIR);
+    formData.append("flat_output", "true");
+    formData.append("business_output", "true");
+    const selectedNames = items.map((item) => item.name || item.file?.name || "image.png");
+    formData.append("selected_file_names_encoded", encodeURIComponent(JSON.stringify(selectedNames)));
+    items.forEach((item, index) => {
+      const selectedName = selectedNames[index];
+      formData.append("selected_file_names", selectedName);
+      if (item?.file) formData.append("files", item.file, selectedName);
+    });
+    xhr.open("POST", url, true);
+    xhr.onload = () => {
+      let payload = {};
+      const rawText = xhr.responseText || "";
+      try {
+        payload = JSON.parse(rawText || "{}");
+      } catch (error) {
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error(`Beta request failed: HTTP ${xhr.status}${rawText ? ` - ${rawText.slice(0, 200)}` : ""}`));
+          return;
+        }
+        reject(new Error(`Beta response parse failed: ${error.message}`));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300 || payload.ok === false || payload.success === false || payload.status === "FAILED" || payload.status === "failed") {
+        reject(new Error(payload.error || payload.message || payload.stage || `Beta request failed: HTTP ${xhr.status}`));
+        return;
+      }
+      resolve(payload);
+    };
+    xhr.onerror = () => reject(new Error("Cannot connect to Beta API."));
+    xhr.send(formData);
+  });
+}
+
+const isBetaSuccess = (data) =>
+  data?.ok === true ||
+  data?.success === true ||
+  data?.status === "SUCCESS" ||
+  data?.verification_result === "PASS" ||
+  data?.code === 200 ||
+  Number(data?.processed_count || 0) > 0 ||
+  (Array.isArray(data?.enhanced_files) && data.enhanced_files.length > 0);
+
 function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, onProgress) {
   return new Promise((resolve, reject) => {
     const outputDirForRequest = (requestedOutputDir || "").trim();
@@ -758,6 +807,30 @@ export default function DashboardPage() {
       if (!betaItemIds.length) return;
       setFileQueue((prev) => prev.map((item) => (betaItemIds.includes(item.id) ? { ...item, ...patch } : item)));
     };
+    const setBetaQueueCompleted = (results, fallbackOutputPath, fallbackOutputName) => {
+      if (!betaItemIds.length) return;
+      setFileQueue((prev) =>
+        prev.map((item) => {
+          if (!betaItemIds.includes(item.id)) return item;
+          const mapped = results.find((row) => row.input_name === item.name) || results[0] || {};
+          const outputPath = mapped.output_path || fallbackOutputPath || "";
+          const outputName = mapped.output_name || fallbackOutputName || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
+          return {
+            ...item,
+            status: "completed",
+            progress: 100,
+            output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+            output_filename: outputName || "已生成",
+            output_path: outputPath,
+            final_delivery_status: "PASS_WITH_LIMITATION",
+            final_delivery_reason: "1080P安全增强 Beta 已生成，建议查看后使用。",
+            final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
+            error: "",
+            logs: ["处理完成"],
+          };
+        }),
+      );
+    };
     const setBetaStage = (progress, currentFile, message) => {
       setSafeBetaResult((prev) => (prev?.status === "RUNNING" ? { ...prev, progress, current_file: currentFile, message } : prev));
       setBetaQueuePatch({ status: "processing", progress, error: "", logs: [message], output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR, mode: PROCESSING_MODE_SAFE_BETA });
@@ -805,32 +878,49 @@ export default function DashboardPage() {
       window.setTimeout(() => setBetaStage(35, firstFileName || "正在执行 1080P安全增强", "正在执行 1080P安全增强，处理中请稍候"), 1000),
     ];
     try {
-      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/enhance`, {
-        input_dir: DEFAULT_SAFE_BETA_INPUT_DIR,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
-        mode: "safe_1080p",
-        flat_output: true,
-        business_output: true,
+      if (!betaItems.some((item) => item.file)) {
+        throw new Error("未收到当前选择的输入文件，已拒绝使用默认测试样本");
+      }
+      console.info("[Safe1080pBeta] request", {
+        frontend_selected_file_name: betaItems.map((item) => item.name),
+        request_payload: {
+          mode: "safe_1080p",
+          output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+          flat_output: true,
+          business_output: true,
+          files: betaItems.map((item) => item.name),
+        },
       });
+      const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems);
       const data = payload?.data || {};
+      if (!isBetaSuccess(payload) && !isBetaSuccess(data)) {
+        throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "Beta run failed");
+      }
+      const results = Array.isArray(payload.results) ? payload.results : Array.isArray(data.results) ? data.results : [];
+      const enhancedFiles = Array.isArray(payload.enhanced_files) ? payload.enhanced_files : Array.isArray(data.enhanced_files) ? data.enhanced_files : [];
       const processedItems = Array.isArray(data.processed) ? data.processed : [];
-      const enhancedCount = processedItems.filter((row) => Boolean(row.enhanced)).length;
+      const processedCount = Number(payload.processed_count ?? data.processed_count ?? results.length ?? enhancedFiles.length ?? 0);
+      const skippedCount = Number(payload.skipped_count ?? data.skipped_count ?? 0);
+      const enhancedCount = processedCount || enhancedFiles.length || processedItems.filter((row) => Boolean(row.enhanced || row.output_path)).length;
       const contactSheetCount = processedItems.filter((row) => Boolean(row.contact_sheet)).length;
-      const firstEnhanced = processedItems.find((row) => row.enhanced)?.enhanced || "";
+      const firstResult = results.find((row) => row.input_name === firstFileName) || results[0] || {};
+      const firstEnhanced = firstResult.output_path || enhancedFiles[0] || processedItems.find((row) => row.output_path)?.output_path || processedItems.find((row) => row.enhanced)?.enhanced || "";
       const firstOutputName = firstEnhanced ? firstEnhanced.split(/[\\/]/).pop() : "";
-      const resultStatus = payload.verification_result || data.verification_result || "PASS_WITH_NOTES";
+      const resultStatus = payload.verification_result || data.verification_result || "PASS";
       setSafeBetaResult({
         status: resultStatus,
         progress: 100,
-        current_file: processedItems[processedItems.length - 1]?.file || firstFileName || "处理完成",
-        processed_count: data.processed_count || 0,
+        current_file: firstResult.input_name || processedItems[processedItems.length - 1]?.file || firstFileName || "处理完成",
+        processed_count: processedCount,
         enhanced_count: enhancedCount,
         contact_sheet_count: contactSheetCount,
-        skipped_count: data.skipped_count || 0,
-        output_dir: data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        skipped_count: skippedCount,
+        output_dir: payload.output_dir || data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
         has_enhanced: enhancedCount > 0,
         has_contact_sheet: contactSheetCount > 0,
-        input_dir: data.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
+        input_dir: data.input_dir || "",
+        results,
+        enhanced_files: enhancedFiles,
         processed: processedItems,
         skipped: Array.isArray(data.skipped) ? data.skipped : [],
         started_at: data.started_at || "",
@@ -838,18 +928,7 @@ export default function DashboardPage() {
         elapsed_seconds: data.elapsed_seconds || Math.round((Date.now() - startedAt) / 1000),
         message: payload.message || "处理完成",
       });
-      setBetaQueuePatch({
-        status: "completed",
-        progress: 100,
-        output_dir: data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
-        output_filename: firstOutputName || "已生成",
-        output_path: firstEnhanced,
-        final_delivery_status: "PASS_WITH_LIMITATION",
-        final_delivery_reason: "1080P安全增强 Beta 已生成，建议查看后使用。",
-        final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
-        error: "",
-        logs: ["处理完成"],
-      });
+      setBetaQueueCompleted(results, firstEnhanced, firstOutputName);
       setNotice(`1080P安全增强 Beta 完成：${resultStatus}`);
     } catch (error) {
       setSafeBetaResult({

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime
@@ -21,6 +24,7 @@ import numpy as np
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
+BETA_TIMEOUT_SECONDS = 300
 DEFAULT_OUTPUT_DIR = Path("D:/影界文件/1080P安全增强输出")
 DEFAULT_DIAGNOSTIC_DIR = Path("D:/影界文件/影界测试反馈包")
 
@@ -36,7 +40,77 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flat-output", action="store_true")
     parser.add_argument("--business-output", action="store_true")
     parser.add_argument("--diagnostic-dir", type=Path, default=DEFAULT_DIAGNOSTIC_DIR)
+    parser.add_argument("--timeout-seconds", type=int, default=BETA_TIMEOUT_SECONDS)
     return parser.parse_args()
+
+
+class RealEsrganProcessError(RuntimeError):
+    def __init__(self, reason: str, message: str, returncode: int | str | None = None, stderr_tail: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.returncode = returncode
+        self.stderr_tail = stderr_tail
+
+
+def redact_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+    home = str(Path.home())
+    if home and text.lower().startswith(home.lower()):
+        text = "%USERPROFILE%" + text[len(home) :]
+    for sensitive, replacement in (
+        (os.environ.get("USERNAME") or os.environ.get("USER") or "", "%USERNAME%"),
+        (os.environ.get("COMPUTERNAME") or "", "%COMPUTERNAME%"),
+    ):
+        if sensitive:
+            text = text.replace(sensitive, replacement)
+    text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "%IPV4%", text)
+    text = re.sub(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", "%MAC%", text)
+    return text
+
+
+def redact_path(value: object) -> str:
+    return redact_text(value)
+
+
+def tail_text(value: object, limit: int = 1200) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value).strip()
+    return redact_text(text[-limit:])
+
+
+def emit_stage(stage_logger: object, stage: str, started: float, **fields: object) -> None:
+    payload = {
+        "stage": stage,
+        "input_path": redact_path(fields.get("input_path")),
+        "output_dir": redact_path(fields.get("output_dir")),
+        "current_file": fields.get("current_file") or "",
+        "flat_output": bool(fields.get("flat_output")),
+        "business_output": bool(fields.get("business_output")),
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "returncode": fields.get("returncode", ""),
+        "stderr_tail": tail_text(fields.get("stderr_tail")),
+        "error_message": tail_text(fields.get("error_message")),
+    }
+    if callable(stage_logger):
+        forwarded = dict(payload)
+        forwarded.pop("stage", None)
+        stage_logger(stage, **forwarded)
+        return
+    print("[SAFE_1080P_BETA] " + json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def write_optional_json(path: Path, payload: dict[str, object]) -> str:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return ""
+    except Exception as exc:
+        return tail_text(exc)
 
 
 def image_files(input_dir: Path) -> list[Path]:
@@ -234,7 +308,20 @@ def has_model_files(tool_dir: Path) -> bool:
     return any(item.suffix.lower() in {".param", ".bin"} for item in model_dir.rglob("*") if item.is_file())
 
 
-def run_realesrgan(exe: Path, tool_dir: Path, source: Path, output: Path, model: str, scale: str) -> None:
+def run_realesrgan(
+    exe: Path,
+    tool_dir: Path,
+    source: Path,
+    output: Path,
+    model: str,
+    scale: str,
+    timeout_seconds: int = BETA_TIMEOUT_SECONDS,
+    stage_logger: object = None,
+    started: float | None = None,
+    output_dir: Path | None = None,
+    flat_output: bool = False,
+    business_output: bool = False,
+) -> dict[str, object]:
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(exe),
@@ -249,11 +336,68 @@ def run_realesrgan(exe: Path, tool_dir: Path, source: Path, output: Path, model:
         "-f",
         "png",
     ]
-    completed = subprocess.run(command, cwd=str(tool_dir.resolve()), check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"Real-ESRGAN failed for {source.name}: {completed.stderr.strip() or completed.stdout.strip()}"
+    stage_started = started if started is not None else time.perf_counter()
+    emit_stage(
+        stage_logger,
+        "BETA_REALESRGAN_SUBPROCESS_START",
+        stage_started,
+        input_path=source,
+        output_dir=output_dir,
+        current_file=source.name,
+        flat_output=flat_output,
+        business_output=business_output,
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(tool_dir.resolve()),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        stderr_tail = tail_text(exc.stderr or exc.output)
+        emit_stage(
+            stage_logger,
+            "BETA_FAILED",
+            stage_started,
+            input_path=source,
+            output_dir=output_dir,
+            current_file=source.name,
+            flat_output=flat_output,
+            business_output=business_output,
+            returncode="timeout",
+            stderr_tail=stderr_tail,
+            error_message=f"Real-ESRGAN timed out after {timeout_seconds}s",
+        )
+        raise RealEsrganProcessError(
+            "realesrgan_timeout",
+            f"Real-ESRGAN timed out after {timeout_seconds}s for {source.name}",
+            "timeout",
+            stderr_tail,
+        ) from exc
+    stderr_tail = tail_text(completed.stderr or completed.stdout)
+    emit_stage(
+        stage_logger,
+        "BETA_REALESRGAN_SUBPROCESS_DONE",
+        stage_started,
+        input_path=source,
+        output_dir=output_dir,
+        current_file=source.name,
+        flat_output=flat_output,
+        business_output=business_output,
+        returncode=completed.returncode,
+        stderr_tail=stderr_tail,
+    )
+    if completed.returncode != 0:
+        raise RealEsrganProcessError(
+            "realesrgan_failed",
+            f"Real-ESRGAN failed for {source.name}: {stderr_tail}",
+            completed.returncode,
+            stderr_tail,
+        )
+    return {"returncode": completed.returncode, "stderr_tail": stderr_tail}
 
 
 def relative_or_name(path: Path, root: Path) -> str:
@@ -282,18 +426,60 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     start_time = time.perf_counter()
     input_dir = args.input_dir
     tool_dir = args.tool_dir
+    stage_logger = getattr(args, "stage_logger", None)
+    business_output = bool(getattr(args, "business_output", False))
+    flat_output = bool(getattr(args, "flat_output", False) or business_output)
+    timeout_seconds = int(getattr(args, "timeout_seconds", BETA_TIMEOUT_SECONDS) or BETA_TIMEOUT_SECONDS)
+    explicit_input_files = [
+        Path(item)
+        for item in (getattr(args, "input_files", None) or [])
+        if str(item or "").strip()
+    ]
     exe = find_exe(tool_dir)
     if exe is None:
+        emit_stage(
+            stage_logger,
+            "BETA_FAILED",
+            start_time,
+            input_path=input_dir,
+            output_dir=args.output_dir,
+            flat_output=flat_output,
+            business_output=business_output,
+            error_message="missing_realesrgan_exe",
+        )
         return {"status": "blocked", "reason": "missing_realesrgan_exe"}
     if not has_model_files(tool_dir):
+        emit_stage(
+            stage_logger,
+            "BETA_FAILED",
+            start_time,
+            input_path=input_dir,
+            output_dir=args.output_dir,
+            flat_output=flat_output,
+            business_output=business_output,
+            error_message="missing_realesrgan_model_files",
+        )
         return {"status": "blocked", "reason": "missing_realesrgan_model_files"}
 
-    inputs = image_files(input_dir)
+    if flat_output or business_output:
+        inputs = [item for item in explicit_input_files if item.exists() and item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS]
+    else:
+        inputs = image_files(input_dir)
     if not inputs:
-        return {"status": "blocked", "reason": "missing_input_images"}
+        reason = "missing_explicit_input_files" if flat_output or business_output else "missing_input_images"
+        emit_stage(
+            stage_logger,
+            "BETA_FAILED",
+            start_time,
+            input_path=input_dir,
+            output_dir=args.output_dir,
+            flat_output=flat_output,
+            business_output=business_output,
+            error_message=reason,
+        )
+        return {"status": "failed", "verification_result": "FAILED", "reason": reason, "processed_count": 0, "skipped_count": 0}
 
     run_token = datetime.now().strftime("%H%M%S")
-    flat_output = bool(getattr(args, "flat_output", False) or getattr(args, "business_output", False))
     if flat_output:
         run_dir = args.output_dir
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -309,11 +495,25 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         enhanced_dir = run_dir / "enhanced"
         contact_dir = run_dir / "contact_sheet"
         summary_dir = run_dir
+    emit_stage(
+        stage_logger,
+        "BETA_ENHANCE_START",
+        start_time,
+        input_path=input_dir,
+        output_dir=run_dir,
+        current_file=inputs[0].name,
+        flat_output=flat_output,
+        business_output=business_output,
+    )
     skipped: list[dict[str, object]] = []
     processed: list[dict[str, object]] = []
+    warnings: list[str] = []
+    failure: Exception | None = None
+    failed_file = ""
 
     try:
         for image_path in inputs:
+            failed_file = image_path.name
             image_start = time.perf_counter()
             original = read_image(image_path)
             image_type, reason, metrics = classify_image(image_path, original)
@@ -330,30 +530,168 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
                 contact_path = contact_dir / f"{base}_contact_sheet.png"
 
-            run_realesrgan(exe, tool_dir, image_path, after_path, args.model, args.scale)
+            run_realesrgan(
+                exe,
+                tool_dir,
+                image_path,
+                after_path,
+                args.model,
+                args.scale,
+                timeout_seconds=timeout_seconds,
+                stage_logger=stage_logger,
+                started=start_time,
+                output_dir=run_dir,
+                flat_output=flat_output,
+                business_output=business_output,
+            )
             model_output = read_image(after_path)
             blend35 = linear_blend(original, model_output, 0.35)
             protected35 = protected_35_blend(original, model_output)
 
+            emit_stage(
+                stage_logger,
+                "BETA_FLAT_OUTPUT_WRITE_START",
+                start_time,
+                input_path=image_path,
+                output_dir=run_dir,
+                current_file=image_path.name,
+                flat_output=flat_output,
+                business_output=business_output,
+            )
             write_image(enhanced_path, protected35)
-            make_contact_sheet(original, blend35, protected35, contact_path)
+            emit_stage(
+                stage_logger,
+                "BETA_FLAT_OUTPUT_WRITE_DONE",
+                start_time,
+                input_path=image_path,
+                output_dir=run_dir,
+                current_file=image_path.name,
+                flat_output=flat_output,
+                business_output=business_output,
+            )
+            emit_stage(
+                stage_logger,
+                "BETA_CONTACT_SHEET_START",
+                start_time,
+                input_path=image_path,
+                output_dir=run_dir,
+                current_file=image_path.name,
+                flat_output=flat_output,
+                business_output=business_output,
+            )
+            contact_sheet_value = ""
+            try:
+                make_contact_sheet(original, blend35, protected35, contact_path)
+                contact_sheet_value = relative_or_name(contact_path, run_dir)
+            except Exception as exc:
+                warning = f"contact_sheet_write_failed: {tail_text(exc)}"
+                warnings.append(warning)
+                emit_stage(
+                    stage_logger,
+                    "BETA_CONTACT_SHEET_DONE",
+                    start_time,
+                    input_path=image_path,
+                    output_dir=run_dir,
+                    current_file=image_path.name,
+                    flat_output=flat_output,
+                    business_output=business_output,
+                    error_message=warning,
+                )
+            else:
+                emit_stage(
+                    stage_logger,
+                    "BETA_CONTACT_SHEET_DONE",
+                    start_time,
+                    input_path=image_path,
+                    output_dir=run_dir,
+                    current_file=image_path.name,
+                    flat_output=flat_output,
+                    business_output=business_output,
+                )
             processed.append(
                 {
                     "file": image_path.name,
+                    "input_name": image_path.name,
+                    "output_name": enhanced_path.name,
+                    "output_path": str(enhanced_path),
                     "type": image_type,
                     "reason": reason,
                     "metrics": metrics,
                     "after": "" if flat_output else relative_or_name(after_path, run_dir),
                     "enhanced": relative_or_name(enhanced_path, run_dir),
-                    "contact_sheet": relative_or_name(contact_path, run_dir),
+                    "contact_sheet": contact_sheet_value,
                     "elapsed_seconds": round(time.perf_counter() - image_start, 3),
                 }
             )
+    except Exception as exc:
+        failure = exc
+        emit_stage(
+            stage_logger,
+            "BETA_FAILED",
+            start_time,
+            input_path=input_dir,
+            output_dir=run_dir,
+            current_file=failed_file,
+            flat_output=flat_output,
+            business_output=business_output,
+            returncode=getattr(exc, "returncode", ""),
+            stderr_tail=getattr(exc, "stderr_tail", ""),
+            error_message=str(exc),
+        )
     finally:
         if flat_output:
             temp_context.cleanup()
 
     finished_at = datetime.now().isoformat(timespec="seconds")
+    if failure is not None:
+        summary = {
+            "status": "failed",
+            "verification_result": "FAILED",
+            "reason": getattr(failure, "reason", "safe_1080p_failed"),
+            "error_message": tail_text(str(failure)),
+            "returncode": getattr(failure, "returncode", ""),
+            "stderr_tail": tail_text(getattr(failure, "stderr_tail", "")),
+            "failed_file": failed_file,
+            "mode": args.mode,
+            "model": args.model,
+            "input_dir": str(input_dir),
+            "output_dir": str(run_dir),
+            "diagnostic_dir": str(summary_dir.parent if flat_output else run_dir),
+            "flat_output": flat_output,
+            "business_output": business_output,
+            "timeout_seconds": timeout_seconds,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "elapsed_seconds": round(time.perf_counter() - start_time, 3),
+            "processed_count": len(processed),
+            "skipped_count": len(skipped),
+            "processed": processed,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+        summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
+        summary_path = summary_dir / summary_name
+        summary["summary_path"] = str(summary_path)
+        summary_error = write_optional_json(summary_path, summary)
+        if summary_error:
+            summary["summary_path"] = ""
+            summary["summary_write_error"] = summary_error
+            warnings.append(f"summary_write_failed: {summary_error}")
+        emit_stage(
+            stage_logger,
+            "BETA_RESPONSE_READY",
+            start_time,
+            input_path=input_dir,
+            output_dir=run_dir,
+            current_file=failed_file,
+            flat_output=flat_output,
+            business_output=business_output,
+            returncode=summary.get("returncode", ""),
+            stderr_tail=summary.get("stderr_tail", ""),
+            error_message=summary.get("error_message", ""),
+        )
+        return summary
+
     summary = {
         "status": "ok" if processed else "blocked",
         "mode": args.mode,
@@ -362,6 +700,8 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "output_dir": str(run_dir),
         "diagnostic_dir": str(summary_dir.parent if flat_output else run_dir),
         "flat_output": flat_output,
+        "business_output": business_output,
+        "timeout_seconds": timeout_seconds,
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_seconds": round(time.perf_counter() - start_time, 3),
@@ -369,12 +709,27 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "skipped_count": len(skipped),
         "processed": processed,
         "skipped": skipped,
+        "warnings": warnings,
     }
     summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
     summary_path = summary_dir / summary_name
     summary["summary_path"] = str(summary_path)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_error = write_optional_json(summary_path, summary)
+    if summary_error:
+        summary["summary_path"] = ""
+        summary["summary_write_error"] = summary_error
+        warnings.append(f"summary_write_failed: {summary_error}")
+    emit_stage(
+        stage_logger,
+        "BETA_RESPONSE_READY",
+        start_time,
+        input_path=input_dir,
+        output_dir=run_dir,
+        current_file=processed[-1]["file"] if processed else "",
+        flat_output=flat_output,
+        business_output=business_output,
+        error_message="" if processed else summary.get("status"),
+    )
     return summary
 
 
