@@ -189,6 +189,34 @@ def _problem_from_result(run_result: dict[str, Any], path_checks: dict[str, Any]
     return "PASS", "无", "PASS"
 
 
+def _has_beta_runtime_context(run_result: dict[str, Any]) -> bool:
+    return any(
+        bool(run_result.get(key))
+        for key in (
+            "beta_run_id",
+            "results",
+            "enhanced_files",
+            "processed",
+            "skipped",
+            "current_file",
+            "error",
+            "message",
+            "stage",
+        )
+    )
+
+
+def _minimal_problem_from_result(run_result: dict[str, Any]) -> tuple[str, str, str]:
+    status = str(run_result.get("verification_result") or run_result.get("status") or "").upper()
+    processed_count = int(run_result.get("processed_count") or 0)
+    skipped_count = int(run_result.get("skipped_count") or 0)
+    if status in {"PASS", "SUCCESS", "COMPLETED"} or processed_count > 0:
+        return "PASS_WITH_NOTES", "Dashboard Beta", "PASS_WITH_NOTES"
+    if skipped_count > 0:
+        return "PASS_WITH_NOTES", "Dashboard Beta", "PASS_WITH_NOTES"
+    return "PASS_WITH_NOTES", str(run_result.get("stage") or "Dashboard Beta"), "FAILED_MODEL_RUN"
+
+
 def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Path) -> str:
     output = io.StringIO()
     writer = csv.DictWriter(
@@ -231,6 +259,28 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "elapsed_seconds": item.get("elapsed_seconds", ""),
                 "quality_note": "35% protected candidate generated; inspect contact sheet before use.",
                 "risk_tags": ";".join(risk_tags),
+                "error_message": "",
+            }
+        )
+    for item in run_result.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        input_name = str(item.get("input_name") or "")
+        output_path = str(item.get("output_path") or "")
+        writer.writerow(
+            {
+                "file_name": input_name or str(item.get("output_name") or ""),
+                "status": "PASS" if output_path else "MISSING_OUTPUT",
+                "problem_code": "PASS_WITH_NOTES",
+                "input_size": _safe_stat(input_dir / input_name) if input_name else 0,
+                "output_size": _safe_stat(Path(output_path)) if output_path else 0,
+                "mode": run_result.get("mode") or "safe_1080p",
+                "strategy": "35% protected",
+                "enhanced_generated": bool(output_path),
+                "contact_sheet_generated": False,
+                "elapsed_seconds": run_result.get("elapsed_seconds", ""),
+                "quality_note": "Dashboard Beta output mapping",
+                "risk_tags": "",
                 "error_message": "",
             }
         )
@@ -322,7 +372,8 @@ def generate_safe_1080p_feedback_package(
     feedback_dir: Path | None = None,
 ) -> dict[str, Any]:
     project_root = Path(project_root)
-    input_dir = Path(str(run_result.get("input_dir") or ""))
+    raw_input_dir = str(run_result.get("input_dir") or "").strip()
+    input_dir = Path(raw_input_dir) if raw_input_dir else Path()
     output_dir = Path(str(run_result.get("output_dir") or ""))
     if not output_dir.is_absolute():
         output_dir = (project_root / output_dir).resolve()
@@ -330,8 +381,23 @@ def generate_safe_1080p_feedback_package(
     feedback_dir.mkdir(parents=True, exist_ok=True)
 
     path_checks = _path_checks(input_dir, output_dir, feedback_dir)
+    if not raw_input_dir:
+        path_checks.update(
+            {
+                "input_dir_exists": False,
+                "input_image_count": 0,
+                "input_dir_readable": False,
+                "input_dir_error": "Dashboard multipart run did not provide a persistent input directory.",
+            }
+        )
     tool_checks = _tool_checks(project_root)
-    status, problem_stage, problem_code = _problem_from_result(run_result, path_checks, tool_checks)
+    minimal_package = _has_beta_runtime_context(run_result) and (
+        not path_checks["input_dir_exists"] or path_checks["input_image_count"] <= 0
+    )
+    if minimal_package:
+        status, problem_stage, problem_code = _minimal_problem_from_result(run_result)
+    else:
+        status, problem_stage, problem_code = _problem_from_result(run_result, path_checks, tool_checks)
     env = _environment(project_root, input_dir, output_dir, feedback_dir, run_result.get("mode") or "safe_1080p")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_path = feedback_dir / f"HDDE_V046_测试反馈包_{timestamp}.zip"
@@ -354,7 +420,11 @@ def generate_safe_1080p_feedback_package(
         "started_at": run_result.get("started_at") or "",
         "finished_at": run_result.get("finished_at") or _now_iso(),
         "elapsed_seconds": run_result.get("elapsed_seconds", ""),
-        "notes": ["Original images and enhanced outputs are not included by default."],
+        "minimal_package": minimal_package,
+        "notes": [
+            "Original images and enhanced outputs are not included by default.",
+            "Minimal package generated from Dashboard Beta runtime context." if minimal_package else "",
+        ],
         **env,
         **tool_checks,
         **path_checks,
@@ -371,6 +441,7 @@ def generate_safe_1080p_feedback_package(
         "generate_contact_sheet": True,
         "include_original_images": False,
         "include_enhanced_outputs": False,
+        "minimal_package": minimal_package,
     }
     batch_report = {
         "version": "HDDE_V046_safe_1080p_beta_batch_report",
@@ -438,6 +509,7 @@ def generate_safe_1080p_feedback_package(
         "problem_stage": problem_stage,
         "problem_code": problem_code,
         "entries": entries,
+        "minimal_package": minimal_package,
         "contains_original_images": False,
         "contains_enhanced_outputs": False,
         "contains_contact_sheets": any(item.startswith("contact_sheets/") for item in entries),

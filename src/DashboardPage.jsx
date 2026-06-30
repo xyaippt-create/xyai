@@ -137,6 +137,16 @@ function readSafeBetaCount(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function firstSafeBetaOutputPath(item, result) {
+  if (item?.output_path) return item.output_path;
+  const results = Array.isArray(result?.results) ? result.results : [];
+  const mapped = item?.name ? results.find((row) => row?.input_name === item.name) : null;
+  if (mapped?.output_path) return mapped.output_path;
+  if (results[0]?.output_path) return results[0].output_path;
+  const enhancedFiles = Array.isArray(result?.enhanced_files) ? result.enhanced_files : [];
+  return enhancedFiles[0] || "";
+}
+
 function makeQueueId(file) {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}_${file.name}`;
 }
@@ -1190,10 +1200,17 @@ export default function DashboardPage() {
           status: "ok",
           verification_result: safeBetaResult.status,
           mode: "safe_1080p",
-          input_dir: safeBetaResult.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
+          input_dir: safeBetaResult.input_dir || "",
           output_dir: safeBetaResult.output_dir,
           processed_count: safeBetaResult.processed_count || 0,
           skipped_count: safeBetaResult.skipped_count || 0,
+          beta_run_id: safeBetaResult.beta_run_id || "",
+          current_file: safeBetaResult.current_file || activeItem?.name || "",
+          stage: safeBetaResult.stage || "",
+          error: safeBetaResult.message || activeItem?.error || "",
+          message: safeBetaResult.message || "",
+          results: safeBetaResult.results || [],
+          enhanced_files: safeBetaResult.enhanced_files || [],
           processed: safeBetaResult.processed || [],
           skipped: safeBetaResult.skipped || [],
           started_at: safeBetaResult.started_at || "",
@@ -1349,12 +1366,20 @@ export default function DashboardPage() {
   };
 
   const selectForCompare = (item) => {
+    if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
+      setNotice("Beta 对比暂未接入标准对比页，请打开输出目录查看原图与增强图。");
+      return;
+    }
     if (!item?.final_output_url) return;
     setActiveItemId(item.id);
     setActiveScreen("image_compare");
   };
 
   const selectForReport = (item) => {
+    if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
+      setNotice("Beta 报告暂未接入标准质量报告页，请使用技术详情中的测试反馈包。");
+      return;
+    }
     if (!item?.task_report && !item?.debug_quality) return;
     setActiveItemId(item.id);
     setActiveScreen("quality_report");
@@ -1378,17 +1403,26 @@ export default function DashboardPage() {
   };
 
   const handleOpenFinalOutput = (item) => {
+    if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
+      setNotice("Beta 成品为本地文件，请使用“打开当前目录”或复制成品路径查看。");
+      return;
+    }
     if (!item?.final_output_url) return;
     window.open(item.final_output_url, "_blank", "noopener,noreferrer");
   };
 
   const handleCopyFinalOutputUrl = async (item) => {
-    if (!item?.final_output_url) return;
+    const betaPath = item?.mode === PROCESSING_MODE_SAFE_BETA ? firstSafeBetaOutputPath(item, safeBetaResult) : "";
+    const value = betaPath || item?.final_output_url || "";
+    if (!value) {
+      setNotice(item?.mode === PROCESSING_MODE_SAFE_BETA ? "当前 Beta 任务还没有可复制的成品路径。" : "当前任务还没有可复制的成品映射路径。");
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(item.final_output_url);
-      setNotice("已复制成品映射 URL。");
+      await navigator.clipboard.writeText(value);
+      setNotice(betaPath ? "已复制 Beta 成品本地路径。" : "已复制成品映射 URL。");
     } catch (error) {
-      setNotice(error.message || "复制成品映射 URL 失败。");
+      setNotice(error.message || "复制成品路径失败。");
     }
   };
 
@@ -1490,6 +1524,9 @@ export default function DashboardPage() {
           ? "处理完成"
           : "等待任务";
   const deliveryActionItem = activeItem?.status === "completed" ? activeItem : completedItems[completedItems.length - 1] || null;
+  const betaActionItem = isSafeBetaSelected ? deliveryActionItem || activeItem : null;
+  const safeBetaPrimaryOutputPath = isSafeBetaSelected ? firstSafeBetaOutputPath(betaActionItem, safeBetaResult) : "";
+  const canCopyDeliveryPath = isSafeBetaSelected ? Boolean(safeBetaPrimaryOutputPath) : Boolean(deliveryActionItem?.final_output_url);
 
   return (
     <section
@@ -1803,8 +1840,24 @@ export default function DashboardPage() {
                         </td>
                         <td className="space-x-2 px-3 py-2 text-center">
                           <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
-                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]">查看对比</button>
-                          <button type="button" disabled={item.status !== "completed"} onClick={() => selectForReport(item)} className="text-[11px] text-[#64748b] transition-colors hover:text-[#94a3b8] disabled:cursor-not-allowed disabled:text-[#475569]">报告</button>
+                          <button
+                            type="button"
+                            disabled={item.status !== "completed" || item.mode === PROCESSING_MODE_SAFE_BETA}
+                            title={item.mode === PROCESSING_MODE_SAFE_BETA ? "Beta 暂未接入标准对比页，请打开输出目录查看增强图。" : ""}
+                            onClick={() => selectForCompare(item)}
+                            className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]"
+                          >
+                            查看对比
+                          </button>
+                          <button
+                            type="button"
+                            disabled={item.status !== "completed" || item.mode === PROCESSING_MODE_SAFE_BETA}
+                            title={item.mode === PROCESSING_MODE_SAFE_BETA ? "Beta 暂未接入标准质量报告页，请导出测试反馈包。" : ""}
+                            onClick={() => selectForReport(item)}
+                            className="text-[11px] text-[#64748b] transition-colors hover:text-[#94a3b8] disabled:cursor-not-allowed disabled:text-[#475569]"
+                          >
+                            报告
+                          </button>
                         </td>
                       </tr>
                     ))
@@ -1964,32 +2017,48 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="space-y-2 border-t border-[#1c1f26]/30 pt-2">
-              <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleOpenFinalOutput(deliveryActionItem)} className="flex w-full items-center justify-center gap-2 rounded-sm bg-[#10b981] px-4 py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569] disabled:shadow-none">
-                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
-                  <path d="M12 5v13M5 12l7 7 7-7" />
-                </svg>
-                <span>下载成品高清图片</span>
-              </button>
-              <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleCopyFinalOutputUrl(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition-colors hover:bg-[#2d3139] disabled:cursor-not-allowed disabled:text-[#475569]">
+              {!isSafeBetaSelected ? (
+                <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleOpenFinalOutput(deliveryActionItem)} className="flex w-full items-center justify-center gap-2 rounded-sm bg-[#10b981] px-4 py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569] disabled:shadow-none">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
+                    <path d="M12 5v13M5 12l7 7 7-7" />
+                  </svg>
+                  <span>下载成品高清图片</span>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={!canCopyDeliveryPath}
+                title={isSafeBetaSelected && !safeBetaPrimaryOutputPath ? "Beta 尚未生成可复制的本地成品路径。" : ""}
+                onClick={() => handleCopyFinalOutputUrl(isSafeBetaSelected ? betaActionItem : deliveryActionItem)}
+                className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition-colors hover:bg-[#2d3139] disabled:cursor-not-allowed disabled:text-[#475569]"
+              >
                 <svg className="h-3.5 w-3.5 text-[#64748b] transition-colors group-hover:text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
                   <rect x="9" y="9" width="13" height="13" rx="1" />
                   <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
                 </svg>
-                <span>复制成品映射路径</span>
+                <span>{isSafeBetaSelected ? "复制 Beta 成品路径" : "复制成品映射路径"}</span>
               </button>
-              <button type="button" disabled={!deliveryActionItem?.taskId} onClick={() => handleCreateFeedbackBundle(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
-                <svg className="animate-spin-slow h-3.5 w-3.5 text-[#856404] transition-colors group-hover:text-[#ffc107]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" aria-hidden="true">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                </svg>
-                <span>生成系统脱敏诊断包</span>
-              </button>
-              <button type="button" disabled={!fileQueue.length} onClick={handleDownloadBatchReport} className="w-full rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/50 px-4 py-2 text-[11px] font-medium tracking-wide text-[#94a3b8] transition-colors hover:border-[#00ffcc]/30 hover:text-[#00ffcc] disabled:cursor-not-allowed disabled:text-[#475569]">
-                生成 batch_report.json
-              </button>
+              {!isSafeBetaSelected ? (
+                <>
+                  <button type="button" disabled={!deliveryActionItem?.taskId} onClick={() => handleCreateFeedbackBundle(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
+                    <svg className="animate-spin-slow h-3.5 w-3.5 text-[#856404] transition-colors group-hover:text-[#ffc107]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                    <span>生成系统脱敏诊断包</span>
+                  </button>
+                  <button type="button" disabled={!fileQueue.length} onClick={handleDownloadBatchReport} className="w-full rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/50 px-4 py-2 text-[11px] font-medium tracking-wide text-[#94a3b8] transition-colors hover:border-[#00ffcc]/30 hover:text-[#00ffcc] disabled:cursor-not-allowed disabled:text-[#475569]">
+                    生成 batch_report.json
+                  </button>
+                </>
+              ) : (
+                <p className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 px-3 py-2 text-[10px] leading-relaxed text-[#64748b]">
+                  Beta 不写入普通任务注册表，系统诊断包与 batch_report 已移入技术详情/测试反馈包。
+                </p>
+              )}
             </div>
             <p className="border-t border-[#1c1f26]/30 pt-2 text-[10px] leading-relaxed text-[#475569]">
-              成品质检仅依据后端解算映射 URL，不读取本地物理路径。
+              {isSafeBetaSelected ? "Beta 成品使用本地 output_path / output_dir，不依赖普通任务映射 URL。" : "成品质检仅依据后端解算映射 URL，不读取本地物理路径。"}
             </p>
           </div>
         </section>
