@@ -13,6 +13,7 @@ const PROCESSING_MODE_STANDARD = "standard";
 const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
 const DEFAULT_SAFE_BETA_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
 const DEFAULT_SAFE_BETA_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
+const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
 
 const processingModeOptions = [
   {
@@ -28,12 +29,10 @@ const processingModeOptions = [
 ];
 
 const safeBetaBoundaryItems = [
-  "当前仅建议用于中文商业非人像图",
-  "适合中文信息图、产品图、文旅地图、城市科技主视觉、PPT封面",
-  "人像 / 面部主体图暂不建议使用",
-  "不支持通用4K超分",
-  "不支持低清照片真实修复",
-  "输出结果需要人工查看后决定是否使用",
+  "不建议用于人像 / 面部主体图",
+  "不用于通用 4K 超分",
+  "不用于低清照片真实修复",
+  "输出结果建议人工查看后使用",
 ];
 
 const DECOR_LABEL = {
@@ -58,6 +57,7 @@ const statusText = {
   processing: "处理中",
   completed: "已生成",
   failed: "失败",
+  need_reselect: "需重新选择",
 };
 
 const statusColor = {
@@ -66,6 +66,7 @@ const statusColor = {
   processing: "#6feaf0",
   completed: "#8be6b1",
   failed: "#ff8a8a",
+  need_reselect: "#f0c36f",
 };
 
 const deliveryStatusLabel = {
@@ -114,8 +115,60 @@ function formatFileSize(file) {
   return `${(file.size / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function formatSafeBetaStatus(status) {
+  const normalized = String(status || "WAITING").toUpperCase();
+  if (["PASS", "SUCCESS", "COMPLETED"].includes(normalized)) return "处理完成";
+  if (["RUNNING", "PROCESSING"].includes(normalized)) return "处理中";
+  if (["FAILED", "BLOCKED"].includes(normalized)) return "处理失败";
+  if (normalized === "NEED_RESELECT") return "需重新选择";
+  return "待处理";
+}
+
+function formatSafeBetaDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return `${total}秒`;
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}分${String(rest).padStart(2, "0")}秒`;
+}
+
+function readSafeBetaCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
 function makeQueueId(file) {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}_${file.name}`;
+}
+
+function makeBetaRunId() {
+  return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function logSafeBeta(betaRunId, stage, detail = {}) {
+  const payload = { beta_run_id: betaRunId, stage, ...detail };
+  const responsePayload = detail.payload || {};
+  const fileValue = detail.frontend_selected_file_name || detail.current_file || responsePayload.current_file || "";
+  const fileText = Array.isArray(fileValue) ? fileValue.filter(Boolean).join(",") : fileValue;
+  const parts = [`[Safe1080pBeta] ${stage}`, `beta_run_id=${betaRunId || ""}`];
+  if (fileText) parts.push(`file=${fileText}`);
+  if (detail.url) parts.push(`url=${detail.url}`);
+  if (detail.http_status != null) parts.push(`status=${detail.http_status}`);
+  if (responsePayload.ok != null) parts.push(`ok=${responsePayload.ok}`);
+  if (responsePayload.status) parts.push(`status=${responsePayload.status}`);
+  if (detail.stage) parts.push(`stage=${detail.stage}`);
+  if (detail.error) parts.push(`error=${detail.error}`);
+  console.info(parts.join(" "), payload);
+}
+
+function isUsableLocalFile(file) {
+  return (
+    typeof File !== "undefined" &&
+    file instanceof File &&
+    typeof file.name === "string" &&
+    typeof file.size === "number" &&
+    typeof file.type === "string"
+  );
 }
 
 function extractTaskPayload(payload) {
@@ -217,44 +270,81 @@ function requestJson(method, url, body) {
   });
 }
 
-function requestBetaSafeEnhance(url, items) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const formData = new FormData();
-    formData.append("mode", "safe_1080p");
-    formData.append("output_dir", DEFAULT_SAFE_BETA_OUTPUT_DIR);
-    formData.append("flat_output", "true");
-    formData.append("business_output", "true");
-    const selectedNames = items.map((item) => item.name || item.file?.name || "image.png");
-    formData.append("selected_file_names_encoded", encodeURIComponent(JSON.stringify(selectedNames)));
-    items.forEach((item, index) => {
-      const selectedName = selectedNames[index];
-      formData.append("selected_file_names", selectedName);
-      if (item?.file) formData.append("files", item.file, selectedName);
-    });
-    xhr.open("POST", url, true);
-    xhr.onload = () => {
-      let payload = {};
-      const rawText = xhr.responseText || "";
-      try {
-        payload = JSON.parse(rawText || "{}");
-      } catch (error) {
-        if (xhr.status < 200 || xhr.status >= 300) {
-          reject(new Error(`Beta request failed: HTTP ${xhr.status}${rawText ? ` - ${rawText.slice(0, 200)}` : ""}`));
-          return;
-        }
-        reject(new Error(`Beta response parse failed: ${error.message}`));
-        return;
-      }
-      if (xhr.status < 200 || xhr.status >= 300 || payload.ok === false || payload.success === false || payload.status === "FAILED" || payload.status === "failed") {
-        reject(new Error(payload.error || payload.message || payload.stage || `Beta request failed: HTTP ${xhr.status}`));
-        return;
-      }
-      resolve(payload);
-    };
-    xhr.onerror = () => reject(new Error("Cannot connect to Beta API."));
-    xhr.send(formData);
+async function requestBetaSafeEnhance(url, items, betaRunId) {
+  logSafeBeta(betaRunId, "BETA_FORMDATA_BUILD_START", {
+    frontend_selected_file_name: items.map((item) => item.name || item.file?.name || "image.png"),
   });
+  const formData = new FormData();
+  formData.append("beta_run_id", betaRunId);
+  formData.append("mode", "safe_1080p");
+  formData.append("output_dir", DEFAULT_SAFE_BETA_OUTPUT_DIR);
+  formData.append("flat_output", "true");
+  formData.append("business_output", "true");
+  const selectedNames = items.map((item) => item.name || item.file?.name || "image.png");
+  formData.append("selected_file_names_encoded", encodeURIComponent(JSON.stringify(selectedNames)));
+  items.forEach((item, index) => {
+    const selectedName = selectedNames[index];
+    formData.append("selected_file_names", selectedName);
+    if (!isUsableLocalFile(item?.file)) {
+      logSafeBeta(betaRunId, "BETA_FILE_OBJECT_MISSING", { frontend_selected_file_name: selectedName });
+      throw new Error("本地文件访问已失效，请重新选择图片");
+    }
+    formData.append("files", item.file, selectedName);
+    logSafeBeta(betaRunId, "BETA_FORMDATA_FILE_APPENDED", {
+      frontend_selected_file_name: selectedName,
+      file_size: item.file.size,
+      file_type: item.file.type,
+    });
+  });
+  logSafeBeta(betaRunId, "BETA_FORMDATA_BUILD_DONE", {
+    request_payload: {
+      beta_run_id: betaRunId,
+      mode: "safe_1080p",
+      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      flat_output: true,
+      business_output: true,
+      files: selectedNames,
+      selected_file_names: selectedNames,
+      selected_file_names_encoded: true,
+    },
+  });
+  logSafeBeta(betaRunId, "BETA_FETCH_WILL_SEND", { url });
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), SAFE_BETA_FETCH_TIMEOUT_MS);
+  let response;
+  try {
+    const responsePromise = fetch(url, { method: "POST", body: formData, signal: controller.signal });
+    logSafeBeta(betaRunId, "BETA_FETCH_SENT", { url });
+    response = await responsePromise;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error(`Beta request timed out after ${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}s`);
+      logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
+        stage: "BETA_FETCH_TIMEOUT",
+        error: timeoutError.message,
+        url,
+      });
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+  logSafeBeta(betaRunId, "BETA_FETCH_RESPONSE_STATUS", { http_status: response.status });
+  const rawText = await response.text();
+  let payload = {};
+  try {
+    payload = JSON.parse(rawText || "{}");
+  } catch (error) {
+    throw new Error(`Beta response parse failed: ${error.message}`);
+  }
+  logSafeBeta(betaRunId, "BETA_FETCH_RESPONSE_JSON", { payload });
+  if (!response.ok || payload.ok === false || payload.success === false || payload.status === "FAILED" || payload.status === "failed") {
+    const error = new Error(formatBetaFailureMessage(payload, payload.stage || `Beta request failed: HTTP ${response.status}`));
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
 }
 
 const isBetaSuccess = (data) =>
@@ -265,6 +355,17 @@ const isBetaSuccess = (data) =>
   data?.code === 200 ||
   Number(data?.processed_count || 0) > 0 ||
   (Array.isArray(data?.enhanced_files) && data.enhanced_files.length > 0);
+
+function formatBetaFailureMessage(payload, fallback = "1080P安全增强 Beta 处理失败") {
+  const data = payload?.data || {};
+  const skipped = Array.isArray(payload?.skipped) ? payload.skipped : Array.isArray(data?.skipped) ? data.skipped : [];
+  const firstSkip = skipped.find((item) => item && typeof item === "object") || {};
+  if (firstSkip.reason) {
+    const file = firstSkip.file || payload?.current_file || data?.failed_file || "";
+    return `${file ? `${file} ` : ""}被 1080P安全增强 Beta 安全策略跳过：${firstSkip.reason}`;
+  }
+  return payload?.error || payload?.message || data?.error_message || data?.reason || fallback;
+}
 
 function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, onProgress) {
   return new Promise((resolve, reject) => {
@@ -629,7 +730,8 @@ export default function DashboardPage() {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
 
-  const addFiles = (incomingFiles) => {
+  const addFiles = (incomingFiles, options = {}) => {
+    const replaceQueue = Boolean(options.replaceQueue);
     const images = Array.from(incomingFiles || []).filter((file) => file?.type?.startsWith("image/"));
     if (!images.length) {
       setNotice("未检测到可用图片文件。");
@@ -674,13 +776,25 @@ export default function DashboardPage() {
       logs: [],
       progress: 0,
     }));
+    if (replaceQueue) {
+      setFileQueue(nextItems);
+      setActiveItemId(nextItems[0]?.id || null);
+      setDebugItemId(nextItems[0]?.id || null);
+      setSafeBetaResult(null);
+      setSafeBetaFeedbackResult(null);
+      setSafeBetaStartedAt(null);
+      setSafeBetaTick(0);
+      setCurrentIndex(0);
+      setNotice(`已重新选择 ${nextItems.length} 张，Beta 状态已重置。`);
+      return;
+    }
     setFileQueue((prev) => [...prev, ...nextItems]);
     if (!activeItemId && nextItems[0]) setActiveItemId(nextItems[0].id);
     setNotice(`已选择 ${fileQueue.length + nextItems.length} 张。`);
   };
 
   const handleFileChange = (event) => {
-    addFiles(event.target.files);
+    addFiles(event.target.files, { replaceQueue: processingMode === PROCESSING_MODE_SAFE_BETA });
     event.target.value = "";
   };
 
@@ -799,14 +913,91 @@ export default function DashboardPage() {
 
   const runSafeBetaModeV2 = async () => {
     const startedAt = Date.now();
+    const betaRunId = makeBetaRunId();
     const betaItems = fileQueue.filter((item) => item.status === "queued" || item.status === "failed" || item.status === "processing");
     const betaItemIds = betaItems.map((item) => item.id);
     const firstFileName = betaItems[0]?.name || "";
     const firstCurrentFile = firstFileName || "正在连接 Beta 后端";
+    logSafeBeta(betaRunId, "BETA_CLICK_HANDLER_ENTERED", {
+      selected_count: betaItems.length,
+      processing_mode: processingMode,
+    });
+    logSafeBeta(betaRunId, "BETA_SELECTED_ROWS_SNAPSHOT", {
+      rows: betaItems.map((item) => ({
+        id: item.id,
+        name: item.name,
+        status: item.status,
+        has_file_object: isUsableLocalFile(item.file),
+      })),
+    });
     const setBetaQueuePatch = (patch) => {
       if (!betaItemIds.length) return;
       setFileQueue((prev) => prev.map((item) => (betaItemIds.includes(item.id) ? { ...item, ...patch } : item)));
     };
+    if (!betaItems.length) {
+      setSafeBetaResult({
+        status: "BLOCKED",
+        beta_run_id: betaRunId,
+        progress: 100,
+        current_file: "",
+        processed_count: 0,
+        enhanced_count: 0,
+        contact_sheet_count: 0,
+        skipped_count: 0,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        has_enhanced: false,
+        has_contact_sheet: false,
+        elapsed_seconds: 0,
+        message: "队列中没有待处理图片。",
+      });
+      setNotice("队列中没有待处理图片。");
+      return;
+    }
+    logSafeBeta(betaRunId, "BETA_FILE_OBJECT_CHECK_START", {
+      frontend_selected_file_name: betaItems.map((item) => item.name),
+    });
+    const invalidBetaItems = betaItems.filter((item) => !isUsableLocalFile(item.file));
+    if (invalidBetaItems.length) {
+      const message = "本地文件访问已失效，请重新选择图片";
+      const currentFile = invalidBetaItems[0]?.name || firstFileName || "本地文件";
+      logSafeBeta(betaRunId, "BETA_FILE_OBJECT_MISSING", {
+        frontend_selected_file_name: invalidBetaItems.map((item) => item.name),
+      });
+      setSafeBetaResult({
+        status: "NEED_RESELECT",
+        beta_run_id: betaRunId,
+        progress: 100,
+        current_file: currentFile,
+        processed_count: 0,
+        enhanced_count: 0,
+        contact_sheet_count: 0,
+        skipped_count: 0,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        has_enhanced: false,
+        has_contact_sheet: false,
+        elapsed_seconds: 0,
+        message,
+      });
+      setBetaQueuePatch({
+        status: "need_reselect",
+        progress: 100,
+        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_filename: "",
+        final_delivery_status: "",
+        final_delivery_reason: message,
+        error: message,
+        logs: [message],
+      });
+      logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
+        status: "NEED_RESELECT",
+        frontend_selected_file_name: currentFile,
+      });
+      setNotice(message);
+      return;
+    }
+    logSafeBeta(betaRunId, "BETA_FILE_OBJECT_VALID", {
+      frontend_selected_file_name: betaItems.map((item) => item.name),
+    });
     const setBetaQueueCompleted = (results, fallbackOutputPath, fallbackOutputName) => {
       if (!betaItemIds.length) return;
       setFileQueue((prev) =>
@@ -860,6 +1051,7 @@ export default function DashboardPage() {
     });
     setSafeBetaResult({
       status: "RUNNING",
+      beta_run_id: betaRunId,
       progress: 5,
       current_file: firstCurrentFile,
       processed_count: 0,
@@ -882,8 +1074,10 @@ export default function DashboardPage() {
         throw new Error("未收到当前选择的输入文件，已拒绝使用默认测试样本");
       }
       console.info("[Safe1080pBeta] request", {
+        beta_run_id: betaRunId,
         frontend_selected_file_name: betaItems.map((item) => item.name),
         request_payload: {
+          beta_run_id: betaRunId,
           mode: "safe_1080p",
           output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
           flat_output: true,
@@ -891,11 +1085,14 @@ export default function DashboardPage() {
           files: betaItems.map((item) => item.name),
         },
       });
-      const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems);
+      const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems, betaRunId);
       const data = payload?.data || {};
       if (!isBetaSuccess(payload) && !isBetaSuccess(data)) {
         throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "Beta run failed");
       }
+      logSafeBeta(betaRunId, "BETA_SUCCESS_BRANCH_ENTERED", {
+        response_beta_run_id: payload.beta_run_id || data.beta_run_id || "",
+      });
       const results = Array.isArray(payload.results) ? payload.results : Array.isArray(data.results) ? data.results : [];
       const enhancedFiles = Array.isArray(payload.enhanced_files) ? payload.enhanced_files : Array.isArray(data.enhanced_files) ? data.enhanced_files : [];
       const processedItems = Array.isArray(data.processed) ? data.processed : [];
@@ -909,6 +1106,7 @@ export default function DashboardPage() {
       const resultStatus = payload.verification_result || data.verification_result || "PASS";
       setSafeBetaResult({
         status: resultStatus,
+        beta_run_id: payload.beta_run_id || data.beta_run_id || betaRunId,
         progress: 100,
         current_file: firstResult.input_name || processedItems[processedItems.length - 1]?.file || firstFileName || "处理完成",
         processed_count: processedCount,
@@ -929,33 +1127,53 @@ export default function DashboardPage() {
         message: payload.message || "处理完成",
       });
       setBetaQueueCompleted(results, firstEnhanced, firstOutputName);
+      logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
+        status: resultStatus,
+        progress: 100,
+        processed_count: processedCount,
+      });
       setNotice(`1080P安全增强 Beta 完成：${resultStatus}`);
     } catch (error) {
+      const errorPayload = error?.payload || {};
+      const errorData = errorPayload?.data || {};
+      const skippedRows = Array.isArray(errorPayload.skipped) ? errorPayload.skipped : Array.isArray(errorData.skipped) ? errorData.skipped : [];
+      const skippedCount = Number(errorPayload.skipped_count ?? errorData.skipped_count ?? skippedRows.length ?? 0);
+      const failureMessage = formatBetaFailureMessage(errorPayload, error.message);
+      logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
+        error: failureMessage,
+        stage: errorPayload.stage || "",
+      });
       setSafeBetaResult({
         status: "BLOCKED",
+        beta_run_id: errorPayload.beta_run_id || betaRunId,
         progress: 100,
-        current_file: firstFileName || "处理失败",
+        current_file: errorData.failed_file || skippedRows[0]?.file || firstFileName || "处理失败",
         processed_count: 0,
         enhanced_count: 0,
         contact_sheet_count: 0,
-        skipped_count: 0,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        skipped_count: skippedCount,
+        output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
         has_enhanced: false,
         has_contact_sheet: false,
         elapsed_seconds: Math.round((Date.now() - startedAt) / 1000),
-        message: error.message,
+        skipped: skippedRows,
+        message: failureMessage,
       });
       setBetaQueuePatch({
         status: "failed",
         progress: 100,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
         output_filename: "",
         final_delivery_status: "FAIL",
-        final_delivery_reason: error.message,
-        error: error.message,
-        logs: [error.message],
+        final_delivery_reason: failureMessage,
+        error: failureMessage,
+        logs: [failureMessage],
       });
-      setNotice(`1080P安全增强 Beta 处理失败：${error.message}`);
+      logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
+        status: "BLOCKED",
+        error: failureMessage,
+      });
+      setNotice(`1080P安全增强 Beta 处理失败：${failureMessage}`);
     } finally {
       stageTimers.forEach((timer) => window.clearTimeout(timer));
       processingRef.current = false;
@@ -1234,9 +1452,18 @@ export default function DashboardPage() {
       ? Math.max(0, Math.round((Date.now() - safeBetaStartedAt) / 1000) + safeBetaTick * 0)
       : safeBetaResult?.elapsed_seconds || 0;
   const isSafeBetaSelected = processingMode === PROCESSING_MODE_SAFE_BETA;
+  const safeBetaUserStatus = formatSafeBetaStatus(safeBetaResult?.status);
+  const safeBetaGeneratedCount = readSafeBetaCount(safeBetaResult?.processed_count || safeBetaResult?.enhanced_count);
+  const safeBetaSkippedCount = readSafeBetaCount(safeBetaResult?.skipped_count);
+  const safeBetaCurrentFile = safeBetaResult?.current_file || activeItem?.name || "等待任务";
+  const safeBetaFailureSummary = ["BLOCKED", "FAILED"].includes(String(safeBetaResult?.status || "").toUpperCase())
+    ? safeBetaResult?.message || activeItem?.error || "处理失败"
+    : "";
   const safeBetaDeliveryConclusion =
     safeBetaResult?.status === "RUNNING"
       ? "处理中"
+      : safeBetaResult?.status === "NEED_RESELECT"
+        ? "本地文件访问已失效"
       : safeBetaResult?.status === "BLOCKED"
         ? "处理失败"
         : safeBetaResult?.status
@@ -1245,6 +1472,8 @@ export default function DashboardPage() {
   const safeBetaOutputUrlText =
     safeBetaResult?.status === "RUNNING"
       ? "等待生成"
+      : safeBetaResult?.status === "NEED_RESELECT"
+        ? safeBetaResult?.message || "本地文件访问已失效"
       : safeBetaResult?.status === "BLOCKED"
         ? safeBetaResult?.message || "处理失败"
         : safeBetaResult?.status
@@ -1253,6 +1482,8 @@ export default function DashboardPage() {
   const safeBetaCurrentState =
     safeBetaResult?.status === "RUNNING"
       ? "Beta 处理中"
+      : safeBetaResult?.status === "NEED_RESELECT"
+        ? safeBetaResult?.message || "本地文件访问已失效"
       : safeBetaResult?.status === "BLOCKED"
         ? safeBetaResult?.message || "处理失败"
         : safeBetaResult?.status
@@ -1340,8 +1571,18 @@ export default function DashboardPage() {
                 ))}
               </select>
               <p style={{ margin: "10px 0 0", color: "#7f8f91", fontSize: "12px", lineHeight: 1.7 }}>
-                {getProcessingModeDisplay(processingMode).desc}
+                {processingMode === PROCESSING_MODE_SAFE_BETA ? "适用：中文商业非人像图｜产品图｜PPT封面｜信息图" : getProcessingModeDisplay(processingMode).desc}
               </p>
+              {processingMode === PROCESSING_MODE_SAFE_BETA ? (
+                <details className="mt-2 rounded-sm border border-[#1c1f26] bg-[#05090a]/45 px-2 py-1.5 text-[11px] leading-5 text-[#94a3b8]">
+                  <summary className="cursor-pointer select-none text-[#6feaf0]">查看使用边界</summary>
+                  <ul className="mt-2 space-y-1 text-[#7f8f91]">
+                    {safeBetaBoundaryItems.map((item) => (
+                      <li key={item}>- {item}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
             </section>
           </div>
 
@@ -1351,6 +1592,78 @@ export default function DashboardPage() {
                 1080P安全增强 Beta
               </h3>
               <div className="space-y-2 text-xs text-[#94a3b8]">
+                <div className="flex items-center justify-between gap-3">
+                  <span>当前状态</span>
+                  <span className="font-semibold text-[#6feaf0]">{safeBetaUserStatus}</span>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">当前文件</span>
+                  <span className="min-w-0 max-w-[150px] truncate text-right font-mono text-[#e2e8f0]" title={safeBetaCurrentFile}>{safeBetaCurrentFile}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>处理进度</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.progress ?? 0}%</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span>生成结果</span>
+                  <span className="font-mono text-[#e2e8f0]">已生成 {safeBetaGeneratedCount} 张</span>
+                </div>
+                {safeBetaSkippedCount > 0 ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <span>跳过图片</span>
+                    <span className="font-mono text-[#f0c36f]">跳过 {safeBetaSkippedCount} 张</span>
+                  </div>
+                ) : null}
+                <div className="flex items-center justify-between gap-3">
+                  <span>耗时</span>
+                  <span className="font-mono text-[#e2e8f0]">{formatSafeBetaDuration(safeBetaElapsedSeconds)}</span>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">输出目录</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
+                </div>
+                {safeBetaFailureSummary ? (
+                  <div className="rounded-sm border border-[#4b1f2a] bg-[#1b0b10] px-2 py-1.5 text-[11px] leading-5 text-[#ff8a8a]">
+                    {safeBetaFailureSummary}
+                  </div>
+                ) : null}
+              </div>
+              <details className="mt-3 rounded-sm border border-[#1c1f26] bg-[#05090a]/45 px-2 py-1.5 text-[11px] leading-5 text-[#64748b]">
+                <summary className="cursor-pointer select-none text-[#94a3b8]">查看技术详情</summary>
+                <div className="mt-2 space-y-1.5">
+                  <div className="flex justify-between gap-3"><span>raw status</span><span className="font-mono">{safeBetaResult?.status || "WAITING"}</span></div>
+                  <div className="flex justify-between gap-3"><span>enhanced</span><span className="font-mono">{safeBetaResult?.has_enhanced ? "true" : "false"}</span></div>
+                  <div className="flex justify-between gap-3"><span>contact_sheet</span><span className="font-mono">{safeBetaResult?.has_contact_sheet ? "true" : "false"}</span></div>
+                  <div className="flex justify-between gap-3"><span>enhanced_count</span><span className="font-mono">{safeBetaResult?.enhanced_count ?? 0}</span></div>
+                  <div className="flex justify-between gap-3"><span>contact_sheet_count</span><span className="font-mono">{safeBetaResult?.contact_sheet_count ?? 0}</span></div>
+                  <div className="flex justify-between gap-3"><span>elapsed_seconds</span><span className="font-mono">{safeBetaElapsedSeconds}</span></div>
+                  <div className="flex justify-between gap-3"><span>beta_run_id</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.beta_run_id || ""}>{safeBetaResult?.beta_run_id || "-"}</span></div>
+                  <div className="flex justify-between gap-3"><span>stage</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.stage || ""}>{safeBetaResult?.stage || "-"}</span></div>
+                  <div className="flex justify-between gap-3"><span>error</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.message || ""}>{safeBetaResult?.message || "-"}</span></div>
+                  <pre className="max-h-24 overflow-auto rounded bg-black/25 p-2 font-mono text-[10px] leading-4 text-[#475569]">
+                    {JSON.stringify({
+                      status: safeBetaResult?.status || "",
+                      processed_count: safeBetaResult?.processed_count || 0,
+                      skipped_count: safeBetaResult?.skipped_count || 0,
+                      output_dir: safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+                    }, null, 2)}
+                  </pre>
+                  <button
+                    type="button"
+                    onClick={exportSafeBetaFeedbackPackage}
+                    disabled={!safeBetaResult?.output_dir || isProcessingQueue}
+                    className="w-full rounded border border-[#6feaf0]/40 px-3 py-1.5 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
+                  >
+                    导出测试反馈包
+                  </button>
+                  {safeBetaFeedbackResult?.feedback_zip_path ? (
+                    <p className="break-all font-mono text-[11px] leading-5 text-[#64748b]">
+                      {safeBetaFeedbackResult.feedback_zip_path}
+                    </p>
+                  ) : null}
+                </div>
+              </details>
+              <div className="hidden space-y-2 text-xs text-[#94a3b8]">
                 <div className="flex items-center justify-between gap-3">
                   <span>运行状态:</span>
                   <span className="font-mono text-[#6feaf0]">{safeBetaResult?.status || "WAITING"}</span>
@@ -1396,19 +1709,19 @@ export default function DashboardPage() {
                 type="button"
                 onClick={exportSafeBetaFeedbackPackage}
                 disabled={!safeBetaResult?.output_dir || isProcessingQueue}
-                className="mt-3 w-full rounded border border-[#6feaf0]/50 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
+                className="hidden mt-3 w-full rounded border border-[#6feaf0]/50 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
               >
                 导出测试反馈包
               </button>
-              <p className="mt-2 text-[11px] leading-5 text-white/42">
+              <p className="hidden mt-2 text-[11px] leading-5 text-white/42">
                 生成本次测试的运行报告、错误日志、系统环境和对比图，用于发送给开发者定位问题。
               </p>
               {safeBetaFeedbackResult?.feedback_zip_path ? (
-                <p className="mt-2 break-all font-mono text-[11px] leading-5 text-[#64748b]">
+                <p className="hidden mt-2 break-all font-mono text-[11px] leading-5 text-[#64748b]">
                   {safeBetaFeedbackResult.feedback_zip_path}
                 </p>
               ) : null}
-              <div className="mt-3 space-y-1.5">
+              <div className="hidden mt-3 space-y-1.5">
                 {safeBetaBoundaryItems.map((item) => (
                   <div key={item} className="rounded border border-white/8 bg-black/15 px-2 py-1.5 text-[11px] leading-5 text-white/52">
                     {item}
@@ -1485,7 +1798,9 @@ export default function DashboardPage() {
                         </td>
                         <td className="px-3 py-2"><StatusPill status={item.status} /></td>
                         <td className="px-3 py-2"><DeliveryPill status={item.final_delivery_status} item={item} /></td>
-                        <td className={`max-w-[150px] truncate px-3 py-2 font-mono ${item.error ? "text-[#ff8a8a]" : "text-[#64748b]"}`} title={item.output_filename || item.error}>{item.output_filename || item.error || "等待输出"}</td>
+                        <td className={`max-w-[150px] truncate px-3 py-2 font-mono ${item.error ? "text-[#ff8a8a]" : "text-[#64748b]"}`} title={item.output_filename || item.error || ""}>
+                          {item.output_filename || (item.status === "failed" && item.mode === PROCESSING_MODE_SAFE_BETA ? "未生成" : item.error || "等待输出")}
+                        </td>
                         <td className="space-x-2 px-3 py-2 text-center">
                           <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
                           <button type="button" disabled={item.status !== "completed"} onClick={() => selectForCompare(item)} className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]">查看对比</button>

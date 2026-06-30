@@ -269,6 +269,8 @@ def classify_image(path: Path, original: np.ndarray) -> tuple[str, str, dict[str
     if any(token in name for token in commercial_name_tokens):
         return "commercial_non_portrait", "commercial_name", metrics
 
+    if text_ratio > 0.08 and edge_ratio > 0.035:
+        return "commercial_non_portrait", "strong_text_commercial_metrics", metrics
     if text_ratio > 0.018 and light_bg_ratio > 0.35:
         return "commercial_non_portrait", "info_poster_metrics", metrics
     if edge_ratio > 0.08 and light_bg_ratio > 0.20:
@@ -711,6 +713,14 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "skipped": skipped,
         "warnings": warnings,
     }
+    if not processed and skipped:
+        first_skip = skipped[0]
+        skip_file = str(first_skip.get("file") or failed_file or inputs[0].name)
+        skip_reason = str(first_skip.get("reason") or "input_skipped_by_beta_policy")
+        summary["stage"] = "BETA_INPUT_SKIPPED"
+        summary["reason"] = skip_reason
+        summary["error_message"] = f"{skip_file} 被 1080P安全增强 Beta 安全策略跳过：{skip_reason}"
+        summary["failed_file"] = skip_file
     summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
     summary_path = summary_dir / summary_name
     summary["summary_path"] = str(summary_path)

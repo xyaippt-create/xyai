@@ -4,8 +4,17 @@
 
 - 修复 Dashboard 1080P安全增强 Beta 处理默认测试样本而非当前队列图片的问题。
 - Dashboard Beta 请求改为 multipart 上传当前队列文件，不再发送默认测试样本目录作为输入源。
+- Dashboard Beta 增加 `beta_run_id`、前端点击阶段日志与 `NEED_RESELECT` 状态，真实 `File` 对象失效时阻止请求并提示重新选择。
+- Dashboard Beta 日志改为首层可读文本，并为 Beta fetch 增加 300 秒超时兜底，避免永久停留在 35%。
+- Beta 后端阶段日志改为有界队列异步写入，避免 stderr 输出阻塞 uvicorn worker。
+- Beta 输入被安全策略跳过时，API 和 Dashboard 透出 `BETA_INPUT_SKIPPED`、具体文件名、skip reason 与 metrics，不再显示泛化失败文案。
+- 修正暖色/橙色高文字密度商业图被 `skip_portrait_metrics` 误杀的问题，高文字密度且有足够边缘结构的非人像商业图可进入 Beta 增强。
+- 重新选择本地图片时清理旧 Beta 失败态、旧输出与旧错误，当前队列回到待生成状态。
+- Beta API 读取并回显 `beta_run_id`，新增 `BETA_API_*` 请求、字段、文件、增强与响应阶段日志。
 - Dashboard Beta 增加 `selected_file_names_encoded`，避免中文文件名在 multipart 边界被转码后影响输出命名。
 - Beta API 加固 multipart 字段解析、中文文件名解码、临时文件保存和结果归一化，避免异常时返回裸 500。
+- Beta API 业务失败改为 HTTP 200 + `ok=false` 结构化 JSON，避免浏览器 Network 只显示 `500 Internal Server Error`。
+- Dashboard Beta 点击前校验真实 `File` 对象，文件访问失效时提示重新选择并阻止无效请求。
 - Beta API 增加 `BETA_REQUEST_INPUT_FILES` 与 `BETA_RESOLVED_INPUT_FILES` 阶段日志；没有显式输入文件时返回 `BETA_INPUT_MISSING`。
 - `safe_1080p_enhance.py` 在 flat/business 模式下只处理显式 `input_files`，并在结果中返回 input/output 映射。
 

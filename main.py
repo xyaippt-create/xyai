@@ -2,9 +2,11 @@ import argparse
 import asyncio
 import json
 import os
+import queue
 import re
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import uuid
@@ -45,6 +47,27 @@ SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
 DEFAULT_WORK_DIR_NAME = "影界文件"
 DEFAULT_INPUT_DIR_NAME = "\u8f93\u5165\u56fe\u7247"
 DEFAULT_OUTPUT_DIR_NAME = "\u8f93\u51fa\u6210\u54c1"
+BETA_LOG_QUEUE: queue.Queue[str] = queue.Queue(maxsize=256)
+
+
+def _beta_log_worker() -> None:
+    while True:
+        line = BETA_LOG_QUEUE.get()
+        try:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_beta_log_worker, name="safe-1080p-beta-log", daemon=True).start()
+
+
+def enqueue_beta_log(line: str) -> None:
+    try:
+        BETA_LOG_QUEUE.put_nowait(line)
+    except queue.Full:
+        pass
 
 
 def default_output_dir() -> Path:
@@ -1531,6 +1554,7 @@ def build_web_app():
     def beta_stage_log(stage: str, **fields) -> None:
         event = {
             "stage": stage,
+            "beta_run_id": fields.get("beta_run_id") or "",
             "input_path": beta_redact_path(fields.get("input_path")),
             "output_dir": beta_redact_path(fields.get("output_dir")),
             "current_file": fields.get("current_file") or "",
@@ -1541,21 +1565,34 @@ def build_web_app():
             "stderr_tail": beta_tail_text(fields.get("stderr_tail")),
             "error_message": beta_tail_text(fields.get("error_message")),
         }
-        print("[SAFE_1080P_BETA] " + json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
+        enqueue_beta_log("[SAFE_1080P_BETA] " + json.dumps(event, ensure_ascii=False))
 
     def beta_failure_response(
         result: dict | None,
         output_dir_value: str | Path | None = None,
-        status_code: int = 500,
+        status_code: int = 200,
+        code: int = 500,
     ) -> JSONResponse:
         result = beta_result_dict(result or {}, output_dir_value)
-        stage = result.get("stage") or result.get("reason") or "BETA_FAILED"
-        error = result.get("error") or result.get("error_message") or result.get("reason") or "1080P safe enhance Beta failed."
+        skipped_items = result.get("skipped") if isinstance(result.get("skipped"), list) else []
+        first_skip = skipped_items[0] if skipped_items and isinstance(skipped_items[0], dict) else {}
+        skip_reason = first_skip.get("reason") or ""
+        skip_file = first_skip.get("file") or result.get("failed_file") or ""
+        stage = result.get("stage") or ("BETA_INPUT_SKIPPED" if skipped_items else "") or result.get("reason") or "BETA_FAILED"
+        error = (
+            result.get("error")
+            or result.get("error_message")
+            or (f"{skip_file} 被 1080P安全增强 Beta 安全策略跳过：{skip_reason}" if skip_reason else "")
+            or result.get("reason")
+            or "1080P safe enhance Beta failed."
+        )
+        beta_run_id = str(result.get("beta_run_id") or "")
         body = {
             "ok": False,
             "success": False,
             "status": "FAILED",
-            "code": status_code,
+            "code": code,
+            "beta_run_id": beta_run_id,
             "verification_result": "FAILED",
             "stage": stage,
             "error": beta_tail_text(error),
@@ -1564,6 +1601,7 @@ def build_web_app():
             "skipped_count": beta_int(result.get("skipped_count"), 0),
             "enhanced_files": [],
             "results": [],
+            "skipped": skipped_items,
             "output_dir": str(result.get("output_dir") or output_dir_value or ""),
             "data": result,
         }
@@ -1571,6 +1609,7 @@ def build_web_app():
 
     def beta_success_body(result: dict, verification_result: str) -> dict:
         result = beta_result_dict(result)
+        beta_run_id = str(result.get("beta_run_id") or "")
         output_dir_value = result.get("output_dir") or ""
         output_dir_path = Path(str(output_dir_value)) if output_dir_value else Path()
         rows = []
@@ -1601,6 +1640,7 @@ def build_web_app():
             "success": True,
             "status": "SUCCESS",
             "code": 200,
+            "beta_run_id": beta_run_id,
             "message": "1080P safe enhance Beta completed.",
             "verification_result": verification_result,
             "processed_count": beta_int(result.get("processed_count"), len(rows)),
@@ -1614,6 +1654,7 @@ def build_web_app():
     def run_safe_1080p_beta(payload: dict) -> dict:
         import importlib.util
         beta_started = time.perf_counter()
+        beta_run_id = str((payload or {}).get("beta_run_id") or "")
 
         input_file_values = [
             Path(str(item)).expanduser()
@@ -1629,6 +1670,7 @@ def build_web_app():
             flat_output=bool((payload or {}).get("flat_output")),
             business_output=bool((payload or {}).get("business_output")),
             elapsed_seconds=0,
+            beta_run_id=beta_run_id,
         )
         beta_stage_log(
             "BETA_REQUEST_INPUT_FILES",
@@ -1638,6 +1680,7 @@ def build_web_app():
             flat_output=bool((payload or {}).get("flat_output")),
             business_output=bool((payload or {}).get("business_output")),
             elapsed_seconds=round(time.perf_counter() - beta_started, 3),
+            beta_run_id=beta_run_id,
         )
         if not input_file_values:
             beta_stage_log(
@@ -1648,10 +1691,12 @@ def build_web_app():
                 business_output=bool((payload or {}).get("business_output")),
                 elapsed_seconds=round(time.perf_counter() - beta_started, 3),
                 error_message="BETA_INPUT_MISSING",
+                beta_run_id=beta_run_id,
             )
             return {
                 "ok": False,
                 "success": False,
+                "beta_run_id": beta_run_id,
                 "status": "failed",
                 "verification_result": "FAILED",
                 "stage": "BETA_INPUT_MISSING",
@@ -1675,8 +1720,10 @@ def build_web_app():
                 business_output=bool((payload or {}).get("business_output")),
                 elapsed_seconds=round(time.perf_counter() - beta_started, 3),
                 error_message="missing_safe_1080p_module",
+                beta_run_id=beta_run_id,
             )
             return {
+                "beta_run_id": beta_run_id,
                 "status": "blocked",
                 "verification_result": "BLOCKED",
                 "reason": "missing_safe_1080p_module",
@@ -1692,8 +1739,10 @@ def build_web_app():
                 business_output=bool((payload or {}).get("business_output")),
                 elapsed_seconds=round(time.perf_counter() - beta_started, 3),
                 error_message="cannot_load_safe_1080p_module",
+                beta_run_id=beta_run_id,
             )
             return {
+                "beta_run_id": beta_run_id,
                 "status": "blocked",
                 "verification_result": "BLOCKED",
                 "reason": "cannot_load_safe_1080p_module",
@@ -1713,8 +1762,10 @@ def build_web_app():
                 business_output=bool(payload.get("business_output")),
                 elapsed_seconds=round(time.perf_counter() - beta_started, 3),
                 error_message="unsupported_beta_mode",
+                beta_run_id=beta_run_id,
             )
             return {
+                "beta_run_id": beta_run_id,
                 "status": "blocked",
                 "verification_result": "BLOCKED",
                 "reason": "unsupported_beta_mode",
@@ -1734,6 +1785,7 @@ def build_web_app():
             flat_output=bool(payload.get("flat_output")),
             business_output=bool(payload.get("business_output")),
             elapsed_seconds=round(time.perf_counter() - beta_started, 3),
+            beta_run_id=beta_run_id,
         )
         beta_stage_log(
             "BETA_RESOLVED_INPUT_FILES",
@@ -1743,6 +1795,7 @@ def build_web_app():
             flat_output=bool(payload.get("flat_output")),
             business_output=bool(payload.get("business_output")),
             elapsed_seconds=round(time.perf_counter() - beta_started, 3),
+            beta_run_id=beta_run_id,
         )
         beta_stage_log(
             "BETA_OUTPUT_DIR_RESOLVED",
@@ -1752,7 +1805,12 @@ def build_web_app():
             flat_output=bool(payload.get("flat_output")),
             business_output=bool(payload.get("business_output")),
             elapsed_seconds=round(time.perf_counter() - beta_started, 3),
+            beta_run_id=beta_run_id,
         )
+
+        def beta_run_stage_log(stage: str, **fields) -> None:
+            fields.setdefault("beta_run_id", beta_run_id)
+            beta_stage_log(stage, **fields)
 
         args = argparse.Namespace(
             input_dir=input_path,
@@ -1764,11 +1822,12 @@ def build_web_app():
             flat_output=True,
             business_output=True,
             timeout_seconds=300,
-            stage_logger=beta_stage_log,
+            stage_logger=beta_run_stage_log,
             diagnostic_dir=Path("D:/影界文件/影界测试反馈包"),
             input_files=[item.resolve() for item in input_file_values],
         )
         result = beta_result_dict(module.process(args), output_path)
+        result["beta_run_id"] = beta_run_id
         processed_count = beta_int(result.get("processed_count"), 0)
         skipped_count = beta_int(result.get("skipped_count"), 0)
         if result.get("status") != "ok" or processed_count <= 0:
@@ -1785,6 +1844,7 @@ def build_web_app():
                 returncode=result.get("returncode", ""),
                 stderr_tail=result.get("stderr_tail", ""),
                 error_message=result.get("error_message") or result.get("reason") or result.get("status"),
+                beta_run_id=beta_run_id,
             )
             return result
 
@@ -1803,6 +1863,7 @@ def build_web_app():
             flat_output=True,
             business_output=True,
             elapsed_seconds=round(time.perf_counter() - beta_started, 3),
+            beta_run_id=beta_run_id,
         )
         return result
 
@@ -1811,10 +1872,27 @@ def build_web_app():
         payload: dict = {}
         temp_context = None
         output_dir_value = "D:/影界文件/1080P安全增强输出"
+        beta_run_id = ""
         try:
             content_type = request.headers.get("content-type", "").lower()
             if "multipart/form-data" in content_type:
                 form = await request.form()
+                beta_run_id = str(form.get("beta_run_id") or "")
+                beta_stage_log(
+                    "BETA_API_REQUEST_RECEIVED",
+                    output_dir=str(form.get("output_dir") or output_dir_value),
+                    flat_output=parse_bool_value(form.get("flat_output"), True),
+                    business_output=parse_bool_value(form.get("business_output"), True),
+                    beta_run_id=beta_run_id,
+                )
+                beta_stage_log(
+                    "BETA_API_FORM_FIELDS",
+                    output_dir=str(form.get("output_dir") or output_dir_value),
+                    current_file=str(form.get("selected_file_names") or ""),
+                    flat_output=parse_bool_value(form.get("flat_output"), True),
+                    business_output=parse_bool_value(form.get("business_output"), True),
+                    beta_run_id=beta_run_id,
+                )
                 temp_context = tempfile.TemporaryDirectory(prefix="safe_1080p_beta_selected_")
                 temp_input_dir = Path(temp_context.name)
                 temp_input_dir.mkdir(parents=True, exist_ok=True)
@@ -1822,12 +1900,13 @@ def build_web_app():
                 selected_names: list[str] = []
                 declared_names = beta_decode_selected_names(form)
                 beta_stage_log(
-                    "BETA_MULTIPART_RECEIVED",
+                    "BETA_API_FILES_RECEIVED",
                     input_path=temp_input_dir,
                     output_dir=str(form.get("output_dir") or output_dir_value),
                     current_file=", ".join(declared_names),
                     flat_output=parse_bool_value(form.get("flat_output"), True),
                     business_output=parse_bool_value(form.get("business_output"), True),
+                    beta_run_id=beta_run_id,
                 )
                 file_index = 0
                 for key, value in form.multi_items():
@@ -1851,8 +1930,10 @@ def build_web_app():
                     else:
                         payload[key] = value
                 output_dir_value = payload.get("output_dir") or output_dir_value
+                beta_run_id = str(payload.get("beta_run_id") or beta_run_id)
                 payload.update(
                     {
+                        "beta_run_id": beta_run_id,
                         "input_dir": str(temp_input_dir),
                         "input_files": input_files,
                         "selected_file_names": selected_names,
@@ -1862,6 +1943,15 @@ def build_web_app():
                         "output_dir": output_dir_value,
                     }
                 )
+                beta_stage_log(
+                    "BETA_API_INPUT_FILES_RESOLVED",
+                    input_path="; ".join(input_files),
+                    output_dir=output_dir_value,
+                    current_file=", ".join(selected_names),
+                    flat_output=payload["flat_output"],
+                    business_output=payload["business_output"],
+                    beta_run_id=beta_run_id,
+                )
             else:
                 try:
                     payload = await request.json()
@@ -1869,17 +1959,66 @@ def build_web_app():
                     payload = {}
                 payload = payload if isinstance(payload, dict) else {}
                 output_dir_value = payload.get("output_dir") or output_dir_value
+                beta_run_id = str(payload.get("beta_run_id") or "")
+                beta_stage_log(
+                    "BETA_API_REQUEST_RECEIVED",
+                    input_path=payload.get("input_dir"),
+                    output_dir=output_dir_value,
+                    current_file=", ".join([Path(str(item)).name for item in payload.get("input_files") or []]),
+                    flat_output=bool(payload.get("flat_output")),
+                    business_output=bool(payload.get("business_output")),
+                    beta_run_id=beta_run_id,
+                )
+                beta_stage_log(
+                    "BETA_API_FORM_FIELDS",
+                    input_path=payload.get("input_dir"),
+                    output_dir=output_dir_value,
+                    current_file=", ".join([Path(str(item)).name for item in payload.get("input_files") or []]),
+                    flat_output=bool(payload.get("flat_output")),
+                    business_output=bool(payload.get("business_output")),
+                    beta_run_id=beta_run_id,
+                )
+                beta_stage_log(
+                    "BETA_API_INPUT_FILES_RESOLVED",
+                    input_path="; ".join([str(item) for item in payload.get("input_files") or []]),
+                    output_dir=output_dir_value,
+                    current_file=", ".join([Path(str(item)).name for item in payload.get("input_files") or []]),
+                    flat_output=bool(payload.get("flat_output")),
+                    business_output=bool(payload.get("business_output")),
+                    beta_run_id=beta_run_id,
+                )
+            beta_stage_log(
+                "BETA_API_ENHANCE_START",
+                input_path=(payload or {}).get("input_dir"),
+                output_dir=(payload or {}).get("output_dir"),
+                current_file=", ".join([Path(str(item)).name for item in (payload or {}).get("input_files") or []]),
+                flat_output=bool((payload or {}).get("flat_output")),
+                business_output=bool((payload or {}).get("business_output")),
+                beta_run_id=beta_run_id,
+            )
             result = await asyncio.to_thread(run_safe_1080p_beta, payload if isinstance(payload, dict) else {})
+            beta_stage_log(
+                "BETA_API_ENHANCE_DONE",
+                input_path=(payload or {}).get("input_dir"),
+                output_dir=(payload or {}).get("output_dir"),
+                current_file=", ".join([Path(str(item)).name for item in (payload or {}).get("input_files") or []]),
+                flat_output=bool((payload or {}).get("flat_output")),
+                business_output=bool((payload or {}).get("business_output")),
+                beta_run_id=beta_run_id,
+                error_message=(result or {}).get("error_message") or (result or {}).get("reason") or "",
+            )
         except Exception as exc:
             beta_stage_log(
-                "BETA_FAILED",
+                "BETA_API_FAILED",
                 input_path=(payload or {}).get("input_dir") if isinstance(payload, dict) else "",
                 output_dir=(payload or {}).get("output_dir") if isinstance(payload, dict) else "",
                 flat_output=bool((payload or {}).get("flat_output")) if isinstance(payload, dict) else False,
                 business_output=bool((payload or {}).get("business_output")) if isinstance(payload, dict) else False,
                 error_message=str(exc),
+                beta_run_id=beta_run_id,
             )
             result = {
+                "beta_run_id": beta_run_id,
                 "status": "failed",
                 "verification_result": "FAILED",
                 "reason": "beta_api_exception",
@@ -1889,11 +2028,73 @@ def build_web_app():
             if temp_context is not None:
                 temp_context.cleanup()
         result = beta_result_dict(result, output_dir_value)
+        result["beta_run_id"] = result.get("beta_run_id") or beta_run_id
         verification_result = result.get("verification_result") or "BLOCKED"
         success = verification_result in {"PASS", "PASS_WITH_NOTES"}
         if not success:
-            return beta_failure_response(result, output_dir_value, 500)
+            beta_stage_log(
+                "BETA_API_RESPONSE_READY",
+                input_path=(payload or {}).get("input_dir") if isinstance(payload, dict) else "",
+                output_dir=output_dir_value,
+                current_file=", ".join([Path(str(item)).name for item in (payload or {}).get("input_files") or []]) if isinstance(payload, dict) else "",
+                flat_output=bool((payload or {}).get("flat_output")) if isinstance(payload, dict) else False,
+                business_output=bool((payload or {}).get("business_output")) if isinstance(payload, dict) else False,
+                beta_run_id=beta_run_id,
+                error_message=result.get("error_message") or result.get("reason") or result.get("stage") or "",
+            )
+            return beta_failure_response(result, output_dir_value, 200, 500)
+        beta_stage_log(
+            "BETA_API_RESPONSE_READY",
+            input_path=(payload or {}).get("input_dir") if isinstance(payload, dict) else "",
+            output_dir=output_dir_value,
+            current_file=", ".join([Path(str(item)).name for item in (payload or {}).get("input_files") or []]) if isinstance(payload, dict) else "",
+            flat_output=bool((payload or {}).get("flat_output")) if isinstance(payload, dict) else False,
+            business_output=bool((payload or {}).get("business_output")) if isinstance(payload, dict) else False,
+            beta_run_id=beta_run_id,
+        )
         return beta_success_body(result, verification_result)
+
+    @app.post("/api/beta/safe-1080p/output-status")
+    async def beta_safe_1080p_output_status(payload: dict = Body(default_factory=dict)):
+        payload = payload if isinstance(payload, dict) else {}
+        beta_run_id = str(payload.get("beta_run_id") or "")
+        output_dir_value = payload.get("output_dir") or "D:/影界文件/1080P安全增强输出"
+        output_dir = Path(str(output_dir_value)).expanduser()
+        selected_names_raw = payload.get("selected_file_names") or payload.get("files") or []
+        if isinstance(selected_names_raw, str):
+            selected_names = [selected_names_raw]
+        else:
+            selected_names = [str(item) for item in selected_names_raw if str(item or "").strip()]
+        results: list[dict[str, str]] = []
+        if output_dir.exists() and output_dir.is_dir():
+            for selected_name in selected_names:
+                safe_name = safe_upload_name(selected_name)
+                stem = Path(safe_name).stem
+                candidates = sorted(output_dir.glob(f"{stem}_1080p_beta*.png"), key=lambda item: item.stat().st_mtime, reverse=True)
+                if candidates:
+                    output_path = candidates[0]
+                    results.append(
+                        {
+                            "input_name": safe_name,
+                            "output_name": output_path.name,
+                            "output_path": str(output_path),
+                        }
+                    )
+        found = bool(results)
+        return {
+            "ok": found,
+            "success": True,
+            "status": "SUCCESS" if found else "PENDING",
+            "code": 200,
+            "beta_run_id": beta_run_id,
+            "found": found,
+            "verification_result": "PASS" if found else "PENDING",
+            "processed_count": len(results),
+            "skipped_count": 0,
+            "results": results,
+            "enhanced_files": [row["output_path"] for row in results],
+            "output_dir": str(output_dir),
+        }
 
     @app.post("/api/beta/safe-1080p/feedback-package")
     async def beta_safe_1080p_feedback_package(payload: dict = Body(default_factory=dict)):
