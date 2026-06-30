@@ -19,6 +19,7 @@
 - `safe_1080p_enhance.py` 在 flat/business 模式下只处理显式 `input_files`，并在结果中返回 input/output 映射。
 - Dashboard Beta 前台按钮改为使用 `output_path` / `results` / `enhanced_files`，复制成品路径不再依赖普通任务 `final_output_url`；对比、报告、系统诊断与 batch report 在 Beta 下禁用或隐藏并说明原因。
 - Beta 测试反馈包支持 Dashboard multipart minimal package，缺少持久输入目录时不再只返回 `Diagnostic feedback package blocked`。
+- 测试反馈包环境信息拆分为 Windows 友好显示字段与底层诊断字段，`10.0.xxxxx` 内核版本不再作为用户系统版本展示。
 
 ## 2026-06-29 - V0.4.6 RC1 safe 1080P Beta API timeout
 

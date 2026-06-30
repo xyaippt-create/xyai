@@ -63,6 +63,38 @@ def _run_version(command: list[str], cwd: Path) -> str:
     return (completed.stdout or completed.stderr or "").strip().splitlines()[0] if (completed.stdout or completed.stderr) else "unavailable"
 
 
+def _run_text(command: list[str], cwd: Path, timeout: int = 8) -> str:
+    try:
+        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False)
+    except Exception:
+        return ""
+    return (completed.stdout or "").strip()
+
+
+def _powershell_json(script: str, cwd: Path, timeout: int = 12) -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    output = _run_text(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f"{script} | ConvertTo-Json -Compress",
+        ],
+        cwd,
+        timeout,
+    )
+    if not output:
+        return {}
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _git_commit(project_root: Path) -> str:
     value = _run_version(["git", "rev-parse", "--short", "HEAD"], project_root)
     return value if value and value != "unavailable" else "unknown"
@@ -140,20 +172,151 @@ def _tool_checks(project_root: Path) -> dict[str, Any]:
     }
 
 
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _windows_registry_info(project_root: Path) -> dict[str, Any]:
+    return _powershell_json(
+        "Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' | "
+        "Select-Object ProductName,DisplayVersion,ReleaseId,CurrentBuild,CurrentBuildNumber,UBR,EditionID,InstallationType,InstallDate",
+        project_root,
+    )
+
+
+def _windows_computer_info(project_root: Path) -> dict[str, Any]:
+    return _powershell_json(
+        "Get-ComputerInfo | "
+        "Select-Object WindowsProductName,WindowsVersion,OsDisplayVersion,OsName,OsVersion,OsBuildNumber,OsArchitecture,OsInstallDate",
+        project_root,
+        timeout=20,
+    )
+
+
+def _windows_feature_experience_pack(project_root: Path) -> str:
+    output = _run_text(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "(Get-AppxPackage MicrosoftWindows.Client.CBS -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Version)",
+        ],
+        project_root,
+        timeout=12,
+    )
+    return output or "unknown"
+
+
+def _windows_install_date(value: Any) -> str:
+    if isinstance(value, dict):
+        datetime_value = _first_text(value.get("DateTime"), value.get("value"))
+        if datetime_value:
+            return datetime_value
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        try:
+            return datetime.fromtimestamp(int(text)).isoformat(timespec="seconds")
+        except (OSError, ValueError, OverflowError):
+            return text
+    return text
+
+
+def _windows_display_name(computer_info: dict[str, Any], registry_info: dict[str, Any], build_number: str) -> str:
+    name = _first_text(
+        computer_info.get("WindowsProductName"),
+        computer_info.get("OsName"),
+        registry_info.get("ProductName"),
+        "Windows",
+    )
+    try:
+        build_value = int(build_number)
+    except ValueError:
+        build_value = 0
+    if build_value >= 22000 and "Windows 10" in name:
+        name = name.replace("Windows 10", "Windows 11")
+    return name
+
+
+def _windows_environment(project_root: Path) -> dict[str, Any]:
+    computer_info = _windows_computer_info(project_root)
+    registry_info = _windows_registry_info(project_root)
+    kernel_version = platform.version()
+    build_number = _first_text(
+        registry_info.get("CurrentBuildNumber"),
+        registry_info.get("CurrentBuild"),
+        computer_info.get("OsBuildNumber"),
+    )
+    ubr = _first_text(registry_info.get("UBR"))
+    display_version = _first_text(
+        computer_info.get("OsDisplayVersion"),
+        registry_info.get("DisplayVersion"),
+        computer_info.get("WindowsVersion"),
+        registry_info.get("ReleaseId"),
+    )
+    notes: list[str] = []
+    if not ubr:
+        notes.append("UBR unavailable; os_build_full falls back to build number.")
+    if not display_version:
+        notes.append("Windows display version unavailable.")
+    os_build_full = f"{build_number}.{ubr}" if build_number and ubr else build_number
+    return {
+        "os_display_name": _windows_display_name(computer_info, registry_info, build_number),
+        "os_display_version": display_version or "unknown",
+        "os_build_full": os_build_full or "unknown",
+        "os_install_date": _windows_install_date(computer_info.get("OsInstallDate") or registry_info.get("InstallDate")) or "unknown",
+        "os_architecture": _first_text(computer_info.get("OsArchitecture"), platform.machine()),
+        "windows_feature_experience_pack": _windows_feature_experience_pack(project_root),
+        "os_kernel_version": kernel_version,
+        "windows_build_number": build_number or "unknown",
+        "windows_ubr": ubr or "unknown",
+        "system_arch_raw": platform.machine(),
+        "windows_edition_id": _first_text(registry_info.get("EditionID")),
+        "windows_installation_type": _first_text(registry_info.get("InstallationType")),
+        "diagnostics_notes": notes,
+    }
+
+
 def _environment(project_root: Path, input_dir: Path, output_dir: Path, feedback_dir: Path, mode: str) -> dict[str, Any]:
     uname = platform.uname()
+    windows_env = _windows_environment(project_root) if os.name == "nt" else {
+        "os_display_name": uname.system,
+        "os_display_version": "",
+        "os_build_full": "",
+        "os_install_date": "unknown",
+        "os_architecture": platform.machine(),
+        "windows_feature_experience_pack": "unknown",
+        "os_kernel_version": platform.version(),
+        "windows_build_number": "",
+        "windows_ubr": "",
+        "system_arch_raw": platform.machine(),
+        "diagnostics_notes": [],
+    }
+    node_path = shutil.which("node") or "unavailable"
+    npm_path = shutil.which("npm") or shutil.which("npm.cmd") or "unavailable"
     return {
         "software_name": "影界 HDDE",
         "software_version": "V0.4.6 RC1",
         "commit": _git_commit(project_root),
         "mode": mode,
         "os_name": uname.system,
-        "os_version": platform.version(),
-        "windows_build": platform.version() if os.name == "nt" else "",
-        "system_arch": platform.machine(),
+        "os_version": windows_env["os_display_version"],
+        "windows_build": windows_env["os_build_full"],
+        "system_arch": windows_env["os_architecture"],
+        **windows_env,
         "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
         "node_version": _run_version(["node", "--version"], project_root),
+        "node_path": node_path,
         "npm_version": _run_version(["npm", "--version"], project_root),
+        "npm_path": npm_path,
         "working_dir": str(project_root),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
