@@ -18,6 +18,17 @@
 - Beta API 增加 `BETA_REQUEST_INPUT_FILES` 与 `BETA_RESOLVED_INPUT_FILES` 阶段日志；没有显式输入文件时返回 `BETA_INPUT_MISSING`。
 - `safe_1080p_enhance.py` 在 flat/business 模式下只处理显式 `input_files`，并在结果中返回 input/output 映射。
 - Dashboard Beta 前台按钮改为使用 `output_path` / `results` / `enhanced_files`，复制成品路径不再依赖普通任务 `final_output_url`；对比、报告、系统诊断与 batch report 在 Beta 下禁用或隐藏并说明原因。
+- Dashboard Beta 队列行 `定位`、`查看对比`、`报告` 改为 Beta 专用行为：定位同步当前队列样本，对比使用 contact sheet / output_path，报告展示轻量结果摘要和反馈包入口。
+- Dashboard Beta 对比查看按标准版对比结果骨架收口，交付报告按“质量报告终审 / 本地报告中心”骨架收口，保留 Beta 本地结果映射与反馈包入口，不强接标准 QualityReportPage。
+- Dashboard 增加 1080P安全增强版 Beta 核心增强任务页，使用前端阶段状态和 API 返回结果映射 Progress Timeline / BETA STAGE LOG，不强接标准 SSE。
+- Dashboard 主控区收口为“图片导入 / 处理模式 / 输出文件夹 / 开始处理”任务准备条，队列、交付看板与反馈包入口统一标准版和 Beta 展示字段。
+- Dashboard Beta 对比页补充 contact sheet 网页预览排查与最小接入：若返回 `contact_sheet_url` / `contact_sheet_preview_url` 等可浏览器访问 URL 则直接渲染，否则保留本地预览未接入降级态并强化说明；不改后端 API、SSE、`final_output_url` 或标准版流程。
+- Dashboard Beta 提交前收口：清理旧反馈包死代码，确认 contact sheet 无可用 URL 时继续保留本地预览未接入降级态，统一 Beta 对比页版本标识与返回工作台文案；不涉及后端 API、SSE、`final_output_url`、delivery guard 或标准版流程。
+- Dashboard Beta 交付报告页进行视觉减负：压缩核心质量指标展示高度，收敛本地报告中心路径信息，输出绑定改为摘要展示；不改变后端接口、标准版流程和质量字段策略。
+- Dashboard Beta 补齐输出体积诊断字段：区分 final output 与 contact sheet 体积，前端展示输入体积、成品体积、体积倍率、contact sheet 体积和输出格式；本轮只统计，不改变任何压缩、格式、增强或交付策略。
+- 新增输出文件体积压缩试验脚本，支持 PNG/JPG/WebP 候选体积对比，区分 final output、透明 PNG、contact sheet / preview；本轮只做实验，不改变正式交付链路、压缩策略、`final_output_url` 或 delivery guard。
+- 新增压缩候选视觉 QA 守门打包脚本，生成候选对比 contact sheet、视觉风险摘要与补丁 C 候选判断；本轮只做实验 QA，不接入正式链路、不改变 `final_output_url`、delivery guard 或 compression gate。
+- Beta contact sheet / preview 接入轻量 JPG90 保存，新增 `contact_sheet_light`、`contact_sheet_light_size_bytes`、`contact_sheet_light_format` 和 `preview_only` 标记；final output、`final_output_url`、delivery guard、compression gate 与正式成品保存策略不变。
 - Beta 测试反馈包支持 Dashboard multipart minimal package，缺少持久输入目录时不再只返回 `Diagnostic feedback package blocked`。
 - 测试反馈包环境信息拆分为 Windows 友好显示字段与底层诊断字段，`10.0.xxxxx` 内核版本不再作为用户系统版本展示。
 

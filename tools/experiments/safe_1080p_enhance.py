@@ -25,6 +25,7 @@ import numpy as np
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
 BETA_TIMEOUT_SECONDS = 300
+CONTACT_SHEET_LIGHT_JPEG_QUALITY = 90
 DEFAULT_OUTPUT_DIR = Path("D:/影界文件/1080P安全增强输出")
 DEFAULT_DIAGNOSTIC_DIR = Path("D:/影界文件/影界测试反馈包")
 
@@ -142,6 +143,30 @@ def write_image(path: Path, image: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
+def file_size_bytes(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size if path.exists() and path.is_file() else None
+    except OSError:
+        return None
+
+
+def file_format(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix == "jpeg":
+        return "jpg"
+    return suffix or None
+
+
+def size_ratio(output_size: int | None, input_size: int | None) -> float | None:
+    if not input_size or output_size is None:
+        return None
+    return round(output_size / input_size, 4)
+
+
 def fit_height(image: np.ndarray, height: int) -> np.ndarray:
     scale = height / image.shape[0]
     width = max(1, int(round(image.shape[1] * scale)))
@@ -164,7 +189,7 @@ def labeled_panel(image: np.ndarray, label: str, height: int) -> np.ndarray:
     return np.vstack([label_bar, panel])
 
 
-def make_contact_sheet(original: np.ndarray, blend35: np.ndarray, protected35: np.ndarray, path: Path) -> None:
+def build_contact_sheet(original: np.ndarray, blend35: np.ndarray, protected35: np.ndarray) -> np.ndarray:
     rendered = [
         labeled_panel(original, "original", 720),
         labeled_panel(blend35, "35% blend", 720),
@@ -184,7 +209,25 @@ def make_contact_sheet(original: np.ndarray, blend35: np.ndarray, protected35: n
     sheet = normalized[0]
     for panel in normalized[1:]:
         sheet = np.hstack([sheet, spacer, panel])
+    return sheet
+
+
+def make_contact_sheet(original: np.ndarray, blend35: np.ndarray, protected35: np.ndarray, path: Path) -> None:
+    sheet = build_contact_sheet(original, blend35, protected35)
     write_image(path, sheet)
+
+
+def make_contact_sheet_light(original: np.ndarray, blend35: np.ndarray, protected35: np.ndarray, path: Path) -> None:
+    sheet = build_contact_sheet(original, blend35, protected35)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        sheet,
+        [int(cv2.IMWRITE_JPEG_QUALITY), CONTACT_SHEET_LIGHT_JPEG_QUALITY],
+    )
+    if not ok:
+        raise RuntimeError(f"Cannot encode contact sheet preview: {path}")
+    encoded.tofile(str(path))
 
 
 def resize_to_match(source: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -512,25 +555,52 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     warnings: list[str] = []
     failure: Exception | None = None
     failed_file = ""
+    failed_input_size_bytes: int | None = None
+    failed_output_size_bytes: int | None = None
+    failed_contact_sheet_size_bytes: int | None = None
 
     try:
         for image_path in inputs:
             failed_file = image_path.name
             image_start = time.perf_counter()
+            input_size = file_size_bytes(image_path)
+            failed_input_size_bytes = input_size
+            failed_output_size_bytes = None
+            failed_contact_sheet_size_bytes = None
             original = read_image(image_path)
             image_type, reason, metrics = classify_image(image_path, original)
             base = image_path.stem
             if image_type != "commercial_non_portrait":
-                skipped.append({"file": image_path.name, "type": image_type, "reason": reason, "metrics": metrics})
+                skipped.append(
+                    {
+                        "file": image_path.name,
+                        "input_name": image_path.name,
+                        "type": image_type,
+                        "reason": reason,
+                        "metrics": metrics,
+                        "input_size_bytes": input_size,
+                        "output_size_bytes": None,
+                        "contact_sheet_size_bytes": None,
+                        "contact_sheet_light": "",
+                        "contact_sheet_light_size_bytes": None,
+                        "contact_sheet_light_format": None,
+                        "contact_sheet_light_role": "preview_only",
+                        "size_ratio": None,
+                        "output_format": None,
+                        "contact_sheet_format": None,
+                    }
+                )
                 continue
 
             after_path = after_dir / f"{base}_x4plus.png"
             if flat_output:
                 enhanced_path = unique_business_path(enhanced_dir / f"{base}_1080p_beta.png", run_token)
                 contact_path = unique_business_path(contact_dir / f"{base}_contact_sheet.png", run_token)
+                contact_light_path = unique_business_path(contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg", run_token)
             else:
                 enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
                 contact_path = contact_dir / f"{base}_contact_sheet.png"
+                contact_light_path = contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg"
 
             run_realesrgan(
                 exe,
@@ -561,6 +631,8 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 business_output=business_output,
             )
             write_image(enhanced_path, protected35)
+            output_size = file_size_bytes(enhanced_path)
+            failed_output_size_bytes = output_size
             emit_stage(
                 stage_logger,
                 "BETA_FLAT_OUTPUT_WRITE_DONE",
@@ -582,9 +654,11 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 business_output=business_output,
             )
             contact_sheet_value = ""
+            contact_sheet_light_value = ""
             try:
                 make_contact_sheet(original, blend35, protected35, contact_path)
                 contact_sheet_value = relative_or_name(contact_path, run_dir)
+                failed_contact_sheet_size_bytes = file_size_bytes(contact_path)
             except Exception as exc:
                 warning = f"contact_sheet_write_failed: {tail_text(exc)}"
                 warnings.append(warning)
@@ -600,6 +674,12 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     error_message=warning,
                 )
             else:
+                try:
+                    make_contact_sheet_light(original, blend35, protected35, contact_light_path)
+                    contact_sheet_light_value = relative_or_name(contact_light_path, run_dir)
+                except Exception as exc:
+                    warning = f"contact_sheet_light_write_failed: {tail_text(exc)}"
+                    warnings.append(warning)
                 emit_stage(
                     stage_logger,
                     "BETA_CONTACT_SHEET_DONE",
@@ -609,6 +689,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     current_file=image_path.name,
                     flat_output=flat_output,
                     business_output=business_output,
+                    contact_sheet_light=contact_sheet_light_value,
                 )
             processed.append(
                 {
@@ -622,6 +703,17 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "after": "" if flat_output else relative_or_name(after_path, run_dir),
                     "enhanced": relative_or_name(enhanced_path, run_dir),
                     "contact_sheet": contact_sheet_value,
+                    "input_size_bytes": input_size,
+                    "output_size_bytes": output_size,
+                    "contact_sheet_size_bytes": file_size_bytes(contact_path) if contact_sheet_value else None,
+                    "contact_sheet_light": contact_sheet_light_value,
+                    "contact_sheet_light_size_bytes": file_size_bytes(contact_light_path) if contact_sheet_light_value else None,
+                    "contact_sheet_light_format": file_format(contact_light_path) if contact_sheet_light_value else None,
+                    "contact_sheet_light_quality": CONTACT_SHEET_LIGHT_JPEG_QUALITY if contact_sheet_light_value else None,
+                    "contact_sheet_light_role": "preview_only",
+                    "size_ratio": size_ratio(output_size, input_size),
+                    "output_format": file_format(enhanced_path),
+                    "contact_sheet_format": file_format(contact_path) if contact_sheet_value else None,
                     "elapsed_seconds": round(time.perf_counter() - image_start, 3),
                 }
             )
@@ -654,6 +746,15 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             "returncode": getattr(failure, "returncode", ""),
             "stderr_tail": tail_text(getattr(failure, "stderr_tail", "")),
             "failed_file": failed_file,
+            "input_size_bytes": failed_input_size_bytes,
+            "output_size_bytes": failed_output_size_bytes,
+            "contact_sheet_size_bytes": failed_contact_sheet_size_bytes,
+            "contact_sheet_light_size_bytes": None,
+            "contact_sheet_light_format": None,
+            "contact_sheet_light_role": "preview_only",
+            "size_ratio": size_ratio(failed_output_size_bytes, failed_input_size_bytes),
+            "output_format": None,
+            "contact_sheet_format": None,
             "mode": args.mode,
             "model": args.model,
             "input_dir": str(input_dir),

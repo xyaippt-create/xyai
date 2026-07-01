@@ -18,12 +18,12 @@ const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
 const processingModeOptions = [
   {
     id: PROCESSING_MODE_STANDARD,
-    label: "标准优化",
-    desc: "沿用当前高清交付流程，适合通用图片优化。",
+    label: "1080P标准版",
+    desc: "沿用当前高清交付流程，适合标准 1080P 交付。",
   },
   {
     id: PROCESSING_MODE_SAFE_BETA,
-    label: "1080P安全增强 Beta",
+    label: "1080P安全增强版 Beta",
     desc: "适用于中文商业非人像图，使用 35% protected 策略进行安全增强。",
   },
 ];
@@ -84,8 +84,9 @@ const deliveryStatusColor = {
 function getModeDisplay(mode) {
   const normalized = mode || "";
   if (["fidelity", "texture", "text_safe"].includes(normalized)) {
-    return { label: "标准优化", className: "text-[#00ffcc]" };
+    return { label: "1080P标准版", className: "text-[#00ffcc]" };
   }
+  if (normalized === PROCESSING_MODE_SAFE_BETA) return { label: "1080P安全增强版 Beta", className: "text-[#6feaf0]" };
   return { label: normalized || "未选择", className: "text-[#94a3b8]" };
 }
 function getOutputFormatDisplay(format) {
@@ -113,6 +114,24 @@ function safeText(value, fallback = "暂无数据") {
 function formatFileSize(file) {
   if (!file) return "0 MB";
   return `${(file.size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatBytesToMb(value, fallback = "-") {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return `${(number / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatSizeRatio(value, fallback = "-") {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return `${number.toFixed(2)}×`;
+}
+
+function pathFormat(value) {
+  const filename = String(value || "").split(/[?#]/)[0].split(/[\\/]/).pop() || "";
+  const index = filename.lastIndexOf(".");
+  return index >= 0 ? filename.slice(index + 1).toLowerCase() : "";
 }
 
 function formatSafeBetaStatus(status) {
@@ -145,6 +164,201 @@ function firstSafeBetaOutputPath(item, result) {
   if (results[0]?.output_path) return results[0].output_path;
   const enhancedFiles = Array.isArray(result?.enhanced_files) ? result.enhanced_files : [];
   return enhancedFiles[0] || "";
+}
+
+function normalizeSafeBetaPreviewUrl(url) {
+  if (!url) return "";
+  const value = String(url);
+  if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value) || /^file:\/\//i.test(value)) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("/")) return normalizeApiUrl(value);
+  return "";
+}
+
+function findSafeBetaResultRow(item, result) {
+  const results = Array.isArray(result?.results) ? result.results : [];
+  if (!item) return results[0] || {};
+  return results.find((row) => row?.input_name === item.name || row?.file === item.name) || results[0] || {};
+}
+
+function findSafeBetaProcessedRow(item, result) {
+  if (!item) return {};
+  if (item.beta_processed) return item.beta_processed;
+  const processed = Array.isArray(result?.processed) ? result.processed : [];
+  return processed.find((row) => row?.input_name === item.name || row?.file === item.name) || {};
+}
+
+function findSafeBetaSkippedRow(item, result) {
+  if (!item) return {};
+  if (item.beta_skipped) return item.beta_skipped;
+  const skipped = Array.isArray(result?.skipped) ? result.skipped : [];
+  return skipped.find((row) => row?.input_name === item.name || row?.file === item.name) || {};
+}
+
+function firstSafeBetaContactSheet(item, result) {
+  if (item?.contact_sheet) return item.contact_sheet;
+  const processed = findSafeBetaProcessedRow(item, result);
+  return processed?.contact_sheet || "";
+}
+
+function firstSafeBetaContactSheetLight(item, result) {
+  if (item?.contact_sheet_light) return item.contact_sheet_light;
+  const processed = findSafeBetaProcessedRow(item, result);
+  return processed?.contact_sheet_light || "";
+}
+
+function firstSafeBetaContactSheetPreviewUrl(item, result) {
+  const processed = findSafeBetaProcessedRow(item, result);
+  const mapped = findSafeBetaResultRow(item, result);
+  const candidates = [
+    item?.contact_sheet_light_url,
+    item?.contact_sheet_light_preview_url,
+    item?.contact_sheet_url,
+    item?.contact_sheet_preview_url,
+    processed?.contact_sheet_light_url,
+    processed?.contact_sheet_light_preview_url,
+    processed?.contact_sheet_url,
+    processed?.contact_sheet_preview_url,
+    mapped?.contact_sheet_light_url,
+    mapped?.contact_sheet_light_preview_url,
+    mapped?.contact_sheet_url,
+    mapped?.contact_sheet_preview_url,
+    result?.contact_sheet_light_url,
+    result?.contact_sheet_light_preview_url,
+    result?.contact_sheet_url,
+    result?.contact_sheet_preview_url,
+    item?.contact_sheet,
+    processed?.contact_sheet,
+    mapped?.contact_sheet,
+  ];
+  return candidates.map(normalizeSafeBetaPreviewUrl).find(Boolean) || "";
+}
+
+function firstSafeBetaOutputPreviewUrl(item, result) {
+  const processed = findSafeBetaProcessedRow(item, result);
+  const mapped = findSafeBetaResultRow(item, result);
+  const candidates = [
+    item?.output_url,
+    item?.preview_url,
+    item?.public_url,
+    item?.final_output_url,
+    processed?.output_url,
+    processed?.preview_url,
+    processed?.public_url,
+    processed?.final_output_url,
+    mapped?.output_url,
+    mapped?.preview_url,
+    mapped?.public_url,
+    mapped?.final_output_url,
+    result?.output_url,
+    result?.preview_url,
+    result?.public_url,
+    result?.final_output_url,
+    item?.output_path,
+    processed?.output_path,
+    mapped?.output_path,
+  ];
+  return candidates.map(normalizeSafeBetaPreviewUrl).find(Boolean) || "";
+}
+
+function safeBetaItemStatusText(item, result) {
+  if (!item) return "等待任务";
+  if (item.status === "completed") return "已生成";
+  if (item.status === "processing") return "处理中";
+  if (item.status === "need_reselect") return "需重新选择";
+  if (item.status === "failed") {
+    const skipped = findSafeBetaSkippedRow(item, result);
+    if (skipped?.reason) return `已跳过：${skipped.reason}`;
+    return item.error || "处理失败";
+  }
+  return "待处理";
+}
+
+function safeBetaReasonText(item, result) {
+  const skipped = findSafeBetaSkippedRow(item, result);
+  const reason = skipped?.reason || item?.error || item?.final_delivery_reason || "";
+  if (!reason) return "-";
+  if (String(reason).includes("skip_portrait_metrics")) return "人物图保护跳过";
+  return reason;
+}
+
+function SafeBetaMetricBar({ label, keyName, value, active }) {
+  const width = active ? 100 : 0;
+  return (
+    <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/70 px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-medium text-[#e2e8f0]">{label}</p>
+          <p className="mt-0.5 truncate font-mono text-[9px] uppercase tracking-[0.2em] text-[#475569]" title={keyName}>{keyName}</p>
+        </div>
+        <span className={`shrink-0 font-mono text-sm font-bold tracking-tight ${active ? "text-[#00ffcc]" : "text-[#64748b]"}`}>
+          {value || "-"}
+        </span>
+      </div>
+      <div className="relative h-1.5 overflow-hidden rounded-sm border border-[#1c1f26] bg-black/35">
+        <div className="absolute inset-y-0 left-0 bg-[#3f6f68]" style={{ width: `${width}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function isBrowserPreviewablePath(path) {
+  return /^https?:\/\//i.test(path || "");
+}
+
+function makeSafeBetaQualityMetrics() {
+  return [
+    ["text_clarity_score", "文字清晰度", "待接入"],
+    ["edge_quality_score", "边缘质量", "待接入"],
+    ["color_fidelity_score", "色彩忠实度", "待接入"],
+    ["texture_score", "纹理保持力", "待接入"],
+  ];
+}
+
+function makeSafeBetaTimeline(item, result) {
+  const progress = Number(item?.progress ?? result?.progress ?? 0);
+  const status = item?.status || "";
+  const reason = safeBetaReasonText(item, result);
+  const hasOutput = Boolean(firstSafeBetaOutputPath(item, result));
+  const hasContactSheet = Boolean(firstSafeBetaContactSheet(item, result));
+  const failed = status === "failed" || ["BLOCKED", "FAILED"].includes(String(result?.status || "").toUpperCase());
+  const skipped = reason !== "-" && (String(reason).includes("跳过") || item?.beta_status === "SKIPPED");
+  const completed = status === "completed" || hasOutput;
+
+  const phaseStatus = (threshold) => {
+    if (failed) return "失败";
+    if (skipped && threshold >= 55) return "跳过";
+    if (completed) return "完成";
+    if (progress >= threshold) return "执行中";
+    return "等待";
+  };
+
+  return [
+    { name: "图像读取", detail: "读取当前队列上传文件，确认真实 File 对象。", state: progress >= 15 || completed ? "完成" : phaseStatus(15) },
+    { name: "安全判定", detail: "判断中文商业非人像 / 人物保护跳过 / 输入缺失。", state: skipped ? "跳过" : progress >= 35 || completed ? "完成" : phaseStatus(35) },
+    { name: "安全增强", detail: "执行 1080P安全增强 Beta，不展示不存在的算法细分进度。", state: phaseStatus(55) },
+    { name: "对比生成", detail: "生成 contact sheet / 输出映射。", state: hasContactSheet ? "完成" : completed ? "跳过" : phaseStatus(80) },
+    { name: "交付输出", detail: "写入 output_path，准备统一反馈包入口。", state: hasOutput ? "完成" : phaseStatus(100) },
+  ];
+}
+
+function makeSafeBetaStageLogs(item, result) {
+  const logs = [];
+  if (item?.file) logs.push("BETA_FILE_OBJECT_VALID");
+  if (result?.status === "NEED_RESELECT") logs.push("BETA_FILE_OBJECT_MISSING");
+  if (result?.beta_run_id) {
+    logs.push("BETA_FORMDATA_BUILD_START");
+    logs.push("BETA_FETCH_WILL_SEND");
+    logs.push("BETA_FETCH_SENT");
+  }
+  if (result?.status && result.status !== "RUNNING") {
+    logs.push("BETA_FETCH_RESPONSE_STATUS");
+    logs.push("BETA_FETCH_RESPONSE_JSON");
+  }
+  if (item?.beta_status === "SKIPPED" || safeBetaReasonText(item, result).includes("跳过")) logs.push("BETA_INPUT_SKIPPED");
+  if (item?.status === "completed") logs.push("BETA_DONE");
+  if (item?.status === "failed" || ["BLOCKED", "FAILED"].includes(String(result?.status || "").toUpperCase())) logs.push("BETA_FAILED");
+  return [...new Set(logs)];
 }
 
 function makeQueueId(file) {
@@ -1008,12 +1222,13 @@ export default function DashboardPage() {
     logSafeBeta(betaRunId, "BETA_FILE_OBJECT_VALID", {
       frontend_selected_file_name: betaItems.map((item) => item.name),
     });
-    const setBetaQueueCompleted = (results, fallbackOutputPath, fallbackOutputName) => {
+    const setBetaQueueCompleted = (results, processedRows, fallbackOutputPath, fallbackOutputName) => {
       if (!betaItemIds.length) return;
       setFileQueue((prev) =>
         prev.map((item) => {
           if (!betaItemIds.includes(item.id)) return item;
           const mapped = results.find((row) => row.input_name === item.name) || results[0] || {};
+          const processed = processedRows.find((row) => row.input_name === item.name || row.file === item.name) || {};
           const outputPath = mapped.output_path || fallbackOutputPath || "";
           const outputName = mapped.output_name || fallbackOutputName || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
           return {
@@ -1023,6 +1238,25 @@ export default function DashboardPage() {
             output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
             output_filename: outputName || "已生成",
             output_path: outputPath,
+            contact_sheet: processed.contact_sheet || "",
+            contact_sheet_light: processed.contact_sheet_light || "",
+            contact_sheet_light_size_bytes: processed.contact_sheet_light_size_bytes ?? null,
+            contact_sheet_light_format: processed.contact_sheet_light_format || "",
+            contact_sheet_light_role: processed.contact_sheet_light_role || "preview_only",
+            contact_sheet_url:
+              processed.contact_sheet_light_url ||
+              processed.contact_sheet_light_preview_url ||
+              processed.contact_sheet_url ||
+              processed.contact_sheet_preview_url ||
+              mapped.contact_sheet_light_url ||
+              mapped.contact_sheet_light_preview_url ||
+              mapped.contact_sheet_url ||
+              mapped.contact_sheet_preview_url ||
+              "",
+            output_url: processed.output_url || processed.preview_url || processed.public_url || mapped.output_url || mapped.preview_url || mapped.public_url || "",
+            beta_result: mapped,
+            beta_processed: processed,
+            beta_status: "PASS",
             final_delivery_status: "PASS_WITH_LIMITATION",
             final_delivery_reason: "1080P安全增强 Beta 已生成，建议查看后使用。",
             final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
@@ -1044,6 +1278,7 @@ export default function DashboardPage() {
       setActiveItemId(betaItems[0].id);
       setDebugItemId(betaItems[0].id);
     }
+    setActiveScreen("safe_beta_task");
     setSafeBetaStartedAt(startedAt);
     setSafeBetaTick(0);
     setSafeBetaFeedbackResult(null);
@@ -1136,7 +1371,7 @@ export default function DashboardPage() {
         elapsed_seconds: data.elapsed_seconds || Math.round((Date.now() - startedAt) / 1000),
         message: payload.message || "处理完成",
       });
-      setBetaQueueCompleted(results, firstEnhanced, firstOutputName);
+      setBetaQueueCompleted(results, processedItems, firstEnhanced, firstOutputName);
       logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
         status: resultStatus,
         progress: 100,
@@ -1169,16 +1404,26 @@ export default function DashboardPage() {
         skipped: skippedRows,
         message: failureMessage,
       });
-      setBetaQueuePatch({
-        status: "failed",
-        progress: 100,
-        output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
-        output_filename: "",
-        final_delivery_status: "FAIL",
-        final_delivery_reason: failureMessage,
-        error: failureMessage,
-        logs: [failureMessage],
-      });
+      setFileQueue((prev) =>
+        prev.map((item) => {
+          if (!betaItemIds.includes(item.id)) return item;
+          const skipped = skippedRows.find((row) => row?.input_name === item.name || row?.file === item.name) || skippedRows[0] || {};
+          const itemMessage = skipped?.reason ? `${item.name} 被 1080P安全增强 Beta 安全策略跳过：${skipped.reason}` : failureMessage;
+          return {
+            ...item,
+            status: "failed",
+            progress: 100,
+            output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+            output_filename: "",
+            final_delivery_status: "FAIL",
+            final_delivery_reason: itemMessage,
+            beta_skipped: skipped,
+            beta_status: skipped?.reason ? "SKIPPED" : "FAILED",
+            error: itemMessage,
+            logs: [itemMessage],
+          };
+        }),
+      );
       logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
         status: "BLOCKED",
         error: failureMessage,
@@ -1189,7 +1434,7 @@ export default function DashboardPage() {
       processingRef.current = false;
       setIsProcessingQueue(false);
       setCurrentIndex(0);
-      setActiveScreen("dashboard");
+      setActiveScreen("safe_beta_task");
     }
   };
   const exportSafeBetaFeedbackPackage = async () => {
@@ -1365,9 +1610,31 @@ export default function DashboardPage() {
     setNotice(`全部处理完成：成功 ${successCount} 张，失败 ${failedCount} 张。`);
   };
 
+  const locateQueueItem = (item) => {
+    if (!item) return;
+    setActiveItemId(item.id);
+    setDebugItemId(item.id);
+    if (item.mode === PROCESSING_MODE_SAFE_BETA) {
+      const outputPath = firstSafeBetaOutputPath(item, safeBetaResult);
+      const stateText = safeBetaItemStatusText(item, safeBetaResult);
+      setActiveScreen("safe_beta_task");
+      setNotice(`已定位：${item.name}｜${stateText}${outputPath ? `｜${outputPath}` : ""}`);
+      return;
+    }
+    setNotice(`已定位：${item.name}`);
+  };
+
   const selectForCompare = (item) => {
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
-      setNotice("Beta 对比暂未接入标准对比页，请打开输出目录查看原图与增强图。");
+      locateQueueItem(item);
+      const contactSheet = firstSafeBetaContactSheet(item, safeBetaResult);
+      const outputPath = firstSafeBetaOutputPath(item, safeBetaResult);
+      if (contactSheet || outputPath) {
+        setActiveScreen("safe_beta_compare");
+        setNotice(contactSheet ? "已打开 1080P安全增强版 Beta 对比查看。" : "当前图片没有 contact sheet，已显示输出路径，请打开输出目录查看增强图。");
+        return;
+      }
+      setNotice("当前图片尚未生成对比图，请先运行 1080P安全增强 Beta。");
       return;
     }
     if (!item?.final_output_url) return;
@@ -1377,7 +1644,9 @@ export default function DashboardPage() {
 
   const selectForReport = (item) => {
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
-      setNotice("Beta 报告暂未接入标准质量报告页，请使用技术详情中的测试反馈包。");
+      locateQueueItem(item);
+      setActiveScreen("safe_beta_report");
+      setNotice("已打开 1080P安全增强版 Beta 交付报告。");
       return;
     }
     if (!item?.task_report && !item?.debug_quality) return;
@@ -1423,6 +1692,19 @@ export default function DashboardPage() {
       setNotice(betaPath ? "已复制 Beta 成品本地路径。" : "已复制成品映射 URL。");
     } catch (error) {
       setNotice(error.message || "复制成品路径失败。");
+    }
+  };
+
+  const handleCopySafeBetaPath = async (value, label = "路径") => {
+    if (!value) {
+      setNotice(`当前没有可复制的 ${label}。`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      setNotice(`已复制 ${label}。`);
+    } catch (error) {
+      setNotice(error.message || `复制 ${label} 失败。`);
     }
   };
 
@@ -1479,6 +1761,490 @@ export default function DashboardPage() {
     );
   }
 
+  if (activeScreen === "safe_beta_task") {
+    const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
+    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
+    const reasonText = safeBetaReasonText(activeItem, safeBetaResult);
+    const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
+    const isPortraitSkip = reasonText === "人物图保护跳过";
+    const deliveryConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "建议查看后使用" : activeItem?.status === "failed" ? "不建议交付" : "等待";
+    const canViewCompare = Boolean(contactSheet || outputPath);
+    const timeline = makeSafeBetaTimeline(activeItem, safeBetaResult);
+    const betaLogs = makeSafeBetaStageLogs(activeItem, safeBetaResult);
+    return (
+      <section className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#0b0c0e] p-4 text-slate-100">
+        <header className="mb-4 flex shrink-0 items-center justify-between gap-5 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">SAFE 1080P BETA / CORE TASK</p>
+            <h1 className="mt-2 truncate text-xl font-semibold tracking-wide text-white">1080P安全增强版 Beta · 核心增强任务页</h1>
+            <p className="mt-1 truncate font-mono text-xs text-[#64748b]" title={activeItem?.name || ""}>
+              beta_run_id: {safeBetaResult?.beta_run_id || "-"} · 当前文件：{activeItem?.name || safeBetaResult?.current_file || "等待任务"}
+            </p>
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-2 text-xs text-[#94a3b8] transition hover:bg-[#2d3139] hover:text-white">返回工作台</button>
+            <button type="button" disabled={!canViewCompare} title={!canViewCompare ? "当前尚未生成对比图" : ""} onClick={() => selectForCompare(activeItem)} className="rounded-sm border border-[#2d665f] px-3 py-2 text-xs text-[#5bf5dc] transition hover:bg-[#163631] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">查看高清对比</button>
+            <button type="button" onClick={() => selectForReport(activeItem)} className="rounded-sm border border-[#66532d] bg-[#17130a] px-3 py-2 text-xs text-[#f0c36f] transition hover:bg-[#211b0e]">查看交付报告</button>
+          </div>
+        </header>
+
+        <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-4">
+          <section className="flex min-h-0 flex-col gap-4 overflow-hidden">
+            <div className="grid shrink-0 grid-cols-2 gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4 text-xs">
+              {[
+                ["模式", "1080P安全增强版 Beta"],
+                ["目标规格", "1080P安全增强"],
+                ["当前状态", statusTextValue],
+                ["交付结论", deliveryConclusion],
+                ["输出路径", outputPath || "未生成"],
+                ["contact sheet", contactSheet || "未生成"],
+              ].map(([label, value]) => (
+                <div key={label} className="min-w-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 p-3">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#475569]">{label}</p>
+                  <p className="mt-1 truncate text-sm text-[#e2e8f0]" title={String(value)}>{value}</p>
+                </div>
+              ))}
+            </div>
+
+            <section className="min-h-0 flex-1 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Progress Timeline</p>
+                  <h2 className="mt-2 text-lg font-semibold text-white">核心增强阶段</h2>
+                </div>
+                <span className="font-mono text-xs text-[#64748b]">{safeBetaResult?.progress ?? activeItem?.progress ?? 0}%</span>
+              </div>
+              <div className="space-y-3">
+                {timeline.map((stage, index) => {
+                  const color = stage.state === "完成" ? "text-[#8be6b1]" : stage.state === "执行中" ? "text-[#6feaf0]" : stage.state === "跳过" ? "text-[#f0c36f]" : stage.state === "失败" ? "text-[#ff8a8a]" : "text-[#64748b]";
+                  return (
+                    <div key={stage.name} className="grid grid-cols-[32px_minmax(0,1fr)_72px] items-start gap-3 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/35 p-3">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-sm border border-[#263738] font-mono text-xs text-[#94a3b8]">{index + 1}</div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-[#e2e8f0]">{stage.name}</p>
+                        <p className="mt-1 text-xs leading-5 text-[#64748b]">{stage.detail}</p>
+                      </div>
+                      <span className={`text-right text-xs font-semibold ${color}`}>{stage.state}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </section>
+
+          <aside className="flex min-h-0 flex-col gap-4">
+            <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">BETA STAGE LOG</p>
+              <h2 className="mt-2 text-lg font-semibold text-white">安全增强阶段日志</h2>
+              <p className="mt-1 text-xs leading-5 text-[#64748b]">这是 Beta 前端阶段日志，不是标准 SSE。</p>
+              <div className="mt-4 max-h-[280px] space-y-2 overflow-y-auto pr-1">
+                {(betaLogs.length ? betaLogs : ["等待 Beta 阶段日志"]).map((item) => (
+                  <div key={item} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2 font-mono text-[11px] text-[#94a3b8]">{item}</div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Unified Actions</p>
+              <h2 className="mt-2 text-lg font-semibold text-white">可用操作</h2>
+              <div className="mt-4 grid gap-2">
+                <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
+                <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
+                <button type="button" onClick={exportSafeBetaFeedbackPackage} disabled={!safeBetaResult?.output_dir || isProcessingQueue} className="rounded-sm bg-[#10b981] px-4 py-2 text-xs font-bold text-[#0b0c0e] transition hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569]">导出测试反馈包 / 反馈包中心</button>
+              </div>
+            </section>
+          </aside>
+        </main>
+
+        <footer className="mt-3 shrink-0 truncate border-t border-[#1c1f26] pt-2 text-center font-mono text-[10px] tracking-wider text-[#64748b]">
+          影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
+        </footer>
+      </section>
+    );
+  }
+
+  if (activeScreen === "safe_beta_compare") {
+    const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
+    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
+    const contactSheetLight = firstSafeBetaContactSheetLight(activeItem, safeBetaResult);
+    const processed = findSafeBetaProcessedRow(activeItem, safeBetaResult);
+    const outputName = activeItem?.output_filename || processed?.output_name || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
+    const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
+    const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
+    const contactSheetPreviewUrl = firstSafeBetaContactSheetPreviewUrl(activeItem, safeBetaResult);
+    const outputPreviewUrl = firstSafeBetaOutputPreviewUrl(activeItem, safeBetaResult);
+    const previewImageUrl = contactSheetPreviewUrl || outputPreviewUrl;
+    const previewImageLabel = contactSheetPreviewUrl ? "CONTACT SHEET" : outputPreviewUrl ? "OUTPUT PREVIEW" : "";
+    const compareTitle = previewImageUrl ? "1080P安全增强版 Beta · 对比结果" : "1080P安全增强版 Beta · 本地对比查看";
+    const compareMetrics = makeSafeBetaQualityMetrics();
+    const compareStatusRows = [
+      ["成品状态", outputPath ? "已生成" : statusTextValue],
+      ["contact sheet", contactSheet ? "已生成" : "未生成"],
+      ["网页预览", previewImageUrl ? "已接入" : "未接入"],
+      ["本地路径", contactSheet || outputPath ? "已绑定" : "未绑定"],
+      ["交付结论", deliveryText || "-"],
+    ];
+    return (
+      <section className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-[#060b0c] p-6 text-slate-200">
+        <div className="pointer-events-none absolute inset-0 bg-[#060b0c]" />
+        <header className="relative z-10 mb-4 flex h-[82px] shrink-0 items-center justify-between gap-6 border-b border-[#14282a] pb-4">
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-[#418c80]">影界 HDDE V0.4.6 RC1 / SAFE BETA COMPARE</p>
+            <h1 className="mt-2 truncate text-2xl font-semibold tracking-wide text-slate-100">{compareTitle}</h1>
+            <p className="mt-1 truncate font-mono text-xs text-slate-500" title={activeItem?.name || ""}>
+              前后对比 · 1080P安全增强版 Beta · {activeItem?.name || "未选择样本"}
+            </p>
+          </div>
+
+          <div className="flex shrink-0 gap-3">
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-sm border border-[#193336] px-4 py-2 text-xs tracking-wide text-[#8a999c] transition hover:bg-[#112426] hover:text-slate-200">
+              返回工作台
+            </button>
+            <button type="button" onClick={() => setActiveScreen("safe_beta_report")} className="rounded-sm border border-[#2d665f] bg-[#163631] px-5 py-2 font-mono text-xs font-bold uppercase tracking-widest text-[#5bf5dc] transition hover:brightness-125">
+              查看交付报告
+            </button>
+          </div>
+        </header>
+
+        <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-5">
+          <section className="relative h-full min-h-0 overflow-hidden rounded-lg border border-[#193336] bg-[#040708] shadow-[0_40px_140px_rgba(60,179,160,0.14)]">
+            {previewImageUrl ? (
+              <img src={previewImageUrl} alt="1080P安全增强版 Beta contact sheet" className="absolute inset-0 h-full w-full object-contain" />
+            ) : contactSheet ? (
+              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
+                <div className="max-w-2xl px-8 text-center">
+                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#3cb3a0]/45 bg-[#3cb3a0]/10" />
+                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#3cb3a0]/70">本地预览未接入</p>
+                  <p className="mt-3 text-sm leading-7 text-slate-400">contact sheet 已生成，但当前浏览器页面无法直接读取 Windows 本地文件。请点击“打开输出目录”查看本地对比图，或复制成品路径进行复核。</p>
+                  <div className="mt-4 grid grid-cols-3 gap-2 text-left text-xs">
+                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">contact sheet：</span><span className="text-[#8effed]">已生成</span></div>
+                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">网页预览：</span><span className="text-[#f0c36f]">未接入</span></div>
+                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">本地路径：</span><span className="text-[#8effed]">已绑定</span></div>
+                  </div>
+                  <p className="mt-4 break-all rounded border border-[#193336] bg-[#0d181a] p-3 text-left font-mono text-xs leading-6 text-slate-500">{contactSheet}</p>
+                  <div className="mt-4 flex justify-center gap-3">
+                    <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
+                    <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
+                  </div>
+                </div>
+              </div>
+            ) : outputPath ? (
+              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
+                <div className="max-w-2xl px-8 text-center">
+                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#f0c36f]/45 bg-[#f0c36f]/10" />
+                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#f0c36f]">Output Ready</p>
+                  <p className="mt-3 text-sm leading-7 text-slate-400">本地预览不可用，当前没有 contact sheet，可打开输出目录查看增强图。</p>
+                  <p className="mt-4 break-all rounded border border-[#193336] bg-[#0d181a] p-3 text-left font-mono text-xs leading-6 text-slate-500">{outputPath}</p>
+                  <div className="mt-4 flex justify-center gap-3">
+                    <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
+                    <button type="button" onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26]">复制成品路径</button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
+                <div className="max-w-md px-8 text-center">
+                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#3cb3a0]/45 bg-[#3cb3a0]/10" />
+                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#3cb3a0]/70">Waiting Compare</p>
+                  <p className="mt-3 text-sm leading-7 text-slate-500">当前尚未生成对比图。</p>
+                </div>
+              </div>
+            )}
+
+            {previewImageUrl ? (
+              <div className="absolute left-5 top-5 z-20 rounded border border-[#3cb3a0]/35 bg-[#3cb3a0]/10 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.24em] text-[#8effed] backdrop-blur-md">
+                {previewImageLabel}
+              </div>
+            ) : null}
+            <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-[10px] tracking-[0.2em] text-white/40 backdrop-blur-md">
+              影界 HDDE V0.4.6 RC1 · {activeItem?.name || "等待真实上传资产"} · HD Delivery Engine
+            </div>
+          </section>
+
+          <aside className="flex h-full min-h-0 flex-col gap-4">
+            <div className="rounded-lg border border-[#132628] bg-[#091113] p-5">
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Physical QA</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-100">高清交付指标</h2>
+              <p className="mt-2 truncate text-xs text-slate-500">{activeItem?.name || "未选择样本"} · 1080P安全增强版 Beta</p>
+              <div className="mt-5 space-y-3">
+                {compareMetrics.map(([keyName, name, value]) => (
+                  <div key={keyName} className="rounded border border-[#193336] bg-[#0d181a] p-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <p className="font-mono text-[9px] uppercase tracking-[0.22em] text-[#418c80]">{keyName}</p>
+                        <p className="mt-1 text-xs text-slate-400">{name}</p>
+                      </div>
+                      <span className="font-mono text-sm font-bold text-slate-500">{value}</span>
+                    </div>
+                    <div className="mt-3 h-[3px] overflow-hidden rounded-full bg-[#0e1d1f]">
+                      <div className="h-full rounded-full bg-[#3f6f68]" style={{ width: "0%" }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-[#132628] bg-[#091113] p-5">
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-100">字段绑定</h2>
+              <div className="mt-4 space-y-3 font-mono text-xs text-slate-400">
+                {[
+                  ...compareStatusRows,
+                  ["输出文件", outputName || "未生成"],
+                  ["输出绑定", outputPath || "未绑定"],
+                  ["contact sheet", contactSheet || "未生成"],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-w-0 overflow-hidden rounded border border-[#193336] bg-[#0d181a] p-3">
+                    <span className="text-slate-500">{label}：</span>
+                    <span className="break-words" title={String(value)}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-[#132628] bg-[#091113] p-5">
+              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Manual Review</p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-100">人工复核清单</h2>
+              <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+                {["文字与 Logo 是否保持可读", "边缘是否无明显光晕", "颜色是否接近原图", "是否适合交付使用"].map((item, index) => (
+                  <label key={item} className="flex items-start gap-3 rounded border border-[#193336] bg-[#0d181a] p-3 text-sm text-slate-300">
+                    <input className="mt-1 accent-[#3cb3a0]" type="checkbox" defaultChecked={index < 2} />
+                    <span>{item}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </aside>
+        </main>
+
+        <footer className="relative z-10 mt-3 w-full shrink-0 truncate border-t border-[#0e1d1f] px-3 pt-2 text-center font-mono text-[10px] tracking-wider text-slate-600">
+          影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
+        </footer>
+      </section>
+    );
+  }
+
+  if (activeScreen === "safe_beta_report") {
+    const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
+    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
+    const contactSheetLight = firstSafeBetaContactSheetLight(activeItem, safeBetaResult);
+    const processed = findSafeBetaProcessedRow(activeItem, safeBetaResult);
+    const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
+    const reasonText = safeBetaReasonText(activeItem, safeBetaResult);
+    const outputName = activeItem?.output_filename || processed?.output_name || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
+    const inputSizeBytes = processed?.input_size_bytes ?? activeItem?.input_size_bytes ?? safeBetaResult?.input_size_bytes ?? null;
+    const outputSizeBytes = processed?.output_size_bytes ?? activeItem?.output_size_bytes ?? activeItem?.output_size ?? null;
+    const contactSheetSizeBytes = processed?.contact_sheet_size_bytes ?? activeItem?.contact_sheet_size_bytes ?? null;
+    const contactSheetLightSizeBytes = processed?.contact_sheet_light_size_bytes ?? activeItem?.contact_sheet_light_size_bytes ?? null;
+    const computedSizeRatio = inputSizeBytes && outputSizeBytes ? outputSizeBytes / inputSizeBytes : null;
+    const sizeRatioValue = processed?.size_ratio ?? activeItem?.size_ratio ?? computedSizeRatio;
+    const outputFormatValue = processed?.output_format || activeItem?.output_format || pathFormat(outputPath) || "-";
+    const contactSheetFormatValue = processed?.contact_sheet_format || activeItem?.contact_sheet_format || pathFormat(contactSheet) || "-";
+    const contactSheetLightFormatValue = processed?.contact_sheet_light_format || activeItem?.contact_sheet_light_format || pathFormat(contactSheetLight) || "-";
+    const outputDimensions = activeItem?.output_width && activeItem?.output_height ? `${activeItem.output_width} × ${activeItem.output_height}` : processed?.output_width && processed?.output_height ? `${processed.output_width} × ${processed.output_height}` : "-";
+    const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
+    const isPortraitSkip = reasonText === "人物图保护跳过";
+    const reportConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "已生成" : activeItem?.status === "failed" ? "失败" : "未生成";
+    const deliveryAdvice = outputPath ? "建议查看后使用" : "不建议交付";
+    const limitationExplanation = isPortraitSkip
+      ? "人物图保护跳过，不放开人像增强。"
+      : outputPath
+        ? "成品已生成，建议打开输出目录查看文字、Logo、边缘和颜色后使用。"
+        : "当前未生成成品，请查看失败原因后重新选择合适的中文商业非人像图。";
+    const reportStatusSummary = isPortraitSkip
+      ? "人物图保护跳过"
+      : reasonText && reasonText !== "-"
+        ? reasonText
+        : outputPath
+          ? "1080P安全增强 Beta 已生成，建议查看后使用。"
+          : "当前未生成成品，请查看失败原因。";
+    const pathSummaryRows = [
+      { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
+      { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
+      { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
+    ];
+    const outputBindingRows = [
+      { label: "输入文件名", value: activeItem?.name || "未选择", status: activeItem?.name || "未选择" },
+      { label: "输出文件名", value: outputName || "未生成", status: outputName || "未生成" },
+      { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
+      { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
+      { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
+      ...(outputPath
+        ? [
+            { label: "输入体积", value: formatBytesToMb(inputSizeBytes) },
+            { label: "成品体积", value: formatBytesToMb(outputSizeBytes) },
+            { label: "体积倍率", value: formatSizeRatio(sizeRatioValue) },
+            { label: "contact sheet 体积", value: formatBytesToMb(contactSheetSizeBytes) },
+            { label: "contact sheet preview 体积", value: formatBytesToMb(contactSheetLightSizeBytes) },
+            { label: "输出格式", value: outputFormatValue.toUpperCase() },
+            { label: "contact sheet 格式", value: contactSheetFormatValue.toUpperCase() },
+            { label: "preview 格式", value: contactSheetLightFormatValue.toUpperCase() },
+          ]
+        : []),
+    ];
+    const reviewReasons = [
+      { label: contactSheet ? "contact sheet 已生成" : "contact sheet 未生成", detail: contactSheet ? "本地对比图已生成，完整路径可通过复制按钮获取。" : "当前样本没有可用 contact sheet。" },
+      { label: outputPath ? "output_path 已生成" : "output_path 未生成", detail: outputPath ? "本地成品路径已绑定，完整路径可通过复制按钮获取。" : "当前样本没有可复制的成品路径。" },
+      ...(isPortraitSkip ? [{ label: "人物图保护跳过", detail: "Beta 当前不放开人像增强，避免破坏面部主体。" }] : []),
+      ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [{ label: "跳过 / 失败原因", detail: reasonText }] : []),
+    ];
+    return (
+      <section className="flex h-full w-full flex-row gap-4 overflow-hidden bg-[#0b0c0e] p-4 text-slate-100">
+        <div className="scrollbar-none flex h-full min-w-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+          <header className="shrink-0 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <div className="flex items-baseline justify-between gap-5">
+              <h1 className="shrink-0 text-xl font-bold tracking-wider text-white">质量报告终审</h1>
+              <span className="truncate font-mono text-[10px] uppercase tracking-widest text-[#475569]">影界 HDDE / 高清交付引擎</span>
+            </div>
+            <p className="mt-2 truncate font-mono text-[11px] text-[#475569]" title={activeItem?.name || ""}>
+              1080P安全增强版 Beta / 资产特征值：{activeItem?.name || "未选择样本"}
+            </p>
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="mt-3 rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-1.5 text-xs text-[#94a3b8] transition-colors hover:bg-[#2d3139] hover:text-white">
+              ← 返回工作台
+            </button>
+          </header>
+
+          <section className="shrink-0 space-y-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <div className="flex items-end justify-between gap-4">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Score Overlay</p>
+                <h2 className="mt-2 text-lg font-semibold text-white">核心质量指标</h2>
+              </div>
+              <div className="text-right font-mono text-xs leading-6 text-white/40">
+                <p>输入：待接入</p>
+                <p>输出：{outputDimensions}</p>
+              </div>
+            </div>
+            <div className="grid gap-2.5">
+              {makeSafeBetaQualityMetrics().map(([keyName, label, value]) => (
+                <SafeBetaMetricBar key={keyName} label={label} keyName={keyName} value={value} active={false} />
+              ))}
+            </div>
+          </section>
+
+          <section className="shrink-0 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
+                <h2 className="mt-1 text-sm font-semibold text-white">输出绑定摘要</h2>
+              </div>
+              <span className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e] px-2 py-1 text-xs text-[#94a3b8]">{reportConclusion}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+              {outputBindingRows.map((item) => (
+                <div key={item.label} className="min-w-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="shrink-0 text-[11px] text-[#64748b]">{item.label}</span>
+                    {item.copyLabel ? (
+                      <button type="button" disabled={!item.value} onClick={() => handleCopySafeBetaPath(item.value, item.copyLabel)} className="shrink-0 rounded border border-[#2d665f] px-2 py-0.5 text-[10px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
+                        复制路径
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="truncate font-mono text-xs text-[#00ffcc]" title={String(item.value || item.status)}>
+                    {item.copyLabel ? item.status : item.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {!outputPath ? (
+              <p className="mt-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 px-3 py-2 text-xs text-[#64748b]">
+                成品生成后显示体积信息。
+              </p>
+            ) : null}
+          </section>
+        </div>
+
+        <aside className="scrollbar-none flex h-full w-[320px] shrink-0 flex-col gap-3 overflow-y-auto pr-1">
+          <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Local Report Center</p>
+                <h2 className="mt-2 text-lg font-semibold text-white">本地报告中心</h2>
+                <p className="mt-1 text-xs leading-5 text-[#64748b]">面向人工验收的状态解释，不改变 Beta 原始结果字段。</p>
+              </div>
+              <div className="shrink-0 rounded-sm border border-[#66532d] bg-[#0b0c0e] px-2.5 py-1 text-xs font-semibold text-[#f0c36f]">
+                {deliveryAdvice}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-2.5">
+              <div className="grid gap-1.5 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
+                {[
+                  ["图像类型", "1080P安全增强版 Beta"],
+                  ["处理结论", reportConclusion],
+                  ["交付建议", deliveryAdvice],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="shrink-0 text-[#64748b]">{label}</span>
+                    <span className="truncate text-right font-medium text-[#e2e8f0]" title={value}>{value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="grid gap-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
+                {pathSummaryRows.map((item) => (
+                  <div key={item.label} className="min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-[#94a3b8]">{item.label}：{item.status}</span>
+                      <button type="button" disabled={!item.value} onClick={() => handleCopySafeBetaPath(item.value, item.copyLabel)} className="shrink-0 rounded border border-[#2d665f] px-2 py-0.5 text-[10px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
+                        复制路径
+                      </button>
+                    </div>
+                    <div className="mt-1 truncate font-mono text-[10px] text-[#475569]" title={item.value || item.status}>{item.value || item.status}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
+                <div className="text-xs font-medium text-[#f0c36f]">状态说明</div>
+                <div className="mt-1 truncate text-[11px] text-[#94a3b8]" title={reportStatusSummary}>{reportStatusSummary}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-sm border border-[#66532d]/45 bg-[#100d06]/55 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xs font-medium text-[#f0c36f]">PASS_WITH_LIMITATION 解释</h3>
+                <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.18em] text-[#856404]">Manual Review</span>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-[#d8c28c]">{limitationExplanation}</p>
+            </div>
+
+            <div className="mt-4">
+              <h3 className="mb-2 text-xs font-medium text-[#94a3b8]">复核原因标签</h3>
+              <div className="grid gap-2">
+                {reviewReasons.map((item, index) => (
+                  <div key={`${item.label}-${index}`} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-1.5">
+                    <div className="truncate text-xs font-medium text-[#f0c36f]" title={item.label}>{item.label}</div>
+                    <div className="mt-0.5 truncate text-[11px] text-[#94a3b8]" title={item.detail}>{item.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4 text-xs leading-6 text-[#94a3b8]">
+            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Feedback Package</p>
+            <p className="mt-3 text-[#64748b]">反馈包路径</p>
+            <p className="truncate font-mono text-[#8be6b1]" title={safeBetaFeedbackResult?.feedback_zip_path || "尚未导出"}>{safeBetaFeedbackResult?.feedback_zip_path || "尚未导出"}</p>
+          </section>
+
+          <section className="mt-auto flex shrink-0 flex-col gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <div>
+              <span className="block font-mono text-[10px] uppercase tracking-wider text-[#64748b]">Final Signature</span>
+              <h2 className="mt-1 text-sm font-medium text-white">终审操作</h2>
+              <p className="mt-1 text-xs leading-relaxed text-[#94a3b8]">导出反馈包或打开本地输出目录后，返回工作台继续验收。</p>
+            </div>
+            <button type="button" onClick={exportSafeBetaFeedbackPackage} disabled={!safeBetaResult?.output_dir || isProcessingQueue} className="w-full rounded-sm bg-[#10b981] py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569]">
+              导出测试反馈包
+            </button>
+            <button type="button" onClick={handleOpenOutputDir} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26]">打开输出目录</button>
+            <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#94a3b8] transition hover:bg-[#1c1f26]">返回工作台</button>
+          </section>
+        </aside>
+      </section>
+    );
+  }
+
   const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA ? "当前状态：Beta输出目录" : appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
   const currentOutputDir = processingMode === PROCESSING_MODE_SAFE_BETA ? DEFAULT_SAFE_BETA_OUTPUT_DIR : appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
   const safeBetaElapsedSeconds =
@@ -1486,15 +2252,23 @@ export default function DashboardPage() {
       ? Math.max(0, Math.round((Date.now() - safeBetaStartedAt) / 1000) + safeBetaTick * 0)
       : safeBetaResult?.elapsed_seconds || 0;
   const isSafeBetaSelected = processingMode === PROCESSING_MODE_SAFE_BETA;
+  const activeSafeBetaItem = isSafeBetaSelected ? activeItem : null;
+  const activeSafeBetaOutputPath = isSafeBetaSelected ? firstSafeBetaOutputPath(activeSafeBetaItem, safeBetaResult) : "";
+  const activeSafeBetaContactSheet = isSafeBetaSelected ? firstSafeBetaContactSheet(activeSafeBetaItem, safeBetaResult) : "";
+  const activeSafeBetaStatusText = isSafeBetaSelected ? safeBetaItemStatusText(activeSafeBetaItem, safeBetaResult) : "";
   const safeBetaUserStatus = formatSafeBetaStatus(safeBetaResult?.status);
   const safeBetaGeneratedCount = readSafeBetaCount(safeBetaResult?.processed_count || safeBetaResult?.enhanced_count);
   const safeBetaSkippedCount = readSafeBetaCount(safeBetaResult?.skipped_count);
-  const safeBetaCurrentFile = safeBetaResult?.current_file || activeItem?.name || "等待任务";
+  const safeBetaCurrentFile = activeSafeBetaItem?.name || safeBetaResult?.current_file || "等待任务";
   const safeBetaFailureSummary = ["BLOCKED", "FAILED"].includes(String(safeBetaResult?.status || "").toUpperCase())
-    ? safeBetaResult?.message || activeItem?.error || "处理失败"
+    ? activeSafeBetaItem?.error || safeBetaResult?.message || activeItem?.error || "处理失败"
     : "";
   const safeBetaDeliveryConclusion =
-    safeBetaResult?.status === "RUNNING"
+    activeSafeBetaItem?.status === "completed"
+      ? "建议查看后使用"
+      : activeSafeBetaItem?.status === "failed"
+        ? "处理失败"
+    : safeBetaResult?.status === "RUNNING"
       ? "处理中"
       : safeBetaResult?.status === "NEED_RESELECT"
         ? "本地文件访问已失效"
@@ -1504,7 +2278,9 @@ export default function DashboardPage() {
           ? "建议查看后使用"
           : "等待任务";
   const safeBetaOutputUrlText =
-    safeBetaResult?.status === "RUNNING"
+    activeSafeBetaOutputPath
+      ? activeSafeBetaOutputPath
+      : safeBetaResult?.status === "RUNNING"
       ? "等待生成"
       : safeBetaResult?.status === "NEED_RESELECT"
         ? safeBetaResult?.message || "本地文件访问已失效"
@@ -1514,7 +2290,7 @@ export default function DashboardPage() {
           ? "请打开输出目录查看"
           : "等待生成";
   const safeBetaCurrentState =
-    safeBetaResult?.status === "RUNNING"
+    activeSafeBetaStatusText || (safeBetaResult?.status === "RUNNING"
       ? "Beta 处理中"
       : safeBetaResult?.status === "NEED_RESELECT"
         ? safeBetaResult?.message || "本地文件访问已失效"
@@ -1522,7 +2298,7 @@ export default function DashboardPage() {
         ? safeBetaResult?.message || "处理失败"
         : safeBetaResult?.status
           ? "处理完成"
-          : "等待任务";
+          : "等待任务");
   const deliveryActionItem = activeItem?.status === "completed" ? activeItem : completedItems[completedItems.length - 1] || null;
   const betaActionItem = isSafeBetaSelected ? deliveryActionItem || activeItem : null;
   const safeBetaPrimaryOutputPath = isSafeBetaSelected ? firstSafeBetaOutputPath(betaActionItem, safeBetaResult) : "";
@@ -1555,7 +2331,7 @@ export default function DashboardPage() {
 
       <div className="vmp-workspace-container">
         <section className="scrollbar-none flex h-full w-[280px] shrink-0 flex-col gap-2.5 overflow-y-auto border-r border-[#1c1f26] bg-[#121418] p-3">
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
             <section>
               <p style={DECOR_LABEL}>Input Field</p>
               <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>图片导入</h2>
@@ -1584,7 +2360,7 @@ export default function DashboardPage() {
             </section>
           </div>
 
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
+          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
             <section style={{ display: "flex", flexDirection: "column" }}>
               <p style={DECOR_LABEL}>Processing Mode</p>
               <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>处理模式</h2>
@@ -1792,6 +2568,40 @@ export default function DashboardPage() {
         </section>
 
         <section className="flex h-full flex-1 flex-col overflow-hidden bg-[#0b0c0e] p-4">
+          <div className="mb-4 grid shrink-0 grid-cols-[minmax(180px,1.1fr)_minmax(180px,1fr)_minmax(220px,1.4fr)_160px] gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-3">
+            <div className="min-w-0">
+              <p style={DECOR_LABEL}>Input</p>
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="mt-2 w-full rounded-sm border border-[#6feaf0]/50 bg-[#132f33] px-3 py-2.5 text-left text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef]">
+                图片导入 · 已选择 {fileQueue.length} 张
+              </button>
+            </div>
+            <div className="min-w-0">
+              <p style={DECOR_LABEL}>Mode</p>
+              <select
+                value={processingMode}
+                onChange={(event) => setProcessingMode(event.target.value)}
+                className="mt-2 w-full rounded-sm border border-[#263738] bg-[#05090a] px-3 py-2.5 text-xs text-[#e2e8f0] outline-none"
+              >
+                {processingModeOptions.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="min-w-0">
+              <p style={DECOR_LABEL}>Output Folder</p>
+              <div className="mt-2 flex min-w-0 gap-2">
+                <div className="min-w-0 flex-1 truncate rounded-sm border border-[#1c1f26] bg-[#0b0c0e] px-3 py-2.5 font-mono text-xs text-[#94a3b8]" title={currentOutputDir}>
+                  {currentOutputDir}
+                </div>
+                <button type="button" onClick={handleSelectOutputDir} className="shrink-0 rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">更换</button>
+              </div>
+            </div>
+            <div className="flex min-w-0 items-end">
+              <button type="button" onClick={handleStartQueue} disabled={!canStartExecution} className="w-full rounded-sm border border-[#6feaf0]/50 bg-[#132f33] px-4 py-2.5 text-xs font-bold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-[#263738] disabled:bg-[#0d181a] disabled:text-[#6e7d80]">
+                {processingMode === PROCESSING_MODE_SAFE_BETA ? (isProcessingQueue ? "安全增强处理中..." : "开始安全增强 Beta") : "开始处理"}
+              </button>
+            </div>
+          </div>
           <div className="mb-4 flex w-full flex-1 flex-col overflow-hidden rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
             <div className="mb-2 flex items-center justify-between gap-4">
               <div className="min-w-0">
@@ -1801,13 +2611,14 @@ export default function DashboardPage() {
               <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>{fileQueue.length} 张</span>
             </div>
             <div className="scrollbar-thin w-full flex-1 overflow-auto border border-[#263738] bg-[#05090a]">
-              <table className="w-full text-left font-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "820px" }}>
+              <table className="w-full text-left font-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "980px" }}>
                 <thead style={{ position: "sticky", top: 0, backgroundColor: "#0d181a", color: "#6e7d80", zIndex: 1 }}>
                   <tr className="border-b border-[#1c1f26] text-[#64748b]">
                     <th className="px-3 py-2 text-left font-medium">文件名</th>
-                    <th className="px-3 py-2 text-left font-medium">输出尺寸</th>
                     <th className="px-3 py-2 text-left font-medium">处理模式</th>
-                    <th className="px-3 py-2 text-left font-medium">输出格式</th>
+                    <th className="px-3 py-2 text-left font-medium">目标规格</th>
+                    <th className="px-3 py-2 text-left font-medium">输出尺寸</th>
+                    <th className="px-3 py-2 text-left font-medium">输出体积</th>
                     <th className="px-3 py-2 text-left font-medium">当前状态</th>
                     <th className="px-3 py-2 text-left font-medium">交付状态</th>
                     <th className="px-3 py-2 text-left font-medium">输出文件名</th>
@@ -1817,13 +2628,20 @@ export default function DashboardPage() {
                 <tbody>
                   {!fileQueue.length ? (
                     <tr>
-                      <td colSpan={8} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
+                      <td colSpan={9} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
                     </tr>
                   ) : (
-                    fileQueue.map((item) => (
+                    fileQueue.map((item) => {
+                      const isSafeBetaRow = item.mode === PROCESSING_MODE_SAFE_BETA;
+                      const compareDisabled = isSafeBetaRow ? item.status !== "completed" : item.status !== "completed" || !item.final_output_url;
+                      const reportDisabled = isSafeBetaRow ? item.status === "queued" || item.status === "processing" : item.status !== "completed" || (!item.task_report && !item.debug_quality);
+                      const outputSizeBytes = isSafeBetaRow
+                        ? item.beta_processed?.output_size_bytes ?? item.output_size_bytes ?? item.output_size
+                        : item.output_size ?? item.final_size_bytes ?? item.debug_quality?.final_size_bytes;
+                      const outputSize = formatBytesToMb(outputSizeBytes, isSafeBetaRow ? (item.status === "completed" ? "-" : "待生成") : "待接入");
+                      return (
                       <tr key={item.id} className={`border-b border-[#1c1f26]/50 transition-colors hover:bg-[#121418]/50 ${activeItemId === item.id ? "bg-[#0d181a]" : ""}`}>
                         <td className="max-w-[180px] truncate px-3 py-2 font-mono text-[#e2e8f0]" title={item.name}>{item.name}</td>
-                        <td className="px-3 py-2 font-mono font-medium text-[#00ffcc]">{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
                         <td className="px-3 py-2 font-sans">
                           {(() => {
                             const display = getModeDisplay(item.mode || activeMode);
@@ -1831,19 +2649,21 @@ export default function DashboardPage() {
                           })()}
                         </td>
                         <td className="px-3 py-2 font-mono text-[#64748b]">
-                          <span className="text-[#64748b]">{getOutputFormatDisplay(item.output_format || outputFormat)}</span>
+                          <span className="text-[#94a3b8]">1080P</span>
                         </td>
+                        <td className="px-3 py-2 font-mono font-medium text-[#00ffcc]">{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
+                        <td className="px-3 py-2 font-mono text-[#64748b]">{outputSize}</td>
                         <td className="px-3 py-2"><StatusPill status={item.status} /></td>
                         <td className="px-3 py-2"><DeliveryPill status={item.final_delivery_status} item={item} /></td>
                         <td className={`max-w-[150px] truncate px-3 py-2 font-mono ${item.error ? "text-[#ff8a8a]" : "text-[#64748b]"}`} title={item.output_filename || item.error || ""}>
                           {item.output_filename || (item.status === "failed" && item.mode === PROCESSING_MODE_SAFE_BETA ? "未生成" : item.error || "等待输出")}
                         </td>
                         <td className="space-x-2 px-3 py-2 text-center">
-                          <button type="button" onClick={() => { setActiveItemId(item.id); setDebugItemId(item.id); }} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
+                          <button type="button" onClick={() => locateQueueItem(item)} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
                           <button
                             type="button"
-                            disabled={item.status !== "completed" || item.mode === PROCESSING_MODE_SAFE_BETA}
-                            title={item.mode === PROCESSING_MODE_SAFE_BETA ? "Beta 暂未接入标准对比页，请打开输出目录查看增强图。" : ""}
+                            disabled={compareDisabled}
+                            title={compareDisabled ? "当前图片尚未生成可用对比结果，请先运行处理。" : isSafeBetaRow ? "打开 Beta contact sheet / 对比结果视图。" : ""}
                             onClick={() => selectForCompare(item)}
                             className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]"
                           >
@@ -1851,8 +2671,8 @@ export default function DashboardPage() {
                           </button>
                           <button
                             type="button"
-                            disabled={item.status !== "completed" || item.mode === PROCESSING_MODE_SAFE_BETA}
-                            title={item.mode === PROCESSING_MODE_SAFE_BETA ? "Beta 暂未接入标准质量报告页，请导出测试反馈包。" : ""}
+                            disabled={reportDisabled}
+                            title={reportDisabled ? "当前图片尚未形成可用报告，请先运行处理。" : isSafeBetaRow ? "打开 1080P安全增强版 Beta 交付报告。" : ""}
                             onClick={() => selectForReport(item)}
                             className="text-[11px] text-[#64748b] transition-colors hover:text-[#94a3b8] disabled:cursor-not-allowed disabled:text-[#475569]"
                           >
@@ -1860,7 +2680,8 @@ export default function DashboardPage() {
                           </button>
                         </td>
                       </tr>
-                    ))
+                    );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1906,7 +2727,7 @@ export default function DashboardPage() {
                 {notice}
               </p>
             </div>
-            <button type="button" onClick={handleStartQueue} disabled={!canStartExecution} style={{ backgroundColor: canStartExecution ? "#132f33" : "#0d181a", border: canStartExecution ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: canStartExecution ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: canStartExecution ? "pointer" : "not-allowed", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
+            <button type="button" className="hidden" onClick={handleStartQueue} disabled={!canStartExecution} style={{ backgroundColor: canStartExecution ? "#132f33" : "#0d181a", border: canStartExecution ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: canStartExecution ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: canStartExecution ? "pointer" : "not-allowed", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
               {processingMode === PROCESSING_MODE_SAFE_BETA ? (isProcessingQueue ? "安全增强处理中..." : "开始安全增强 Beta") : "开启核心修复管线"}
             </button>
           </div>
@@ -1925,6 +2746,12 @@ export default function DashboardPage() {
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">处理模式:</span>
+                  <span className="min-w-0 truncate text-right font-mono text-[11px] text-[#e2e8f0]">
+                    {isSafeBetaSelected ? "1080P安全增强版 Beta" : "1080P标准版"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
                   <span className="text-[#94a3b8]">交付结论:</span>
                   {isSafeBetaSelected ? (
                     <span className="rounded border border-[#263738] bg-[#0d181a] px-2 py-1 font-mono text-[10px] text-[#6feaf0]">
@@ -1935,7 +2762,7 @@ export default function DashboardPage() {
                   )}
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">输出 URL:</span>
+                  <span className="text-[#94a3b8]">输出路径:</span>
                   <span className="block max-w-[180px] truncate font-mono text-[11px] text-[#10b981]" title={isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}>
                     {isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}
                   </span>
@@ -1948,10 +2775,30 @@ export default function DashboardPage() {
                     </span>
                   </div>
                 ) : null}
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">输出尺寸:</span>
+                  <span className="font-mono text-[11px] text-[#e2e8f0]">
+                    {activeItem?.output_width && activeItem?.output_height ? `${activeItem.output_width} × ${activeItem.output_height}` : "待接入"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[#94a3b8]">输出体积:</span>
+                  <span className="font-mono text-[11px] text-[#e2e8f0]">
+                    {formatBytesToMb(activeItem?.beta_processed?.output_size_bytes ?? activeItem?.output_size_bytes ?? activeItem?.output_size ?? activeItem?.debug_quality?.final_size_bytes, "待接入")}
+                  </span>
+                </div>
+                {isSafeBetaSelected ? (
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="shrink-0 text-[#94a3b8]">跳过原因:</span>
+                    <span className="min-w-0 truncate text-right font-mono text-[11px] text-[#f0c36f]" title={safeBetaReasonText(activeItem, safeBetaResult)}>
+                      {safeBetaReasonText(activeItem, safeBetaResult)}
+                    </span>
+                  </div>
+                ) : null}
               </div>
           </div>
 
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
+          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <h3 className="text-xs font-medium text-[#94a3b8]">输出文件夹</h3>
               <span className="rounded-sm border border-[#333] bg-[#1c1f26] px-2 py-0.5 text-[10px] text-[#10b981]">
@@ -2038,24 +2885,14 @@ export default function DashboardPage() {
                 </svg>
                 <span>{isSafeBetaSelected ? "复制 Beta 成品路径" : "复制成品映射路径"}</span>
               </button>
-              {!isSafeBetaSelected ? (
-                <>
-                  <button type="button" disabled={!deliveryActionItem?.taskId} onClick={() => handleCreateFeedbackBundle(deliveryActionItem)} className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
-                    <svg className="animate-spin-slow h-3.5 w-3.5 text-[#856404] transition-colors group-hover:text-[#ffc107]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" aria-hidden="true">
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </svg>
-                    <span>生成系统脱敏诊断包</span>
-                  </button>
-                  <button type="button" disabled={!fileQueue.length} onClick={handleDownloadBatchReport} className="w-full rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/50 px-4 py-2 text-[11px] font-medium tracking-wide text-[#94a3b8] transition-colors hover:border-[#00ffcc]/30 hover:text-[#00ffcc] disabled:cursor-not-allowed disabled:text-[#475569]">
-                    生成 batch_report.json
-                  </button>
-                </>
-              ) : (
-                <p className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 px-3 py-2 text-[10px] leading-relaxed text-[#64748b]">
-                  Beta 不写入普通任务注册表，系统诊断包与 batch_report 已移入技术详情/测试反馈包。
-                </p>
-              )}
+              <button
+                type="button"
+                disabled={isSafeBetaSelected ? !safeBetaResult?.output_dir || isProcessingQueue : !deliveryActionItem?.taskId}
+                onClick={() => (isSafeBetaSelected ? exportSafeBetaFeedbackPackage() : handleCreateFeedbackBundle(deliveryActionItem))}
+                className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]"
+              >
+                <span>导出测试反馈包 / 反馈包中心</span>
+              </button>
             </div>
             <p className="border-t border-[#1c1f26]/30 pt-2 text-[10px] leading-relaxed text-[#475569]">
               {isSafeBetaSelected ? "Beta 成品使用本地 output_path / output_dir，不依赖普通任务映射 URL。" : "成品质检仅依据后端解算映射 URL，不读取本地物理路径。"}
