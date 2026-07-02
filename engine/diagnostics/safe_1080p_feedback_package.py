@@ -57,7 +57,16 @@ def _text_bytes(text: str) -> bytes:
 
 def _run_version(command: list[str], cwd: Path) -> str:
     try:
-        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=5, check=False)
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
     except Exception:
         return "unavailable"
     return (completed.stdout or completed.stderr or "").strip().splitlines()[0] if (completed.stdout or completed.stderr) else "unavailable"
@@ -65,7 +74,16 @@ def _run_version(command: list[str], cwd: Path) -> str:
 
 def _run_text(command: list[str], cwd: Path, timeout: int = 8) -> str:
     try:
-        completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False)
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
     except Exception:
         return ""
     return (completed.stdout or "").strip()
@@ -100,11 +118,51 @@ def _git_commit(project_root: Path) -> str:
     return value if value and value != "unavailable" else "unknown"
 
 
+def _git_branch(project_root: Path) -> str:
+    value = _run_version(["git", "branch", "--show-current"], project_root)
+    return value if value and value != "unavailable" else "unknown"
+
+
+def _git_status_lines(project_root: Path) -> list[str]:
+    output = _run_text(["git", "status", "--short"], project_root)
+    return [line for line in output.splitlines() if line.strip()]
+
+
+def _git_worktree_state(project_root: Path) -> dict[str, Any]:
+    lines = _git_status_lines(project_root)
+    untracked = [line for line in lines if line.startswith("??")]
+    modified = [line for line in lines if not line.startswith("??")]
+    return {
+        "branch": _git_branch(project_root),
+        "dirty_worktree": bool(lines),
+        "modified_count": len(modified),
+        "untracked_count": len(untracked),
+        "untracked_summary": untracked[:20],
+        "git_status_short": lines[:80],
+    }
+
+
 def _safe_stat(path: Path) -> int:
     try:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _image_count(path: Path) -> int:
@@ -301,10 +359,12 @@ def _environment(project_root: Path, input_dir: Path, output_dir: Path, feedback
     }
     node_path = shutil.which("node") or "unavailable"
     npm_path = shutil.which("npm") or shutil.which("npm.cmd") or "unavailable"
+    git_state = _git_worktree_state(project_root)
     return {
         "software_name": "影界 HDDE",
         "software_version": "V0.4.6 RC1",
         "commit": _git_commit(project_root),
+        **git_state,
         "mode": mode,
         "os_name": uname.system,
         "os_version": windows_env["os_display_version"],
@@ -389,7 +449,22 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
             "status",
             "problem_code",
             "input_size",
+            "input_size_bytes",
             "output_size",
+            "output_size_bytes",
+            "size_ratio",
+            "output_format",
+            "contact_sheet_size_bytes",
+            "contact_sheet_light_size_bytes",
+            "contact_sheet_light_format",
+            "contact_sheet_light_role",
+            "jpg95_candidate_status",
+            "jpg95_candidate_size_bytes",
+            "jpg95_candidate_saved_ratio",
+            "jpg95_candidate_reason",
+            "jpg95_candidate_path",
+            "final_output_source",
+            "final_output_fallback_reason",
             "mode",
             "strategy",
             "enhanced_generated",
@@ -402,8 +477,14 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
     )
     writer.writeheader()
     for item in run_result.get("processed") or []:
-        enhanced = _resolve_run_file(run_dir, str(item.get("enhanced") or ""))
-        contact = _resolve_run_file(run_dir, str(item.get("contact_sheet") or ""))
+        output_path = str(item.get("output_path") or "")
+        enhanced = Path(output_path) if output_path else _resolve_run_file(run_dir, str(item.get("enhanced") or ""))
+        contact_value = str(item.get("contact_sheet") or "")
+        contact = _resolve_run_file(run_dir, contact_value) if contact_value else None
+        input_name = str(item.get("input_name") or item.get("file") or "")
+        input_size = _int_or_none(_first_present(item.get("input_size_bytes"), item.get("input_size"))) or _safe_stat(input_dir / input_name)
+        output_size = _int_or_none(_first_present(item.get("output_size_bytes"), item.get("output_size"))) or _safe_stat(enhanced)
+        contact_sheet_size = _int_or_none(item.get("contact_sheet_size_bytes")) or (_safe_stat(contact) if contact else None)
         metrics = item.get("metrics") or {}
         risk_tags = []
         if float(metrics.get("text_ratio") or 0) > 0.22:
@@ -413,12 +494,27 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "file_name": item.get("file", ""),
                 "status": "PASS",
                 "problem_code": "PASS" if not risk_tags else ";".join(risk_tags),
-                "input_size": _safe_stat(input_dir / str(item.get("file") or "")),
-                "output_size": _safe_stat(enhanced),
+                "input_size": input_size,
+                "input_size_bytes": input_size,
+                "output_size": output_size,
+                "output_size_bytes": output_size,
+                "size_ratio": item.get("size_ratio", ""),
+                "output_format": item.get("output_format", ""),
+                "contact_sheet_size_bytes": contact_sheet_size,
+                "contact_sheet_light_size_bytes": item.get("contact_sheet_light_size_bytes", ""),
+                "contact_sheet_light_format": item.get("contact_sheet_light_format", ""),
+                "contact_sheet_light_role": item.get("contact_sheet_light_role", ""),
+                "jpg95_candidate_status": item.get("jpg95_candidate_status", ""),
+                "jpg95_candidate_size_bytes": item.get("jpg95_candidate_size_bytes", ""),
+                "jpg95_candidate_saved_ratio": item.get("jpg95_candidate_saved_ratio", ""),
+                "jpg95_candidate_reason": item.get("jpg95_candidate_reason", ""),
+                "jpg95_candidate_path": item.get("jpg95_candidate_path", ""),
+                "final_output_source": item.get("final_output_source", ""),
+                "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
                 "strategy": "35% protected",
                 "enhanced_generated": enhanced.exists(),
-                "contact_sheet_generated": contact.exists(),
+                "contact_sheet_generated": bool(contact and contact.exists()),
                 "elapsed_seconds": item.get("elapsed_seconds", ""),
                 "quality_note": "35% protected candidate generated; inspect contact sheet before use.",
                 "risk_tags": ";".join(risk_tags),
@@ -430,13 +526,30 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
             continue
         input_name = str(item.get("input_name") or "")
         output_path = str(item.get("output_path") or "")
+        input_size = _int_or_none(_first_present(item.get("input_size_bytes"), item.get("input_size"))) or (_safe_stat(input_dir / input_name) if input_name else 0)
+        output_size = _int_or_none(_first_present(item.get("output_size_bytes"), item.get("output_size"))) or (_safe_stat(Path(output_path)) if output_path else 0)
         writer.writerow(
             {
                 "file_name": input_name or str(item.get("output_name") or ""),
                 "status": "PASS" if output_path else "MISSING_OUTPUT",
                 "problem_code": "PASS_WITH_NOTES",
-                "input_size": _safe_stat(input_dir / input_name) if input_name else 0,
-                "output_size": _safe_stat(Path(output_path)) if output_path else 0,
+                "input_size": input_size,
+                "input_size_bytes": input_size,
+                "output_size": output_size,
+                "output_size_bytes": output_size,
+                "size_ratio": item.get("size_ratio", ""),
+                "output_format": item.get("output_format", ""),
+                "contact_sheet_size_bytes": item.get("contact_sheet_size_bytes", ""),
+                "contact_sheet_light_size_bytes": item.get("contact_sheet_light_size_bytes", ""),
+                "contact_sheet_light_format": item.get("contact_sheet_light_format", ""),
+                "contact_sheet_light_role": item.get("contact_sheet_light_role", ""),
+                "jpg95_candidate_status": item.get("jpg95_candidate_status", ""),
+                "jpg95_candidate_size_bytes": item.get("jpg95_candidate_size_bytes", ""),
+                "jpg95_candidate_saved_ratio": item.get("jpg95_candidate_saved_ratio", ""),
+                "jpg95_candidate_reason": item.get("jpg95_candidate_reason", ""),
+                "jpg95_candidate_path": item.get("jpg95_candidate_path", ""),
+                "final_output_source": item.get("final_output_source", ""),
+                "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
                 "strategy": "35% protected",
                 "enhanced_generated": bool(output_path),
@@ -448,13 +561,30 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
             }
         )
     for item in run_result.get("skipped") or []:
+        input_name = str(item.get("input_name") or item.get("file") or "")
+        input_size = _int_or_none(_first_present(item.get("input_size_bytes"), item.get("input_size"))) or _safe_stat(input_dir / input_name)
         writer.writerow(
             {
                 "file_name": item.get("file", ""),
                 "status": "SKIPPED",
                 "problem_code": "WARNING_FACE_RISK" if item.get("type") == "portrait" else "PASS_WITH_NOTES",
-                "input_size": _safe_stat(input_dir / str(item.get("file") or "")),
+                "input_size": input_size,
+                "input_size_bytes": input_size,
                 "output_size": 0,
+                "output_size_bytes": item.get("output_size_bytes", ""),
+                "size_ratio": item.get("size_ratio", ""),
+                "output_format": item.get("output_format", ""),
+                "contact_sheet_size_bytes": item.get("contact_sheet_size_bytes", ""),
+                "contact_sheet_light_size_bytes": item.get("contact_sheet_light_size_bytes", ""),
+                "contact_sheet_light_format": item.get("contact_sheet_light_format", ""),
+                "contact_sheet_light_role": item.get("contact_sheet_light_role", ""),
+                "jpg95_candidate_status": item.get("jpg95_candidate_status", ""),
+                "jpg95_candidate_size_bytes": item.get("jpg95_candidate_size_bytes", ""),
+                "jpg95_candidate_saved_ratio": item.get("jpg95_candidate_saved_ratio", ""),
+                "jpg95_candidate_reason": item.get("jpg95_candidate_reason", ""),
+                "jpg95_candidate_path": item.get("jpg95_candidate_path", ""),
+                "final_output_source": item.get("final_output_source", ""),
+                "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
                 "strategy": "35% protected",
                 "enhanced_generated": False,
@@ -567,6 +697,7 @@ def generate_safe_1080p_feedback_package(
 
     diagnostics = {
         "version": "V0.4.6 RC1",
+        "generated_at": _now_iso(),
         "commit": env["commit"],
         "mode": run_result.get("mode") or "safe_1080p",
         "strategy": "35% protected",

@@ -1,5 +1,11 @@
 # Codex Changelog
 
+## 2026-07-02 - V0.4.6 RC1 feedback package size field alignment
+
+- 对齐 1080P 安全增强 Beta 反馈包体积字段：`image_results.csv` 优先读取 `processed` 中的 `input_size_bytes`、`output_size_bytes`、`size_ratio`、contact sheet light 与 JPG95 candidate 字段，避免 Dashboard minimal package 缺少持久输入目录时 `input_size` 回退为 0。
+- `diagnostics.json` 增加 `generated_at`、branch、dirty worktree、modified/untracked 计数与 `git status --short` 摘要，用于区分反馈包采集 commit 与当前未提交工作区状态。
+- 本轮只修复反馈包 / CSV / diagnostics 字段一致性，不改变 final output、JPG95 candidate 采用策略、`final_output_url`、delivery guard、compression gate 或标准版流程。
+
 ## 2026-06-29 - V0.4.6 RC1 safe 1080P Beta selected input binding
 
 - 修复 Dashboard 1080P安全增强 Beta 处理默认测试样本而非当前队列图片的问题。
@@ -29,6 +35,7 @@
 - 新增输出文件体积压缩试验脚本，支持 PNG/JPG/WebP 候选体积对比，区分 final output、透明 PNG、contact sheet / preview；本轮只做实验，不改变正式交付链路、压缩策略、`final_output_url` 或 delivery guard。
 - 新增压缩候选视觉 QA 守门打包脚本，生成候选对比 contact sheet、视觉风险摘要与补丁 C 候选判断；本轮只做实验 QA，不接入正式链路、不改变 `final_output_url`、delivery guard 或 compression gate。
 - Beta contact sheet / preview 接入轻量 JPG90 保存，新增 `contact_sheet_light`、`contact_sheet_light_size_bytes`、`contact_sheet_light_format` 和 `preview_only` 标记；final output、`final_output_url`、delivery guard、compression gate 与正式成品保存策略不变。
+- C-2-A 新增 1080P安全增强版 Beta 非透明产品广告图 JPG95 candidate，仅在 `commercial_non_portrait`、无真实 alpha、低文字密度且体积收益达标时生成；candidate 仅供人工复核，不替换 `output_path`、`final_output_url`，不改变 delivery guard、compression gate 或标准版流程。
 - Beta 测试反馈包支持 Dashboard multipart minimal package，缺少持久输入目录时不再只返回 `Diagnostic feedback package blocked`。
 - 测试反馈包环境信息拆分为 Windows 友好显示字段与底层诊断字段，`10.0.xxxxx` 内核版本不再作为用户系统版本展示。
 

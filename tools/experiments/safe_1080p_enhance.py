@@ -26,6 +26,11 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
 BETA_TIMEOUT_SECONDS = 300
 CONTACT_SHEET_LIGHT_JPEG_QUALITY = 90
+JPG95_CANDIDATE_QUALITY = 95
+JPG95_CANDIDATE_MIN_OUTPUT_BYTES = 3 * 1024 * 1024
+JPG95_CANDIDATE_MIN_SIZE_RATIO = 4.0
+JPG95_CANDIDATE_MIN_SAVED_RATIO = 0.30
+JPG95_CANDIDATE_TEXT_RATIO_LIMIT = 0.035
 DEFAULT_OUTPUT_DIR = Path("D:/影界文件/1080P安全增强输出")
 DEFAULT_DIAGNOSTIC_DIR = Path("D:/影界文件/影界测试反馈包")
 
@@ -143,6 +148,26 @@ def write_image(path: Path, image: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
+def read_image_unchanged(path: Path) -> np.ndarray:
+    data = np.fromfile(str(path), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError(f"Cannot decode image: {path}")
+    return image
+
+
+def real_alpha_status(path: Path) -> tuple[bool | None, str]:
+    try:
+        image = read_image_unchanged(path)
+    except Exception as exc:
+        return None, f"alpha_detection_failed: {tail_text(exc, 160)}"
+    if image.ndim == 3 and image.shape[2] >= 4:
+        alpha = image[:, :, 3]
+        if bool(np.any(alpha < 255)):
+            return True, "alpha_detected"
+    return False, "no_real_alpha"
+
+
 def file_size_bytes(path: Path | None) -> int | None:
     if path is None:
         return None
@@ -228,6 +253,129 @@ def make_contact_sheet_light(original: np.ndarray, blend35: np.ndarray, protecte
     if not ok:
         raise RuntimeError(f"Cannot encode contact sheet preview: {path}")
     encoded.tofile(str(path))
+
+
+def default_jpg95_candidate_fields(status: str, reason: str, enhanced_path: Path | None = None, output_size: int | None = None) -> dict[str, object]:
+    return {
+        "original_png_output_path": str(enhanced_path) if enhanced_path else "",
+        "original_png_output_size_bytes": output_size,
+        "jpg95_candidate_path": "",
+        "jpg95_candidate_size_bytes": None,
+        "jpg95_candidate_saved_ratio": None,
+        "jpg95_candidate_format": "jpg",
+        "jpg95_candidate_quality": JPG95_CANDIDATE_QUALITY,
+        "jpg95_candidate_role": "final_candidate",
+        "jpg95_candidate_status": status,
+        "jpg95_candidate_reason": reason,
+        "final_output_source": "png_main",
+        "final_output_fallback_reason": "jpg95_candidate_requires_manual_review" if status == "candidate_for_review" else reason,
+    }
+
+
+def remove_file_quietly(path: Path) -> None:
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def make_jpg95_candidate(
+    *,
+    image_path: Path,
+    enhanced_path: Path,
+    candidate_path: Path,
+    image_type: str,
+    metrics: dict[str, float],
+    input_size: int | None,
+    output_size: int | None,
+) -> dict[str, object]:
+    base_fields = default_jpg95_candidate_fields("not_applicable", "candidate_not_evaluated", enhanced_path, output_size)
+    if image_type != "commercial_non_portrait":
+        return {**base_fields, "jpg95_candidate_reason": f"image_type_not_allowed: {image_type}", "final_output_fallback_reason": f"image_type_not_allowed: {image_type}"}
+
+    has_alpha, alpha_reason = real_alpha_status(image_path)
+    if has_alpha is None:
+        return {**base_fields, "jpg95_candidate_reason": alpha_reason, "final_output_fallback_reason": alpha_reason}
+    if has_alpha:
+        return {**base_fields, "jpg95_candidate_reason": alpha_reason, "final_output_fallback_reason": alpha_reason}
+
+    text_ratio = float(metrics.get("text_ratio") or 0.0)
+    if text_ratio >= JPG95_CANDIDATE_TEXT_RATIO_LIMIT:
+        reason = f"text_logo_risk: text_ratio={text_ratio:.4f} >= {JPG95_CANDIDATE_TEXT_RATIO_LIMIT:.3f}"
+        return {**base_fields, "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    if output_size is None or output_size <= 0:
+        reason = "final_output_size_missing"
+        return {**base_fields, "jpg95_candidate_status": "not_generated", "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+    current_size_ratio = size_ratio(output_size, input_size)
+    if output_size < JPG95_CANDIDATE_MIN_OUTPUT_BYTES and (current_size_ratio is None or current_size_ratio < JPG95_CANDIDATE_MIN_SIZE_RATIO):
+        reason = f"final_png_not_large_enough: output_size_bytes={output_size}; size_ratio={current_size_ratio}"
+        return {**base_fields, "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+    if not enhanced_path.exists():
+        reason = "final_png_missing"
+        return {**base_fields, "jpg95_candidate_status": "not_generated", "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    try:
+        final_image = read_image(enhanced_path)
+        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            final_image,
+            [int(cv2.IMWRITE_JPEG_QUALITY), JPG95_CANDIDATE_QUALITY],
+        )
+        if not ok:
+            raise RuntimeError("jpg95_encode_failed")
+        encoded.tofile(str(candidate_path))
+        candidate_image = read_image(candidate_path)
+    except Exception as exc:
+        remove_file_quietly(candidate_path)
+        reason = f"jpg95_candidate_write_failed: {tail_text(exc, 180)}"
+        return {**base_fields, "jpg95_candidate_status": "not_generated", "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    if candidate_image.shape[:2] != final_image.shape[:2]:
+        remove_file_quietly(candidate_path)
+        reason = f"jpg95_resolution_mismatch: final={final_image.shape[1]}x{final_image.shape[0]}; candidate={candidate_image.shape[1]}x{candidate_image.shape[0]}"
+        return {**base_fields, "jpg95_candidate_status": "not_generated", "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    candidate_size = file_size_bytes(candidate_path)
+    if candidate_size is None or candidate_size <= 0:
+        remove_file_quietly(candidate_path)
+        reason = "jpg95_candidate_size_missing"
+        return {**base_fields, "jpg95_candidate_status": "not_generated", "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+    if candidate_size >= output_size:
+        remove_file_quietly(candidate_path)
+        reason = f"jpg95_candidate_not_smaller: candidate_size_bytes={candidate_size}; output_size_bytes={output_size}"
+        return {**base_fields, "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    saved_ratio = round((output_size - candidate_size) / max(output_size, 1), 4)
+    if saved_ratio < JPG95_CANDIDATE_MIN_SAVED_RATIO:
+        remove_file_quietly(candidate_path)
+        reason = f"jpg95_saved_ratio_below_threshold: {saved_ratio} < {JPG95_CANDIDATE_MIN_SAVED_RATIO}"
+        return {**base_fields, "jpg95_candidate_reason": reason, "final_output_fallback_reason": reason}
+
+    return {
+        **base_fields,
+        "jpg95_candidate_path": str(candidate_path),
+        "jpg95_candidate_size_bytes": candidate_size,
+        "jpg95_candidate_saved_ratio": saved_ratio,
+        "jpg95_candidate_status": "candidate_for_review",
+        "jpg95_candidate_reason": f"commercial_non_portrait; {alpha_reason}; text_ratio={text_ratio:.4f}; saved_ratio={saved_ratio:.4f}",
+        "final_output_fallback_reason": "jpg95_candidate_requires_manual_review",
+    }
+
+
+def skipped_jpg95_candidate_fields(image_path: Path, image_type: str, reason: str, metrics: dict[str, float]) -> dict[str, object]:
+    has_alpha, alpha_reason = real_alpha_status(image_path)
+    if has_alpha is None or has_alpha:
+        candidate_reason = alpha_reason
+    else:
+        text_ratio = float(metrics.get("text_ratio") or 0.0)
+        if text_ratio >= JPG95_CANDIDATE_TEXT_RATIO_LIMIT:
+            candidate_reason = f"text_logo_risk: text_ratio={text_ratio:.4f} >= {JPG95_CANDIDATE_TEXT_RATIO_LIMIT:.3f}"
+        else:
+            candidate_reason = f"image_type_not_allowed: {image_type}; reason={reason}"
+    return default_jpg95_candidate_fields("not_applicable", candidate_reason)
 
 
 def resize_to_match(source: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -532,6 +680,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         diagnostic_dir = Path(getattr(args, "diagnostic_dir", DEFAULT_DIAGNOSTIC_DIR))
         contact_dir = diagnostic_dir / "contact_sheets"
         summary_dir = diagnostic_dir / "summaries"
+        jpg95_candidate_dir = run_dir / "jpg95_candidates"
         temp_context = tempfile.TemporaryDirectory(prefix="safe_1080p_beta_")
         after_dir = Path(temp_context.name)
     else:
@@ -539,6 +688,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         after_dir = run_dir / "after_x4plus"
         enhanced_dir = run_dir / "enhanced"
         contact_dir = run_dir / "contact_sheet"
+        jpg95_candidate_dir = run_dir / "jpg95_candidates"
         summary_dir = run_dir
     emit_stage(
         stage_logger,
@@ -571,6 +721,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             image_type, reason, metrics = classify_image(image_path, original)
             base = image_path.stem
             if image_type != "commercial_non_portrait":
+                skipped_candidate_fields = skipped_jpg95_candidate_fields(image_path, image_type, reason, metrics)
                 skipped.append(
                     {
                         "file": image_path.name,
@@ -588,6 +739,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                         "size_ratio": None,
                         "output_format": None,
                         "contact_sheet_format": None,
+                        **skipped_candidate_fields,
                     }
                 )
                 continue
@@ -597,10 +749,12 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 enhanced_path = unique_business_path(enhanced_dir / f"{base}_1080p_beta.png", run_token)
                 contact_path = unique_business_path(contact_dir / f"{base}_contact_sheet.png", run_token)
                 contact_light_path = unique_business_path(contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg", run_token)
+                jpg95_candidate_path = unique_business_path(jpg95_candidate_dir / f"{base}_final_candidate_jpg95.jpg", run_token)
             else:
                 enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
                 contact_path = contact_dir / f"{base}_contact_sheet.png"
                 contact_light_path = contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg"
+                jpg95_candidate_path = unique_business_path(jpg95_candidate_dir / f"{base}_final_candidate_jpg95.jpg", run_token)
 
             run_realesrgan(
                 exe,
@@ -633,6 +787,15 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             write_image(enhanced_path, protected35)
             output_size = file_size_bytes(enhanced_path)
             failed_output_size_bytes = output_size
+            jpg95_candidate_fields = make_jpg95_candidate(
+                image_path=image_path,
+                enhanced_path=enhanced_path,
+                candidate_path=jpg95_candidate_path,
+                image_type=image_type,
+                metrics=metrics,
+                input_size=input_size,
+                output_size=output_size,
+            )
             emit_stage(
                 stage_logger,
                 "BETA_FLAT_OUTPUT_WRITE_DONE",
@@ -714,6 +877,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "size_ratio": size_ratio(output_size, input_size),
                     "output_format": file_format(enhanced_path),
                     "contact_sheet_format": file_format(contact_path) if contact_sheet_value else None,
+                    **jpg95_candidate_fields,
                     "elapsed_seconds": round(time.perf_counter() - image_start, 3),
                 }
             )
@@ -755,6 +919,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             "size_ratio": size_ratio(failed_output_size_bytes, failed_input_size_bytes),
             "output_format": None,
             "contact_sheet_format": None,
+            **default_jpg95_candidate_fields("not_generated", "processing_failed", None, failed_output_size_bytes),
             "mode": args.mode,
             "model": args.model,
             "input_dir": str(input_dir),
