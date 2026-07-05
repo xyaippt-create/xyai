@@ -1,5 +1,11 @@
 # Codex Changelog
 
+## 2026-07-05 - V0.4.7 planning delivery naming rule engine
+
+- 新增 `engine/delivery_naming` 独立规则命名引擎，支持用户模板、序号位数、字段来源、字段缺失标记、Windows 文件名安全清理、重名消解和 `rename_map.csv` 导出。
+- 新增 `tools/experiments/delivery_naming_smoke.py`，用临时文件验证规则命名、字段缺失、非法字符清理、重名处理和映射表字段。
+- 本轮不接 Dashboard UI，不修改图像增强流程、`output_path`、`final_output_url`、delivery guard、compression gate 或标准版 final 选择逻辑。
+
 ## 2026-07-02 - V0.4.6 RC1 JPG95 candidate manual review recommendation
 
 - C-2-B 仅接入路线 B：Dashboard / Beta 报告页可记录 JPG95 candidate 人工复核建议（建议采用 / 保留 PNG / 拒绝候选 / 继续检查）。
