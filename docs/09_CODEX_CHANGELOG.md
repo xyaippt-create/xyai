@@ -1,5 +1,11 @@
 # Codex Changelog
 
+## 2026-07-02 - V0.4.6 RC1 JPG95 candidate manual review recommendation
+
+- C-2-B 仅接入路线 B：Dashboard / Beta 报告页可记录 JPG95 candidate 人工复核建议（建议采用 / 保留 PNG / 拒绝候选 / 继续检查）。
+- 反馈包 CSV 增加 JPG95 candidate review 字段与 `candidate_is_final_output=false` 记录，继续保持 `output_path`、`output_size_bytes`、`output_format` 指向 PNG final。
+- 本轮不替换 final output，不改变 `final_output_url`、delivery guard、compression gate、标准版 final 选择逻辑或 JPG95 candidate 生成阈值。
+
 ## 2026-07-02 - V0.4.6 RC1 feedback package size field alignment
 
 - 对齐 1080P 安全增强 Beta 反馈包体积字段：`image_results.csv` 优先读取 `processed` 中的 `input_size_bytes`、`output_size_bytes`、`size_ratio`、contact sheet light 与 JPG95 candidate 字段，避免 Dashboard minimal package 缺少持久输入目录时 `input_size` 回退为 0。

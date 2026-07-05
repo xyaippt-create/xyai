@@ -15,6 +15,24 @@ const DEFAULT_SAFE_BETA_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
 const DEFAULT_SAFE_BETA_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
 const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
 
+const JPG95_REVIEW_OPTIONS = [
+  { decision: "recommend_adopt", label: "建议采用", recommendation: "candidate_recommended" },
+  { decision: "keep_png", label: "保留 PNG", recommendation: "png_fallback_recommended" },
+  { decision: "reject_candidate", label: "拒绝候选", recommendation: "not_recommended" },
+  { decision: "needs_more_check", label: "继续检查", recommendation: "needs_more_check" },
+];
+
+const JPG95_REVIEW_FIELD_NAMES = [
+  "candidate_is_final_output",
+  "jpg95_candidate_review_status",
+  "jpg95_candidate_review_decision",
+  "jpg95_candidate_review_label",
+  "jpg95_candidate_recommendation",
+  "jpg95_candidate_recommendation_reason",
+  "jpg95_candidate_review_note",
+  "jpg95_candidate_reviewed_at",
+];
+
 const processingModeOptions = [
   {
     id: PROCESSING_MODE_STANDARD,
@@ -132,6 +150,36 @@ function formatPercentValue(value, fallback = "-") {
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) return fallback;
   return `${(number * 100).toFixed(2)}%`;
+}
+
+function findJpg95ReviewOption(decision) {
+  return JPG95_REVIEW_OPTIONS.find((item) => item.decision === decision) || null;
+}
+
+function addJpg95ReviewDefaults(item = {}) {
+  const hasCandidate = item?.jpg95_candidate_status === "candidate_for_review";
+  return {
+    ...item,
+    candidate_is_final_output: false,
+    jpg95_candidate_review_status: item?.jpg95_candidate_review_status || (hasCandidate ? "pending_review" : "not_applicable"),
+    jpg95_candidate_review_decision: item?.jpg95_candidate_review_decision || "",
+    jpg95_candidate_review_label: item?.jpg95_candidate_review_label || "",
+    jpg95_candidate_recommendation: item?.jpg95_candidate_recommendation || "",
+    jpg95_candidate_recommendation_reason: item?.jpg95_candidate_recommendation_reason || "",
+    jpg95_candidate_review_note: item?.jpg95_candidate_review_note || "",
+    jpg95_candidate_reviewed_at: item?.jpg95_candidate_reviewed_at || "",
+  };
+}
+
+function pickJpg95ReviewFields(source = {}) {
+  return JPG95_REVIEW_FIELD_NAMES.reduce((fields, key) => {
+    if (source[key] !== undefined) fields[key] = source[key];
+    return fields;
+  }, {});
+}
+
+function isSameSafeBetaRow(row = {}, item = {}) {
+  return Boolean(item) && (row.input_name === item.name || row.file === item.name || row.output_name === item.output_filename);
 }
 
 function pathFormat(value) {
@@ -960,6 +1008,32 @@ export default function DashboardPage() {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
 
+  const handleSetJpg95CandidateReview = (decision) => {
+    if (!activeItem) return;
+    const option = findJpg95ReviewOption(decision);
+    if (!option) return;
+    const reviewFields = {
+      candidate_is_final_output: false,
+      jpg95_candidate_review_status: "reviewed",
+      jpg95_candidate_review_decision: option.decision,
+      jpg95_candidate_review_label: option.label,
+      jpg95_candidate_recommendation: option.recommendation,
+      jpg95_candidate_recommendation_reason: option.label,
+      jpg95_candidate_review_note: option.label,
+      jpg95_candidate_reviewed_at: new Date().toISOString(),
+      final_output_source: "png_main",
+    };
+    updateQueueItem(activeItem.id, reviewFields);
+    setSafeBetaResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        processed: (prev.processed || []).map((row) => (isSameSafeBetaRow(row, activeItem) ? { ...row, ...reviewFields } : row)),
+      };
+    });
+    setNotice(`JPG95 candidate 人工复核建议：${option.label}`);
+  };
+
   const addFiles = (incomingFiles, options = {}) => {
     const replaceQueue = Boolean(options.replaceQueue);
     const images = Array.from(incomingFiles || []).filter((file) => file?.type?.startsWith("image/"));
@@ -1257,6 +1331,14 @@ export default function DashboardPage() {
             jpg95_candidate_role: processed.jpg95_candidate_role || "",
             jpg95_candidate_status: processed.jpg95_candidate_status || "",
             jpg95_candidate_reason: processed.jpg95_candidate_reason || "",
+            candidate_is_final_output: false,
+            jpg95_candidate_review_status: processed.jpg95_candidate_review_status || "",
+            jpg95_candidate_review_decision: processed.jpg95_candidate_review_decision || "",
+            jpg95_candidate_review_label: processed.jpg95_candidate_review_label || "",
+            jpg95_candidate_recommendation: processed.jpg95_candidate_recommendation || "",
+            jpg95_candidate_recommendation_reason: processed.jpg95_candidate_recommendation_reason || "",
+            jpg95_candidate_review_note: processed.jpg95_candidate_review_note || "",
+            jpg95_candidate_reviewed_at: processed.jpg95_candidate_reviewed_at || "",
             final_output_source: processed.final_output_source || "png_main",
             final_output_fallback_reason: processed.final_output_fallback_reason || "",
             contact_sheet_url:
@@ -1356,7 +1438,7 @@ export default function DashboardPage() {
       });
       const results = Array.isArray(payload.results) ? payload.results : Array.isArray(data.results) ? data.results : [];
       const enhancedFiles = Array.isArray(payload.enhanced_files) ? payload.enhanced_files : Array.isArray(data.enhanced_files) ? data.enhanced_files : [];
-      const processedItems = Array.isArray(data.processed) ? data.processed : [];
+      const processedItems = (Array.isArray(data.processed) ? data.processed : []).map(addJpg95ReviewDefaults);
       const processedCount = Number(payload.processed_count ?? data.processed_count ?? results.length ?? enhancedFiles.length ?? 0);
       const skippedCount = Number(payload.skipped_count ?? data.skipped_count ?? 0);
       const enhancedCount = processedCount || enhancedFiles.length || processedItems.filter((row) => Boolean(row.enhanced || row.output_path)).length;
@@ -1456,6 +1538,10 @@ export default function DashboardPage() {
   const exportSafeBetaFeedbackPackage = async () => {
     if (!safeBetaResult?.output_dir) return;
     try {
+      const activeReviewFields = pickJpg95ReviewFields(activeItem || {});
+      const processedForFeedback = (safeBetaResult.processed || []).map((row) =>
+        isSameSafeBetaRow(row, activeItem) ? { ...row, ...activeReviewFields, candidate_is_final_output: false, final_output_source: "png_main" } : row,
+      );
       const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/feedback-package`, {
         run_result: {
           status: "ok",
@@ -1472,7 +1558,7 @@ export default function DashboardPage() {
           message: safeBetaResult.message || "",
           results: safeBetaResult.results || [],
           enhanced_files: safeBetaResult.enhanced_files || [],
-          processed: safeBetaResult.processed || [],
+          processed: processedForFeedback,
           skipped: safeBetaResult.skipped || [],
           started_at: safeBetaResult.started_at || "",
           finished_at: safeBetaResult.finished_at || "",
@@ -2059,6 +2145,11 @@ export default function DashboardPage() {
     const jpg95CandidateReason = processed?.jpg95_candidate_reason || activeItem?.jpg95_candidate_reason || "-";
     const finalOutputSource = processed?.final_output_source || activeItem?.final_output_source || "png_main";
     const finalOutputFallbackReason = processed?.final_output_fallback_reason || activeItem?.final_output_fallback_reason || "-";
+    const jpg95ReviewStatus = processed?.jpg95_candidate_review_status || activeItem?.jpg95_candidate_review_status || (jpg95CandidateStatus === "candidate_for_review" ? "pending_review" : "not_applicable");
+    const jpg95ReviewDecision = processed?.jpg95_candidate_review_decision || activeItem?.jpg95_candidate_review_decision || "";
+    const jpg95ReviewOption = findJpg95ReviewOption(jpg95ReviewDecision);
+    const jpg95ReviewLabel = processed?.jpg95_candidate_review_label || activeItem?.jpg95_candidate_review_label || jpg95ReviewOption?.label || (jpg95CandidateStatus === "candidate_for_review" ? "继续检查" : "-");
+    const canReviewJpg95Candidate = jpg95CandidateStatus === "candidate_for_review";
     const jpg95CandidateStatusText =
       jpg95CandidateStatus === "candidate_for_review"
         ? "已生成 · 待人工复核"
@@ -2111,6 +2202,8 @@ export default function DashboardPage() {
             { label: "JPG95 候选体积", value: formatBytesToMb(jpg95CandidateSizeBytes) },
             { label: "JPG95 节省比例", value: formatPercentValue(jpg95CandidateSavedRatio) },
             { label: "候选状态", value: jpg95CandidateStatusText },
+            { label: "人工建议", value: jpg95ReviewLabel },
+            { label: "candidate_is_final_output", value: "false" },
             { label: "回退原因", value: finalOutputFallbackReason },
             { label: "输出格式", value: outputFormatValue.toUpperCase() },
             { label: "contact sheet 格式", value: contactSheetFormatValue.toUpperCase() },
@@ -2122,6 +2215,7 @@ export default function DashboardPage() {
       { label: contactSheet ? "contact sheet 已生成" : "contact sheet 未生成", detail: contactSheet ? "本地对比图已生成，完整路径可通过复制按钮获取。" : "当前样本没有可用 contact sheet。" },
       { label: outputPath ? "output_path 已生成" : "output_path 未生成", detail: outputPath ? "本地成品路径已绑定，完整路径可通过复制按钮获取。" : "当前样本没有可复制的成品路径。" },
       { label: jpg95CandidateStatus === "candidate_for_review" ? "JPG95 候选需人工复核" : "JPG95 候选未采用", detail: jpg95CandidateStatus === "candidate_for_review" ? "当前交付仍使用 PNG 高清主图，JPG95 仅作为体积优化候选。" : jpg95CandidateReason },
+      { label: "当前交付仍使用 PNG 高清主图", detail: `人工建议：${jpg95ReviewLabel}` },
       ...(isPortraitSkip ? [{ label: "人物图保护跳过", detail: "Beta 当前不放开人像增强，避免破坏面部主体。" }] : []),
       ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [{ label: "跳过 / 失败原因", detail: reasonText }] : []),
     ];
@@ -2230,6 +2324,31 @@ export default function DashboardPage() {
                     <div className="mt-1 truncate font-mono text-[10px] text-[#475569]" title={item.value || item.status}>{item.value || item.status}</div>
                   </div>
                 ))}
+              </div>
+              <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-medium text-[#f0c36f]">{canReviewJpg95Candidate ? "JPG95 候选需人工复核" : "JPG95 候选未采用"}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-[#64748b]">{jpg95ReviewStatus}</span>
+                </div>
+                <p className="mt-1 text-[11px] text-[#94a3b8]">当前交付仍使用 PNG 高清主图</p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {JPG95_REVIEW_OPTIONS.map((option) => (
+                    <button
+                      key={option.decision}
+                      type="button"
+                      disabled={!canReviewJpg95Candidate}
+                      onClick={() => handleSetJpg95CandidateReview(option.decision)}
+                      className={`rounded-sm border px-2 py-1 text-[11px] transition disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569] ${
+                        jpg95ReviewDecision === option.decision
+                          ? "border-[#5bf5dc] bg-[#12312d] text-[#5bf5dc]"
+                          : "border-[#333] text-[#cbd5e1] hover:bg-[#1c1f26]"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 truncate text-[11px] text-[#94a3b8]" title={jpg95ReviewLabel}>当前建议：{jpg95ReviewLabel}</div>
               </div>
               <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
                 <div className="text-xs font-medium text-[#f0c36f]">状态说明</div>
