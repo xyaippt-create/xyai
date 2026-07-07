@@ -228,6 +228,57 @@ def constrain_png_final_to_true_1080p(image: np.ndarray) -> tuple[np.ndarray | N
     return resized, {"output_resolution_profile": profile, **image_dimensions(resized)}
 
 
+def resize_to_target_for_fidelity(image: np.ndarray, target_width: int, target_height: int) -> np.ndarray:
+    if image.shape[1] == target_width and image.shape[0] == target_height:
+        return image
+    interpolation = cv2.INTER_AREA if image.shape[1] > target_width or image.shape[0] > target_height else cv2.INTER_LANCZOS4
+    return cv2.resize(image, (target_width, target_height), interpolation=interpolation)
+
+
+def build_target_edge_text_mask(original_target: np.ndarray) -> np.ndarray:
+    masks = build_protection_masks(original_target)
+    text_mask = cv2.dilate(masks["text_like"], np.ones((5, 5), np.uint8), iterations=1)
+    edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((3, 3), np.uint8), iterations=1)
+    mask = cv2.bitwise_or(text_mask, edge_mask)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+    return cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 0.65)
+
+
+def target_size_fidelity_blend(original: np.ndarray, model_output: np.ndarray) -> tuple[np.ndarray | None, dict[str, object]]:
+    target_width, target_height, profile = true_1080p_target_size(model_output)
+    if target_width is None or target_height is None:
+        return None, {"output_resolution_profile": profile, **image_dimensions(model_output)}
+
+    original_target = resize_to_target_for_fidelity(original, target_width, target_height)
+    enhanced_target = resize_to_target_for_fidelity(model_output, target_width, target_height)
+    masks = build_protection_masks(original_target)
+
+    alpha = np.full(original_target.shape[:2], 0.46, dtype=np.float32)
+    material_mask = cv2.dilate(masks["high_sat"], np.ones((5, 5), np.uint8), iterations=1)
+    edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((3, 3), np.uint8), iterations=1)
+    text_mask = cv2.dilate(masks["text_like"], np.ones((7, 7), np.uint8), iterations=1)
+
+    alpha[material_mask > 0] = 0.52
+    alpha[edge_mask > 0] = 0.28
+    alpha[text_mask > 0] = 0.12
+    alpha = cv2.GaussianBlur(alpha, (0, 0), 0.9)[:, :, None]
+
+    blended = original_target.astype(np.float32) * (1.0 - alpha) + enhanced_target.astype(np.float32) * alpha
+    restored = apply_light_edge_restore(np.clip(blended, 0, 255).astype(np.uint8), original_target)
+    return restored, {"output_resolution_profile": profile, **image_dimensions(restored)}
+
+
+def apply_light_edge_restore(image: np.ndarray, original_target: np.ndarray) -> np.ndarray:
+    edge_mask = build_target_edge_text_mask(original_target)[:, :, None]
+    blurred = cv2.GaussianBlur(image, (0, 0), 0.72).astype(np.float32)
+    original_blurred = cv2.GaussianBlur(original_target, (0, 0), 0.72).astype(np.float32)
+    image_detail = image.astype(np.float32) - blurred
+    original_detail = original_target.astype(np.float32) - original_blurred
+    detail = image_detail * 0.20 + original_detail * 0.50
+    restored = image.astype(np.float32) + detail * edge_mask
+    return np.clip(restored, 0, 255).astype(np.uint8)
+
+
 def size_ratio(output_size: int | None, input_size: int | None) -> float | None:
     if not input_size or output_size is None:
         return None
@@ -873,8 +924,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             )
             model_output = read_image(after_path)
             blend35 = linear_blend(original, model_output, 0.35)
-            protected35 = protected_35_blend(original, model_output)
-            final_png, output_resolution_fields = constrain_png_final_to_true_1080p(protected35)
+            final_png, output_resolution_fields = target_size_fidelity_blend(original, model_output)
             if final_png is None:
                 resize_reason = str(output_resolution_fields.get("output_resolution_profile") or "true_1080p_resize_skipped")
                 skipped_candidate_fields = skipped_jpg95_candidate_fields(image_path, image_type, resize_reason, metrics)
