@@ -1819,6 +1819,29 @@ export default function DashboardPage() {
     }
   };
 
+  const handleOpenSafeBetaPathDir = (value, label = "文件") => {
+    if (!value) {
+      setNotice(`当前没有可打开的 ${label} 路径。`);
+      return;
+    }
+    const dir = String(value).replace(/[\\/][^\\/]*$/, "");
+    if (!dir || dir === value) {
+      setNotice(`无法解析 ${label} 所在文件夹。`);
+      return;
+    }
+    requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: dir })
+      .then((payload) => {
+        setOutputDirError("");
+        setOutputDirSuccess("");
+        setNotice(payload.message || `已打开 ${label} 所在文件夹。`);
+      })
+      .catch((error) => {
+        setOutputDirError(error.message);
+        setOutputDirSuccess("");
+        setNotice(error.message);
+      });
+  };
+
   const handleDownloadBatchReport = () => {
     if (!fileQueue.length) {
       setNotice("当前没有可导出的批次报告。");
@@ -2157,6 +2180,7 @@ export default function DashboardPage() {
     const lightDeliverySavedRatio = processed?.light_delivery_saved_ratio ?? activeItem?.light_delivery_saved_ratio ?? null;
     const lightDeliveryStatus = processed?.light_delivery_status || activeItem?.light_delivery_status || "not_applicable";
     const lightDeliveryReason = processed?.light_delivery_reason || activeItem?.light_delivery_reason || "-";
+    const lightDeliveryAvailable = lightDeliveryStatus === "available" && Boolean(lightDeliveryPath);
     const finalOutputSource = processed?.final_output_source || activeItem?.final_output_source || "png_main";
     const finalOutputFallbackReason = processed?.final_output_fallback_reason || activeItem?.final_output_fallback_reason || "-";
     const jpg95ReviewStatus = processed?.jpg95_candidate_review_status || activeItem?.jpg95_candidate_review_status || (jpg95CandidateStatus === "candidate_for_review" ? "pending_review" : "not_applicable");
@@ -2350,6 +2374,39 @@ export default function DashboardPage() {
                     <div className="mt-1 truncate font-mono text-[10px] text-[#475569]" title={item.value || item.status}>{item.value || item.status}</div>
                   </div>
                 ))}
+              </div>
+              <div className={`rounded-sm border px-3 py-2 ${lightDeliveryAvailable ? "border-[#2d665f] bg-[#0d181a]" : "border-[#1c1f26] bg-[#0b0c0e]/45"}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <span className={`text-xs font-medium ${lightDeliveryAvailable ? "text-[#5bf5dc]" : "text-[#94a3b8]"}`}>
+                    {lightDeliveryAvailable ? "轻量交付版 JPG 已生成" : "轻量交付版 JPG 未生成"}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-[#64748b]">{lightDeliveryStatusText}</span>
+                </div>
+                <p className="mt-1 text-[11px] leading-5 text-[#94a3b8]">
+                  {lightDeliveryAvailable ? "可直接用于发送、上传、PPT插入；PNG final 仍是正式高清主图。" : lightDeliveryReason}
+                </p>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-[#94a3b8]">
+                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
+                    <span className="text-[#64748b]">PNG final：</span>{formatBytesToMb(outputSizeBytes)}
+                  </div>
+                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
+                    <span className="text-[#64748b]">delivery_light：</span>{formatBytesToMb(lightDeliverySizeBytes)}
+                  </div>
+                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
+                    <span className="text-[#64748b]">节省比例：</span>{formatPercentValue(lightDeliverySavedRatio)}
+                  </div>
+                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
+                    <span className="text-[#64748b]">final source：</span>{finalOutputSource}
+                  </div>
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" disabled={!lightDeliveryPath} onClick={() => handleCopySafeBetaPath(lightDeliveryPath, "delivery_light path")} className="flex-1 rounded border border-[#2d665f] px-2 py-1 text-[11px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
+                    复制轻量版路径
+                  </button>
+                  <button type="button" disabled={!lightDeliveryPath} onClick={() => handleOpenSafeBetaPathDir(lightDeliveryPath, "delivery_light")} className="flex-1 rounded border border-[#333] px-2 py-1 text-[11px] text-[#cbd5e1] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">
+                    打开所在文件夹
+                  </button>
+                </div>
               </div>
               <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">

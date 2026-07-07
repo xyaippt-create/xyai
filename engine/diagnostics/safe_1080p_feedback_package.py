@@ -666,6 +666,77 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
     return output.getvalue()
 
 
+def _delivery_light_index_csv(run_result: dict[str, Any]) -> str:
+    output = io.StringIO()
+    fieldnames = [
+        "source_name",
+        "output_path",
+        "output_size_bytes",
+        "output_format",
+        "jpg95_candidate_path",
+        "jpg95_candidate_size_bytes",
+        "light_delivery_path",
+        "light_delivery_size_bytes",
+        "light_delivery_format",
+        "light_delivery_quality",
+        "light_delivery_role",
+        "light_delivery_source",
+        "light_delivery_status",
+        "light_delivery_reason",
+        "light_delivery_saved_ratio",
+        "candidate_is_final_output",
+        "final_output_source",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    def write_row(item: dict[str, Any]) -> None:
+        writer.writerow(
+            {
+                "source_name": item.get("input_name") or item.get("file") or "",
+                "output_path": item.get("output_path", ""),
+                "output_size_bytes": item.get("output_size_bytes", ""),
+                "output_format": item.get("output_format", ""),
+                "jpg95_candidate_path": item.get("jpg95_candidate_path", ""),
+                "jpg95_candidate_size_bytes": item.get("jpg95_candidate_size_bytes", ""),
+                "light_delivery_path": item.get("light_delivery_path", ""),
+                "light_delivery_size_bytes": item.get("light_delivery_size_bytes", ""),
+                "light_delivery_format": item.get("light_delivery_format", ""),
+                "light_delivery_quality": item.get("light_delivery_quality", ""),
+                "light_delivery_role": item.get("light_delivery_role", ""),
+                "light_delivery_source": item.get("light_delivery_source", ""),
+                "light_delivery_status": item.get("light_delivery_status", ""),
+                "light_delivery_reason": item.get("light_delivery_reason", ""),
+                "light_delivery_saved_ratio": item.get("light_delivery_saved_ratio", ""),
+                "candidate_is_final_output": item.get("candidate_is_final_output", False),
+                "final_output_source": item.get("final_output_source", "png_main"),
+            }
+        )
+
+    for item in run_result.get("processed") or []:
+        if isinstance(item, dict):
+            write_row(item)
+    for item in run_result.get("skipped") or []:
+        if isinstance(item, dict):
+            write_row(item)
+    return output.getvalue()
+
+
+def _delivery_light_readme() -> str:
+    return "\n".join(
+        [
+            "影界 HDDE delivery_light 说明",
+            "",
+            "1. PNG final 是高清主图，体积较大，适合保留为母版。",
+            "2. delivery_light JPG 是小体积交付副本，适合发送、上传、插入 PPT。",
+            "3. delivery_light 不替代 PNG final，不改变 output_path，也不改变 final_output_url。",
+            "4. 如果没有生成 delivery_light，通常表示该图存在中文小字、Logo、透明通道或 uncertain 风险，系统为保护画质而不生成轻量版。",
+            "5. 具体文件路径与体积请查看 delivery_light_index.csv。",
+            "",
+        ]
+    )
+
+
 def _markdown_summary(run_result: dict[str, Any], status: str, input_dir: Path, output_dir: Path, zip_path: Path) -> str:
     return "\n".join(
         [
@@ -823,6 +894,8 @@ def generate_safe_1080p_feedback_package(
                 "batch_report.json": _json_bytes(batch_report),
                 "diagnostics.json": _json_bytes(diagnostics),
                 "image_results.csv": _text_bytes(_image_results_csv(run_result, output_dir, input_dir)),
+                "delivery_light_index.csv": _text_bytes(_delivery_light_index_csv(run_result)),
+                "README_delivery_light.txt": _text_bytes(_delivery_light_readme()),
                 "run_config.json": _json_bytes(run_config),
                 "environment.txt": _text_bytes(_environment_text(env, tool_checks, path_checks)),
                 "tool_check.txt": _text_bytes(_tool_check_text(tool_checks)),
