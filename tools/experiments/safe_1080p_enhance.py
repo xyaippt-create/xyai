@@ -28,6 +28,9 @@ DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
 BETA_TIMEOUT_SECONDS = 300
 CONTACT_SHEET_LIGHT_JPEG_QUALITY = 90
 JPG95_CANDIDATE_QUALITY = 95
+TRUE_1080P_SHORT_EDGE = 1080
+TRUE_1080P_MIN_ASPECT_RATIO = 0.45
+TRUE_1080P_MAX_ASPECT_RATIO = 2.40
 JPG95_CANDIDATE_MIN_OUTPUT_BYTES = 3 * 1024 * 1024
 JPG95_CANDIDATE_MIN_SIZE_RATIO = 4.0
 JPG95_CANDIDATE_MIN_SAVED_RATIO = 0.30
@@ -185,6 +188,44 @@ def file_format(path: Path | None) -> str | None:
     if suffix == "jpeg":
         return "jpg"
     return suffix or None
+
+
+def image_dimensions(image: np.ndarray | None) -> dict[str, int | None]:
+    if image is None:
+        return {"width": None, "height": None, "long_edge": None, "short_edge": None}
+    height, width = image.shape[:2]
+    return {
+        "width": int(width),
+        "height": int(height),
+        "long_edge": int(max(width, height)),
+        "short_edge": int(min(width, height)),
+    }
+
+
+def true_1080p_target_size(image: np.ndarray) -> tuple[int | None, int | None, str]:
+    height, width = image.shape[:2]
+    if width <= 0 or height <= 0:
+        return None, None, "invalid_dimensions"
+    aspect_ratio = width / max(height, 1)
+    if aspect_ratio < TRUE_1080P_MIN_ASPECT_RATIO or aspect_ratio > TRUE_1080P_MAX_ASPECT_RATIO:
+        return None, None, "aspect_ratio_not_supported"
+    short_edge = min(width, height)
+    if short_edge <= TRUE_1080P_SHORT_EDGE:
+        return width, height, "source_not_upscaled"
+    scale = TRUE_1080P_SHORT_EDGE / short_edge
+    target_width = max(1, int(round(width * scale)))
+    target_height = max(1, int(round(height * scale)))
+    return target_width, target_height, "short_edge_1080"
+
+
+def constrain_png_final_to_true_1080p(image: np.ndarray) -> tuple[np.ndarray | None, dict[str, object]]:
+    target_width, target_height, profile = true_1080p_target_size(image)
+    if target_width is None or target_height is None:
+        return None, {"output_resolution_profile": profile, **image_dimensions(image)}
+    if target_width == image.shape[1] and target_height == image.shape[0]:
+        return image, {"output_resolution_profile": profile, **image_dimensions(image)}
+    resized = cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    return resized, {"output_resolution_profile": profile, **image_dimensions(resized)}
 
 
 def size_ratio(output_size: int | None, input_size: int | None) -> float | None:
@@ -833,6 +874,37 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             model_output = read_image(after_path)
             blend35 = linear_blend(original, model_output, 0.35)
             protected35 = protected_35_blend(original, model_output)
+            final_png, output_resolution_fields = constrain_png_final_to_true_1080p(protected35)
+            if final_png is None:
+                resize_reason = str(output_resolution_fields.get("output_resolution_profile") or "true_1080p_resize_skipped")
+                skipped_candidate_fields = skipped_jpg95_candidate_fields(image_path, image_type, resize_reason, metrics)
+                skipped.append(
+                    {
+                        "file": image_path.name,
+                        "input_name": image_path.name,
+                        "type": image_type,
+                        "reason": resize_reason,
+                        "metrics": metrics,
+                        "input_size_bytes": input_size,
+                        "output_size_bytes": None,
+                        "output_width": None,
+                        "output_height": None,
+                        "output_long_edge": None,
+                        "output_short_edge": None,
+                        "output_resolution_profile": resize_reason,
+                        "contact_sheet_size_bytes": None,
+                        "contact_sheet_light": "",
+                        "contact_sheet_light_size_bytes": None,
+                        "contact_sheet_light_format": None,
+                        "contact_sheet_light_role": "preview_only",
+                        "size_ratio": None,
+                        "output_format": None,
+                        "contact_sheet_format": None,
+                        **skipped_candidate_fields,
+                        **default_light_delivery_fields("not_applicable", resize_reason),
+                    }
+                )
+                continue
 
             emit_stage(
                 stage_logger,
@@ -844,7 +916,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 flat_output=flat_output,
                 business_output=business_output,
             )
-            write_image(enhanced_path, protected35)
+            write_image(enhanced_path, final_png)
             output_size = file_size_bytes(enhanced_path)
             failed_output_size_bytes = output_size
             jpg95_candidate_fields = make_jpg95_candidate(
@@ -884,7 +956,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             contact_sheet_value = ""
             contact_sheet_light_value = ""
             try:
-                make_contact_sheet(original, blend35, protected35, contact_path)
+                make_contact_sheet(original, blend35, final_png, contact_path)
                 contact_sheet_value = relative_or_name(contact_path, run_dir)
                 failed_contact_sheet_size_bytes = file_size_bytes(contact_path)
             except Exception as exc:
@@ -903,7 +975,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 )
             else:
                 try:
-                    make_contact_sheet_light(original, blend35, protected35, contact_light_path)
+                    make_contact_sheet_light(original, blend35, final_png, contact_light_path)
                     contact_sheet_light_value = relative_or_name(contact_light_path, run_dir)
                 except Exception as exc:
                     warning = f"contact_sheet_light_write_failed: {tail_text(exc)}"
@@ -933,6 +1005,11 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "contact_sheet": contact_sheet_value,
                     "input_size_bytes": input_size,
                     "output_size_bytes": output_size,
+                    "output_width": output_resolution_fields.get("width"),
+                    "output_height": output_resolution_fields.get("height"),
+                    "output_long_edge": output_resolution_fields.get("long_edge"),
+                    "output_short_edge": output_resolution_fields.get("short_edge"),
+                    "output_resolution_profile": output_resolution_fields.get("output_resolution_profile"),
                     "contact_sheet_size_bytes": file_size_bytes(contact_path) if contact_sheet_value else None,
                     "contact_sheet_light": contact_sheet_light_value,
                     "contact_sheet_light_size_bytes": file_size_bytes(contact_light_path) if contact_sheet_light_value else None,
