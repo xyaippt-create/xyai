@@ -727,11 +727,12 @@ def _delivery_light_readme() -> str:
         [
             "影界 HDDE delivery_light 说明",
             "",
-            "1. PNG final 是高清主图，体积较大，适合保留为母版。",
-            "2. delivery_light JPG 是小体积交付副本，适合发送、上传、插入 PPT。",
-            "3. delivery_light 不替代 PNG final，不改变 output_path，也不改变 final_output_url。",
-            "4. 如果没有生成 delivery_light，通常表示该图存在中文小字、Logo、透明通道或 uncertain 风险，系统为保护画质而不生成轻量版。",
-            "5. 具体文件路径与体积请查看 delivery_light_index.csv。",
+            "1. PNG final 是高清主图，体积较大，适合保留母版、正式存档和二次处理。",
+            "2. delivery_light JPG 是高质量轻量交付副本，适合发送、上传和插入 PPT。",
+            "3. delivery_light 的生成前提是质量安全门通过，尽量保护画面清晰度、中文小字、Logo、材质层次和商业质感。",
+            "4. delivery_light 不替代 PNG final，也不是 final output，不改变 output_path 或 final_output_url。",
+            "5. 若未生成 delivery_light，通常是系统检测到中文小字、Logo、透明通道或 uncertain 风险，为保护画质而跳过。",
+            "6. 具体文件路径与体积请查看 delivery_light_index.csv。",
             "",
         ]
     )

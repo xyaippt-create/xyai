@@ -2264,7 +2264,7 @@ export default function DashboardPage() {
       { label: contactSheet ? "contact sheet 已生成" : "contact sheet 未生成", detail: contactSheet ? "本地对比图已生成，完整路径可通过复制按钮获取。" : "当前样本没有可用 contact sheet。" },
       { label: outputPath ? "output_path 已生成" : "output_path 未生成", detail: outputPath ? "本地成品路径已绑定，完整路径可通过复制按钮获取。" : "当前样本没有可复制的成品路径。" },
       { label: jpg95CandidateStatus === "candidate_for_review" ? "JPG95 候选需人工复核" : "JPG95 候选未采用", detail: jpg95CandidateStatus === "candidate_for_review" ? "当前交付仍使用 PNG 高清主图，JPG95 仅作为体积优化候选。" : jpg95CandidateReason },
-      { label: lightDeliveryStatus === "available" ? "delivery_light 可直接取用" : "delivery_light 未生成", detail: lightDeliveryStatus === "available" ? "轻量交付副本来自 JPG95 candidate，PNG final 与 output_path 不变。" : lightDeliveryReason },
+      { label: lightDeliveryStatus === "available" ? "delivery_light 可直接取用" : "delivery_light 未生成", detail: lightDeliveryStatus === "available" ? "高质量轻量交付版来自 JPG95 候选，PNG final 与 output_path 不变。" : lightDeliveryReason },
       { label: "当前交付仍使用 PNG 高清主图", detail: `人工建议：${jpg95ReviewLabel}` },
       ...(isPortraitSkip ? [{ label: "人物图保护跳过", detail: "Beta 当前不放开人像增强，避免破坏面部主体。" }] : []),
       ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [{ label: "跳过 / 失败原因", detail: reasonText }] : []),
@@ -2378,12 +2378,12 @@ export default function DashboardPage() {
               <div className={`rounded-sm border px-3 py-2 ${lightDeliveryAvailable ? "border-[#2d665f] bg-[#0d181a]" : "border-[#1c1f26] bg-[#0b0c0e]/45"}`}>
                 <div className="flex items-center justify-between gap-3">
                   <span className={`text-xs font-medium ${lightDeliveryAvailable ? "text-[#5bf5dc]" : "text-[#94a3b8]"}`}>
-                    {lightDeliveryAvailable ? "轻量交付版 JPG 已生成" : "轻量交付版 JPG 未生成"}
+                    {lightDeliveryAvailable ? "高质量轻量交付版 JPG 已生成" : "高质量轻量交付版 JPG 未生成"}
                   </span>
                   <span className="shrink-0 font-mono text-[10px] text-[#64748b]">{lightDeliveryStatusText}</span>
                 </div>
                 <p className="mt-1 text-[11px] leading-5 text-[#94a3b8]">
-                  {lightDeliveryAvailable ? "可直接用于发送、上传、PPT插入；PNG final 仍是正式高清主图。" : lightDeliveryReason}
+                  {lightDeliveryAvailable ? "在保持画面清晰度和商业质感的前提下减小体积，适合发送、上传、PPT 插入。PNG final 仍为正式高清主图。" : lightDeliveryReason}
                 </p>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-[#94a3b8]">
                   <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
