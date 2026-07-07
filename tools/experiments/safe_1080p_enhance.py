@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -272,6 +273,20 @@ def default_jpg95_candidate_fields(status: str, reason: str, enhanced_path: Path
     }
 
 
+def default_light_delivery_fields(status: str, reason: str) -> dict[str, object]:
+    return {
+        "light_delivery_path": "",
+        "light_delivery_size_bytes": None,
+        "light_delivery_format": "jpg",
+        "light_delivery_quality": JPG95_CANDIDATE_QUALITY,
+        "light_delivery_role": "delivery_light_copy",
+        "light_delivery_source": "jpg95_candidate",
+        "light_delivery_status": status,
+        "light_delivery_reason": reason,
+        "light_delivery_saved_ratio": None,
+    }
+
+
 def remove_file_quietly(path: Path) -> None:
     try:
         if path.exists() and path.is_file():
@@ -362,6 +377,46 @@ def make_jpg95_candidate(
         "jpg95_candidate_status": "candidate_for_review",
         "jpg95_candidate_reason": f"commercial_non_portrait; {alpha_reason}; text_ratio={text_ratio:.4f}; saved_ratio={saved_ratio:.4f}",
         "final_output_fallback_reason": "jpg95_candidate_requires_manual_review",
+    }
+
+
+def make_light_delivery_copy(
+    *,
+    candidate_fields: dict[str, object],
+    light_delivery_path: Path,
+    output_size: int | None,
+) -> dict[str, object]:
+    if candidate_fields.get("jpg95_candidate_status") != "candidate_for_review":
+        reason = str(candidate_fields.get("jpg95_candidate_reason") or "jpg95_candidate_not_available")
+        return default_light_delivery_fields("not_applicable", reason)
+
+    candidate_path_text = str(candidate_fields.get("jpg95_candidate_path") or "")
+    candidate_path = Path(candidate_path_text) if candidate_path_text else Path()
+    if not candidate_path.exists() or not candidate_path.is_file():
+        return default_light_delivery_fields("not_generated", "jpg95_candidate_file_missing")
+
+    try:
+        light_delivery_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate_path, light_delivery_path)
+    except Exception as exc:
+        remove_file_quietly(light_delivery_path)
+        return default_light_delivery_fields("not_generated", f"light_delivery_copy_failed: {tail_text(exc, 180)}")
+
+    light_size = file_size_bytes(light_delivery_path)
+    if light_size is None or light_size <= 0:
+        remove_file_quietly(light_delivery_path)
+        return default_light_delivery_fields("not_generated", "light_delivery_size_missing")
+
+    return {
+        "light_delivery_path": str(light_delivery_path),
+        "light_delivery_size_bytes": light_size,
+        "light_delivery_format": file_format(light_delivery_path),
+        "light_delivery_quality": JPG95_CANDIDATE_QUALITY,
+        "light_delivery_role": "delivery_light_copy",
+        "light_delivery_source": "jpg95_candidate",
+        "light_delivery_status": "available",
+        "light_delivery_reason": "copied_from_jpg95_candidate",
+        "light_delivery_saved_ratio": round((output_size - light_size) / max(output_size, 1), 4) if output_size else None,
     }
 
 
@@ -681,6 +736,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         contact_dir = diagnostic_dir / "contact_sheets"
         summary_dir = diagnostic_dir / "summaries"
         jpg95_candidate_dir = run_dir / "jpg95_candidates"
+        light_delivery_dir = run_dir / "delivery_light"
         temp_context = tempfile.TemporaryDirectory(prefix="safe_1080p_beta_")
         after_dir = Path(temp_context.name)
     else:
@@ -689,6 +745,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         enhanced_dir = run_dir / "enhanced"
         contact_dir = run_dir / "contact_sheet"
         jpg95_candidate_dir = run_dir / "jpg95_candidates"
+        light_delivery_dir = run_dir / "delivery_light"
         summary_dir = run_dir
     emit_stage(
         stage_logger,
@@ -740,6 +797,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                         "output_format": None,
                         "contact_sheet_format": None,
                         **skipped_candidate_fields,
+                        **default_light_delivery_fields("not_applicable", skipped_candidate_fields.get("jpg95_candidate_reason") or reason),
                     }
                 )
                 continue
@@ -750,11 +808,13 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 contact_path = unique_business_path(contact_dir / f"{base}_contact_sheet.png", run_token)
                 contact_light_path = unique_business_path(contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg", run_token)
                 jpg95_candidate_path = unique_business_path(jpg95_candidate_dir / f"{base}_final_candidate_jpg95.jpg", run_token)
+                light_delivery_path = unique_business_path(light_delivery_dir / f"{base}_delivery_light_jpg95.jpg", run_token)
             else:
                 enhanced_path = enhanced_dir / f"{base}_safe_1080p_35protected.png"
                 contact_path = contact_dir / f"{base}_contact_sheet.png"
                 contact_light_path = contact_dir / f"{base}_contact_sheet_preview_q{CONTACT_SHEET_LIGHT_JPEG_QUALITY}.jpg"
                 jpg95_candidate_path = unique_business_path(jpg95_candidate_dir / f"{base}_final_candidate_jpg95.jpg", run_token)
+                light_delivery_path = unique_business_path(light_delivery_dir / f"{base}_delivery_light_jpg95.jpg", run_token)
 
             run_realesrgan(
                 exe,
@@ -794,6 +854,11 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 image_type=image_type,
                 metrics=metrics,
                 input_size=input_size,
+                output_size=output_size,
+            )
+            light_delivery_fields = make_light_delivery_copy(
+                candidate_fields=jpg95_candidate_fields,
+                light_delivery_path=light_delivery_path,
                 output_size=output_size,
             )
             emit_stage(
@@ -878,6 +943,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "output_format": file_format(enhanced_path),
                     "contact_sheet_format": file_format(contact_path) if contact_sheet_value else None,
                     **jpg95_candidate_fields,
+                    **light_delivery_fields,
                     "elapsed_seconds": round(time.perf_counter() - image_start, 3),
                 }
             )
@@ -920,6 +986,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             "output_format": None,
             "contact_sheet_format": None,
             **default_jpg95_candidate_fields("not_generated", "processing_failed", None, failed_output_size_bytes),
+            **default_light_delivery_fields("not_generated", "processing_failed"),
             "mode": args.mode,
             "model": args.model,
             "input_dir": str(input_dir),

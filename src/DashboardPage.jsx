@@ -1331,6 +1331,15 @@ export default function DashboardPage() {
             jpg95_candidate_role: processed.jpg95_candidate_role || "",
             jpg95_candidate_status: processed.jpg95_candidate_status || "",
             jpg95_candidate_reason: processed.jpg95_candidate_reason || "",
+            light_delivery_path: processed.light_delivery_path || "",
+            light_delivery_size_bytes: processed.light_delivery_size_bytes ?? null,
+            light_delivery_format: processed.light_delivery_format || "",
+            light_delivery_quality: processed.light_delivery_quality ?? null,
+            light_delivery_role: processed.light_delivery_role || "",
+            light_delivery_source: processed.light_delivery_source || "",
+            light_delivery_status: processed.light_delivery_status || "",
+            light_delivery_reason: processed.light_delivery_reason || "",
+            light_delivery_saved_ratio: processed.light_delivery_saved_ratio ?? null,
             candidate_is_final_output: false,
             jpg95_candidate_review_status: processed.jpg95_candidate_review_status || "",
             jpg95_candidate_review_decision: processed.jpg95_candidate_review_decision || "",
@@ -2143,6 +2152,11 @@ export default function DashboardPage() {
     const jpg95CandidateSavedRatio = processed?.jpg95_candidate_saved_ratio ?? activeItem?.jpg95_candidate_saved_ratio ?? null;
     const jpg95CandidateStatus = processed?.jpg95_candidate_status || activeItem?.jpg95_candidate_status || "not_applicable";
     const jpg95CandidateReason = processed?.jpg95_candidate_reason || activeItem?.jpg95_candidate_reason || "-";
+    const lightDeliveryPath = processed?.light_delivery_path || activeItem?.light_delivery_path || "";
+    const lightDeliverySizeBytes = processed?.light_delivery_size_bytes ?? activeItem?.light_delivery_size_bytes ?? null;
+    const lightDeliverySavedRatio = processed?.light_delivery_saved_ratio ?? activeItem?.light_delivery_saved_ratio ?? null;
+    const lightDeliveryStatus = processed?.light_delivery_status || activeItem?.light_delivery_status || "not_applicable";
+    const lightDeliveryReason = processed?.light_delivery_reason || activeItem?.light_delivery_reason || "-";
     const finalOutputSource = processed?.final_output_source || activeItem?.final_output_source || "png_main";
     const finalOutputFallbackReason = processed?.final_output_fallback_reason || activeItem?.final_output_fallback_reason || "-";
     const jpg95ReviewStatus = processed?.jpg95_candidate_review_status || activeItem?.jpg95_candidate_review_status || (jpg95CandidateStatus === "candidate_for_review" ? "pending_review" : "not_applicable");
@@ -2156,6 +2170,12 @@ export default function DashboardPage() {
         : jpg95CandidateStatus === "not_generated"
           ? "未生成"
           : "不适用";
+    const lightDeliveryStatusText =
+      lightDeliveryStatus === "available"
+        ? "available / direct copy"
+        : lightDeliveryStatus === "not_generated"
+          ? "not generated"
+          : "not applicable";
     const computedSizeRatio = inputSizeBytes && outputSizeBytes ? outputSizeBytes / inputSizeBytes : null;
     const sizeRatioValue = processed?.size_ratio ?? activeItem?.size_ratio ?? computedSizeRatio;
     const outputFormatValue = processed?.output_format || activeItem?.output_format || pathFormat(outputPath) || "-";
@@ -2182,6 +2202,7 @@ export default function DashboardPage() {
       { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
       { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
       { label: "JPG95 candidate", value: jpg95CandidatePath, status: jpg95CandidateStatusText, copyLabel: "JPG95 candidate 路径" },
+      { label: "delivery_light", value: lightDeliveryPath, status: lightDeliveryStatusText, copyLabel: "delivery_light path" },
       { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
     ];
     const outputBindingRows = [
@@ -2190,6 +2211,7 @@ export default function DashboardPage() {
       { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
       { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
       { label: "JPG95 candidate", value: jpg95CandidatePath, status: jpg95CandidateStatusText, copyLabel: "JPG95 candidate 路径" },
+      { label: "delivery_light", value: lightDeliveryPath, status: lightDeliveryStatusText, copyLabel: "delivery_light path" },
       { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
       ...(outputPath
         ? [
@@ -2201,6 +2223,9 @@ export default function DashboardPage() {
             { label: "当前成品来源", value: finalOutputSource === "png_main" ? "PNG 高清主图" : finalOutputSource },
             { label: "JPG95 候选体积", value: formatBytesToMb(jpg95CandidateSizeBytes) },
             { label: "JPG95 节省比例", value: formatPercentValue(jpg95CandidateSavedRatio) },
+            { label: "delivery_light 体积", value: formatBytesToMb(lightDeliverySizeBytes) },
+            { label: "delivery_light 节省比例", value: formatPercentValue(lightDeliverySavedRatio) },
+            { label: "delivery_light 状态", value: lightDeliveryStatusText },
             { label: "候选状态", value: jpg95CandidateStatusText },
             { label: "人工建议", value: jpg95ReviewLabel },
             { label: "candidate_is_final_output", value: "false" },
@@ -2215,6 +2240,7 @@ export default function DashboardPage() {
       { label: contactSheet ? "contact sheet 已生成" : "contact sheet 未生成", detail: contactSheet ? "本地对比图已生成，完整路径可通过复制按钮获取。" : "当前样本没有可用 contact sheet。" },
       { label: outputPath ? "output_path 已生成" : "output_path 未生成", detail: outputPath ? "本地成品路径已绑定，完整路径可通过复制按钮获取。" : "当前样本没有可复制的成品路径。" },
       { label: jpg95CandidateStatus === "candidate_for_review" ? "JPG95 候选需人工复核" : "JPG95 候选未采用", detail: jpg95CandidateStatus === "candidate_for_review" ? "当前交付仍使用 PNG 高清主图，JPG95 仅作为体积优化候选。" : jpg95CandidateReason },
+      { label: lightDeliveryStatus === "available" ? "delivery_light 可直接取用" : "delivery_light 未生成", detail: lightDeliveryStatus === "available" ? "轻量交付副本来自 JPG95 candidate，PNG final 与 output_path 不变。" : lightDeliveryReason },
       { label: "当前交付仍使用 PNG 高清主图", detail: `人工建议：${jpg95ReviewLabel}` },
       ...(isPortraitSkip ? [{ label: "人物图保护跳过", detail: "Beta 当前不放开人像增强，避免破坏面部主体。" }] : []),
       ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [{ label: "跳过 / 失败原因", detail: reasonText }] : []),

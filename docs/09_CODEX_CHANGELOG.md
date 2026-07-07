@@ -1,5 +1,11 @@
 # Codex Changelog
 
+## 2026-07-05 - V0.4.6 RC1 delivery_light lightweight delivery copy
+
+- Beta 在 JPG95 candidate 通过安全门后新增 `delivery_light/` 轻量交付副本，直接复制 candidate，不重新编码，不替换 PNG final。
+- 新增 `light_delivery_*` 字段并同步 Dashboard / Beta 报告页与反馈包 CSV，用于区分 PNG final、JPG95 candidate 和可直接取用的小体积交付副本。
+- 本轮不改变 `output_path`、`output_size_bytes`、`output_format`、`final_output_url`、delivery guard、compression gate 或标准版 final 选择逻辑。
+
 ## 2026-07-05 - V0.4.7 planning delivery naming rule engine
 
 - 新增 `engine/delivery_naming` 独立规则命名引擎，支持用户模板、序号位数、字段来源、字段缺失标记、Windows 文件名安全清理、重名消解和 `rename_map.csv` 导出。
