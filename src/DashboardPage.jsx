@@ -11,7 +11,6 @@ const DEFAULT_SCALE = "2";
 const DEFAULT_LEGACY_FORMAT = "png";
 const PROCESSING_MODE_STANDARD = "standard";
 const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
-const DEFAULT_SAFE_BETA_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
 const DEFAULT_SAFE_BETA_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
 const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
 
@@ -447,6 +446,10 @@ function isUsableLocalFile(file) {
     typeof file.size === "number" &&
     typeof file.type === "string"
   );
+}
+
+function isCurrentSafeBetaInputItem(item) {
+  return isUsableLocalFile(item?.file);
 }
 
 function extractTaskPayload(payload) {
@@ -1156,69 +1159,13 @@ export default function DashboardPage() {
   };
 
   const runSafeBetaMode = async () => {
-    processingRef.current = true;
-    setIsProcessingQueue(true);
-    setCurrentIndex(1);
-    setSafeBetaFeedbackResult(null);
-    setSafeBetaResult({
-      status: "RUNNING",
-      processed_count: 0,
-      skipped_count: 0,
-      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
-      has_enhanced: false,
-      has_contact_sheet: false,
-      message: "运行中",
-    });
-    setNotice("1080P安全增强 Beta 运行中。");
-    try {
-      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/enhance`, {
-        input_dir: DEFAULT_SAFE_BETA_INPUT_DIR,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
-        mode: "safe_1080p",
-      });
-      const data = payload?.data || {};
-      const processedItems = Array.isArray(data.processed) ? data.processed : [];
-      const hasEnhanced = processedItems.length > 0 && processedItems.every((row) => Boolean(row.enhanced));
-      const hasContactSheet = processedItems.length > 0 && processedItems.every((row) => Boolean(row.contact_sheet));
-      setSafeBetaResult({
-        status: payload.verification_result || data.verification_result || "PASS_WITH_NOTES",
-        processed_count: data.processed_count || 0,
-        skipped_count: data.skipped_count || 0,
-        output_dir: data.output_dir || "",
-        has_enhanced: hasEnhanced,
-        has_contact_sheet: hasContactSheet,
-        input_dir: data.input_dir || DEFAULT_SAFE_BETA_INPUT_DIR,
-        processed: processedItems,
-        skipped: Array.isArray(data.skipped) ? data.skipped : [],
-        started_at: data.started_at || "",
-        finished_at: data.finished_at || "",
-        elapsed_seconds: data.elapsed_seconds || "",
-        message: payload.message || "",
-      });
-      setNotice(`1080P安全增强 Beta 完成：${payload.verification_result || data.verification_result || "PASS_WITH_NOTES"}`);
-    } catch (error) {
-      setSafeBetaResult({
-        status: "BLOCKED",
-        processed_count: 0,
-        skipped_count: 0,
-        output_dir: "",
-        has_enhanced: false,
-        has_contact_sheet: false,
-        message: error.message,
-      });
-      setNotice(`1080P安全增强 Beta 阻断：${error.message}`);
-    } finally {
-      processingRef.current = false;
-      setIsProcessingQueue(false);
-      setCurrentIndex(0);
-      setActiveScreen("dashboard");
-    }
+    return runSafeBetaModeV2();
   };
 
   const runSafeBetaModeV2 = async () => {
     const startedAt = Date.now();
     const betaRunId = makeBetaRunId();
-    const betaItems = fileQueue.filter((item) => item.status === "queued" || item.status === "failed" || item.status === "processing");
+    const betaItems = fileQueue.filter(isCurrentSafeBetaInputItem);
     const betaItemIds = betaItems.map((item) => item.id);
     const firstFileName = betaItems[0]?.name || "";
     const firstCurrentFile = firstFileName || "正在连接 Beta 后端";
@@ -1252,9 +1199,12 @@ export default function DashboardPage() {
         has_enhanced: false,
         has_contact_sheet: false,
         elapsed_seconds: 0,
-        message: "队列中没有待处理图片。",
+        stage: "BETA_INPUT_MISSING",
+        reason: "BETA_INPUT_MISSING",
+        error: "BETA_INPUT_MISSING / 请先添加图片",
+        message: "BETA_INPUT_MISSING / 请先添加图片",
       });
-      setNotice("队列中没有待处理图片。");
+      setNotice("BETA_INPUT_MISSING / 请先添加图片");
       return;
     }
     logSafeBeta(betaRunId, "BETA_FILE_OBJECT_CHECK_START", {

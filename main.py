@@ -1701,8 +1701,8 @@ def build_web_app():
                 "verification_result": "FAILED",
                 "stage": "BETA_INPUT_MISSING",
                 "reason": "BETA_INPUT_MISSING",
-                "error": "未收到当前选择的输入文件，已拒绝使用默认测试样本",
-                "error_message": "未收到当前选择的输入文件，已拒绝使用默认测试样本",
+                "error": "BETA_INPUT_MISSING / 请先添加图片",
+                "error_message": "BETA_INPUT_MISSING / 请先添加图片",
                 "processed_count": 0,
                 "skipped_count": 0,
                 "processed": [],
@@ -1943,6 +1943,17 @@ def build_web_app():
                         "output_dir": output_dir_value,
                     }
                 )
+                if not input_files:
+                    beta_stage_log(
+                        "BETA_INPUT_MISSING",
+                        input_path=temp_input_dir,
+                        output_dir=output_dir_value,
+                        current_file=", ".join(declared_names),
+                        flat_output=payload["flat_output"],
+                        business_output=payload["business_output"],
+                        beta_run_id=beta_run_id,
+                        error_message="BETA_INPUT_MISSING / 请先添加图片",
+                    )
                 beta_stage_log(
                     "BETA_API_INPUT_FILES_RESOLVED",
                     input_path="; ".join(input_files),
@@ -1987,6 +1998,34 @@ def build_web_app():
                     business_output=bool(payload.get("business_output")),
                     beta_run_id=beta_run_id,
                 )
+            if not ((payload or {}).get("input_files") or []):
+                result = {
+                    "ok": False,
+                    "success": False,
+                    "beta_run_id": beta_run_id,
+                    "status": "failed",
+                    "verification_result": "FAILED",
+                    "stage": "BETA_INPUT_MISSING",
+                    "reason": "BETA_INPUT_MISSING",
+                    "error": "BETA_INPUT_MISSING / 请先添加图片",
+                    "error_message": "BETA_INPUT_MISSING / 请先添加图片",
+                    "processed_count": 0,
+                    "skipped_count": 0,
+                    "processed": [],
+                    "skipped": [],
+                    "output_dir": output_dir_value,
+                }
+                beta_stage_log(
+                    "BETA_API_RESPONSE_READY",
+                    input_path=(payload or {}).get("input_dir") if isinstance(payload, dict) else "",
+                    output_dir=output_dir_value,
+                    current_file="",
+                    flat_output=bool((payload or {}).get("flat_output")) if isinstance(payload, dict) else False,
+                    business_output=bool((payload or {}).get("business_output")) if isinstance(payload, dict) else False,
+                    beta_run_id=beta_run_id,
+                    error_message=result["error_message"],
+                )
+                return beta_failure_response(result, output_dir_value, 200, 400)
             beta_stage_log(
                 "BETA_API_ENHANCE_START",
                 input_path=(payload or {}).get("input_dir"),
