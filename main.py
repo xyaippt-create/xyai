@@ -4,8 +4,8 @@ import json
 import os
 import queue
 import re
+import shutil
 import sys
-import tempfile
 import threading
 import time
 import urllib.parse
@@ -135,6 +135,41 @@ def safe_upload_name(filename: str | None) -> str:
     original = Path(filename or "image.png").name
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original).strip(" .")
     return cleaned or "image.png"
+
+
+def safe_beta_run_id(value: str | None) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._-")
+    return cleaned or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
+def prepare_safe_beta_input_staging_dir(output_dir_value: str | Path | None, beta_run_id: str | None) -> Path:
+    output_root = Path(str(output_dir_value or "D:/影界文件/1080P安全增强输出")).expanduser()
+    staging_root = output_root / "_input_staging"
+    staging_dir = staging_root / safe_beta_run_id(beta_run_id)
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging_root_resolved = staging_root.resolve()
+    if staging_dir.exists():
+        staging_dir_resolved = staging_dir.resolve()
+        if staging_root_resolved != staging_dir_resolved and staging_root_resolved in staging_dir_resolved.parents:
+            shutil.rmtree(staging_dir)
+        else:
+            raise RuntimeError(f"BETA_INPUT_STAGING_UNSAFE_PATH: {staging_dir}")
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    return staging_dir
+
+
+def unique_child_path(parent: Path, filename: str) -> Path:
+    candidate = parent / safe_upload_name(filename)
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    counter = 2
+    while True:
+        next_candidate = parent / f"{stem}_{counter:02d}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        counter += 1
 
 
 def public_file_url(kind: str, filename: str) -> str:
@@ -1870,7 +1905,6 @@ def build_web_app():
     @app.post("/api/beta/safe-1080p/enhance")
     async def beta_safe_1080p_enhance(request: Request):
         payload: dict = {}
-        temp_context = None
         output_dir_value = "D:/影界文件/1080P安全增强输出"
         beta_run_id = ""
         try:
@@ -1878,23 +1912,23 @@ def build_web_app():
             if "multipart/form-data" in content_type:
                 form = await request.form()
                 beta_run_id = str(form.get("beta_run_id") or "")
+                output_dir_value = str(form.get("output_dir") or output_dir_value)
                 beta_stage_log(
                     "BETA_API_REQUEST_RECEIVED",
-                    output_dir=str(form.get("output_dir") or output_dir_value),
+                    output_dir=output_dir_value,
                     flat_output=parse_bool_value(form.get("flat_output"), True),
                     business_output=parse_bool_value(form.get("business_output"), True),
                     beta_run_id=beta_run_id,
                 )
                 beta_stage_log(
                     "BETA_API_FORM_FIELDS",
-                    output_dir=str(form.get("output_dir") or output_dir_value),
+                    output_dir=output_dir_value,
                     current_file=str(form.get("selected_file_names") or ""),
                     flat_output=parse_bool_value(form.get("flat_output"), True),
                     business_output=parse_bool_value(form.get("business_output"), True),
                     beta_run_id=beta_run_id,
                 )
-                temp_context = tempfile.TemporaryDirectory(prefix="safe_1080p_beta_selected_")
-                temp_input_dir = Path(temp_context.name)
+                temp_input_dir = prepare_safe_beta_input_staging_dir(output_dir_value, beta_run_id)
                 temp_input_dir.mkdir(parents=True, exist_ok=True)
                 input_files: list[str] = []
                 selected_names: list[str] = []
@@ -1902,7 +1936,7 @@ def build_web_app():
                 beta_stage_log(
                     "BETA_API_FILES_RECEIVED",
                     input_path=temp_input_dir,
-                    output_dir=str(form.get("output_dir") or output_dir_value),
+                    output_dir=output_dir_value,
                     current_file=", ".join(declared_names),
                     flat_output=parse_bool_value(form.get("flat_output"), True),
                     business_output=parse_bool_value(form.get("business_output"), True),
@@ -1913,13 +1947,13 @@ def build_web_app():
                     if hasattr(value, "filename") and hasattr(value, "read"):
                         upload_name = declared_names[file_index] if file_index < len(declared_names) else safe_upload_name(getattr(value, "filename", None))
                         file_index += 1
-                        selected_names.append(upload_name)
-                        saved_path = temp_input_dir / upload_name
                         try:
                             raw = await value.read()
                         except Exception as exc:
                             raise RuntimeError(f"BETA_MULTIPART_FILE_READ_FAILED: {upload_name}: {exc}") from exc
                         if raw:
+                            saved_path = unique_child_path(temp_input_dir, upload_name)
+                            selected_names.append(saved_path.name)
                             try:
                                 saved_path.write_bytes(raw)
                             except Exception as exc:
@@ -2063,9 +2097,6 @@ def build_web_app():
                 "reason": "beta_api_exception",
                 "error_message": beta_tail_text(str(exc)),
             }
-        finally:
-            if temp_context is not None:
-                temp_context.cleanup()
         result = beta_result_dict(result, output_dir_value)
         result["beta_run_id"] = result.get("beta_run_id") or beta_run_id
         verification_result = result.get("verification_result") or "BLOCKED"

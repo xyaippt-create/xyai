@@ -2624,6 +2624,10 @@ export default function DashboardPage() {
                   <span className="shrink-0">输出目录</span>
                   <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
                 </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">输入目录</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.input_dir || "等待当前队列图片"}</span>
+                </div>
                 {safeBetaFailureSummary ? (
                   <div className="rounded-sm border border-[#4b1f2a] bg-[#1b0b10] px-2 py-1.5 text-[11px] leading-5 text-[#ff8a8a]">
                     {safeBetaFailureSummary}
@@ -2647,6 +2651,7 @@ export default function DashboardPage() {
                       status: safeBetaResult?.status || "",
                       processed_count: safeBetaResult?.processed_count || 0,
                       skipped_count: safeBetaResult?.skipped_count || 0,
+                      input_dir: safeBetaResult?.input_dir || "",
                       output_dir: safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
                     }, null, 2)}
                   </pre>
