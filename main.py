@@ -131,6 +131,21 @@ def normalize_user_output_root(output_root: Path) -> Path:
     return root
 
 
+def resolve_hdde_user_dirs() -> dict[str, Path]:
+    base_dir = Path("D:/影界文件") if os.name == "nt" else Path.home() / DEFAULT_WORK_DIR_NAME
+    normal_input_dir = base_dir / DEFAULT_INPUT_DIR_NAME
+    safe_beta_input_root = base_dir / "1080P安全增强输入"
+    safe_beta_output_dir = base_dir / "1080P安全增强输出"
+    for directory in (base_dir, normal_input_dir, safe_beta_input_root, safe_beta_output_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return {
+        "base_dir": base_dir,
+        "normal_input_dir": normal_input_dir,
+        "safe_beta_input_root": safe_beta_input_root,
+        "safe_beta_output_dir": safe_beta_output_dir,
+    }
+
+
 def safe_upload_name(filename: str | None) -> str:
     original = Path(filename or "image.png").name
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", original).strip(" .")
@@ -142,20 +157,19 @@ def safe_beta_run_id(value: str | None) -> str:
     return cleaned or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
 
-def prepare_safe_beta_input_staging_dir(output_dir_value: str | Path | None, beta_run_id: str | None) -> Path:
-    output_root = Path(str(output_dir_value or "D:/影界文件/1080P安全增强输出")).expanduser()
-    staging_root = output_root / "_input_staging"
-    staging_dir = staging_root / safe_beta_run_id(beta_run_id)
-    staging_root.mkdir(parents=True, exist_ok=True)
-    staging_root_resolved = staging_root.resolve()
-    if staging_dir.exists():
-        staging_dir_resolved = staging_dir.resolve()
-        if staging_root_resolved != staging_dir_resolved and staging_root_resolved in staging_dir_resolved.parents:
-            shutil.rmtree(staging_dir)
+def prepare_safe_beta_user_input_dir(beta_run_id: str | None) -> Path:
+    user_dirs = resolve_hdde_user_dirs()
+    input_root = user_dirs["safe_beta_input_root"]
+    task_dir = input_root / f"当前任务_{safe_beta_run_id(beta_run_id)}"
+    input_root_resolved = input_root.resolve()
+    if task_dir.exists():
+        task_dir_resolved = task_dir.resolve()
+        if input_root_resolved != task_dir_resolved and input_root_resolved in task_dir_resolved.parents:
+            shutil.rmtree(task_dir)
         else:
-            raise RuntimeError(f"BETA_INPUT_STAGING_UNSAFE_PATH: {staging_dir}")
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    return staging_dir
+            raise RuntimeError(f"BETA_INPUT_DIR_UNSAFE_PATH: {task_dir}")
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return task_dir
 
 
 def unique_child_path(parent: Path, filename: str) -> Path:
@@ -1637,6 +1651,10 @@ def build_web_app():
             "enhanced_files": [],
             "results": [],
             "skipped": skipped_items,
+            "input_dir": str(result.get("input_dir") or ""),
+            "input_files": result.get("input_files") if isinstance(result.get("input_files"), list) else [],
+            "input_file_names": result.get("input_file_names") if isinstance(result.get("input_file_names"), list) else [],
+            "input_file_count": beta_int(result.get("input_file_count"), 0),
             "output_dir": str(result.get("output_dir") or output_dir_value or ""),
             "data": result,
         }
@@ -1670,6 +1688,11 @@ def build_web_app():
             )
         result["results"] = rows
         result["enhanced_files"] = enhanced_files
+        input_files = [str(item) for item in result.get("input_files") or [] if str(item or "").strip()]
+        input_file_names = [Path(item).name for item in input_files]
+        result["input_files"] = input_files
+        result["input_file_names"] = input_file_names
+        result["input_file_count"] = len(input_files)
         return {
             "ok": True,
             "success": True,
@@ -1682,6 +1705,10 @@ def build_web_app():
             "skipped_count": beta_int(result.get("skipped_count"), 0),
             "enhanced_files": enhanced_files,
             "results": rows,
+            "input_dir": str(result.get("input_dir") or ""),
+            "input_files": input_files,
+            "input_file_names": input_file_names,
+            "input_file_count": len(input_files),
             "output_dir": str(output_dir_value),
             "data": result,
         }
@@ -1905,7 +1932,7 @@ def build_web_app():
     @app.post("/api/beta/safe-1080p/enhance")
     async def beta_safe_1080p_enhance(request: Request):
         payload: dict = {}
-        output_dir_value = "D:/影界文件/1080P安全增强输出"
+        output_dir_value = str(resolve_hdde_user_dirs()["safe_beta_output_dir"])
         beta_run_id = ""
         try:
             content_type = request.headers.get("content-type", "").lower()
@@ -1928,7 +1955,7 @@ def build_web_app():
                     business_output=parse_bool_value(form.get("business_output"), True),
                     beta_run_id=beta_run_id,
                 )
-                temp_input_dir = prepare_safe_beta_input_staging_dir(output_dir_value, beta_run_id)
+                temp_input_dir = prepare_safe_beta_user_input_dir(beta_run_id)
                 temp_input_dir.mkdir(parents=True, exist_ok=True)
                 input_files: list[str] = []
                 selected_names: list[str] = []
@@ -2045,6 +2072,10 @@ def build_web_app():
                     "error_message": "BETA_INPUT_MISSING / 请先添加图片",
                     "processed_count": 0,
                     "skipped_count": 0,
+                    "input_dir": str((payload or {}).get("input_dir") or ""),
+                    "input_files": [],
+                    "input_file_names": [],
+                    "input_file_count": 0,
                     "processed": [],
                     "skipped": [],
                     "output_dir": output_dir_value,
@@ -2070,6 +2101,12 @@ def build_web_app():
                 beta_run_id=beta_run_id,
             )
             result = await asyncio.to_thread(run_safe_1080p_beta, payload if isinstance(payload, dict) else {})
+            if isinstance(result, dict) and isinstance(payload, dict):
+                input_files = [str(item) for item in payload.get("input_files") or [] if str(item or "").strip()]
+                result.setdefault("input_dir", str(payload.get("input_dir") or ""))
+                result["input_files"] = input_files
+                result["input_file_names"] = [Path(item).name for item in input_files]
+                result["input_file_count"] = len(input_files)
             beta_stage_log(
                 "BETA_API_ENHANCE_DONE",
                 input_path=(payload or {}).get("input_dir"),

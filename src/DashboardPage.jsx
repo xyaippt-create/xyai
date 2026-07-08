@@ -1151,6 +1151,41 @@ export default function DashboardPage() {
       });
   };
 
+  const handleOpenSafeBetaInputDir = () => {
+    const target = safeBetaResult?.input_dir || "";
+    const fileCount = Number(safeBetaResult?.input_file_count ?? safeBetaResult?.input_file_names?.length ?? 0);
+    const fileNames = Array.isArray(safeBetaResult?.input_file_names) ? safeBetaResult.input_file_names : [];
+    if (!target || fileCount <= 0) {
+      setNotice("当前任务输入目录为空，请重新添加图片后执行增强版");
+      console.info("[Safe1080pBeta] INPUT_DIR_OPEN_BLOCKED", {
+        api_input_dir: safeBetaResult?.input_dir || "",
+        ui_input_dir: safeBetaResult?.input_dir || "",
+        explorer_open_path: "",
+        input_dir_file_count: fileCount,
+        input_dir_files: fileNames,
+      });
+      return;
+    }
+    console.info("[Safe1080pBeta] INPUT_DIR_OPEN", {
+      api_input_dir: safeBetaResult?.input_dir || "",
+      ui_input_dir: target,
+      explorer_open_path: target,
+      input_dir_file_count: fileCount,
+      input_dir_files: fileNames,
+    });
+    requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: target })
+      .then((payload) => {
+        setOutputDirError("");
+        setOutputDirSuccess("");
+        setNotice(payload.message || "已打开本次输入目录。");
+      })
+      .catch((error) => {
+        setOutputDirError(error.message);
+        setOutputDirSuccess("");
+        setNotice(error.message || "打开本次输入目录失败。");
+      });
+  };
+
   const handleResetOutputDir = () => {
     setAppliedOutputDir("");
     setOutputDirError("");
@@ -1196,6 +1231,10 @@ export default function DashboardPage() {
         contact_sheet_count: 0,
         skipped_count: 0,
         output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        input_dir: "",
+        input_files: [],
+        input_file_names: [],
+        input_file_count: 0,
         has_enhanced: false,
         has_contact_sheet: false,
         elapsed_seconds: 0,
@@ -1227,6 +1266,10 @@ export default function DashboardPage() {
         contact_sheet_count: 0,
         skipped_count: 0,
         output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        input_dir: "",
+        input_files: [],
+        input_file_names: [],
+        input_file_count: 0,
         has_enhanced: false,
         has_contact_sheet: false,
         elapsed_seconds: 0,
@@ -1406,6 +1449,16 @@ export default function DashboardPage() {
       const firstEnhanced = firstResult.output_path || enhancedFiles[0] || processedItems.find((row) => row.output_path)?.output_path || processedItems.find((row) => row.enhanced)?.enhanced || "";
       const firstOutputName = firstEnhanced ? firstEnhanced.split(/[\\/]/).pop() : "";
       const resultStatus = payload.verification_result || data.verification_result || "PASS";
+      const inputDir = payload.input_dir || data.input_dir || "";
+      const inputFileNames = Array.isArray(payload.input_file_names) ? payload.input_file_names : Array.isArray(data.input_file_names) ? data.input_file_names : [];
+      const inputFileCount = Number(payload.input_file_count ?? data.input_file_count ?? inputFileNames.length ?? 0);
+      console.info("[Safe1080pBeta] INPUT_DIR_SYNC", {
+        api_input_dir: inputDir,
+        ui_input_dir: inputDir,
+        explorer_open_path: inputDir,
+        input_dir_file_count: inputFileCount,
+        input_dir_files: inputFileNames,
+      });
       setSafeBetaResult({
         status: resultStatus,
         beta_run_id: payload.beta_run_id || data.beta_run_id || betaRunId,
@@ -1418,7 +1471,10 @@ export default function DashboardPage() {
         output_dir: payload.output_dir || data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
         has_enhanced: enhancedCount > 0,
         has_contact_sheet: contactSheetCount > 0,
-        input_dir: data.input_dir || "",
+        input_dir: inputDir,
+        input_files: Array.isArray(payload.input_files) ? payload.input_files : Array.isArray(data.input_files) ? data.input_files : [],
+        input_file_names: inputFileNames,
+        input_file_count: inputFileCount,
         results,
         enhanced_files: enhancedFiles,
         processed: processedItems,
@@ -1441,6 +1497,16 @@ export default function DashboardPage() {
       const skippedRows = Array.isArray(errorPayload.skipped) ? errorPayload.skipped : Array.isArray(errorData.skipped) ? errorData.skipped : [];
       const skippedCount = Number(errorPayload.skipped_count ?? errorData.skipped_count ?? skippedRows.length ?? 0);
       const failureMessage = formatBetaFailureMessage(errorPayload, error.message);
+      const failedInputDir = errorPayload.input_dir || errorData.input_dir || "";
+      const failedInputFileNames = Array.isArray(errorPayload.input_file_names) ? errorPayload.input_file_names : Array.isArray(errorData.input_file_names) ? errorData.input_file_names : [];
+      const failedInputFileCount = Number(errorPayload.input_file_count ?? errorData.input_file_count ?? failedInputFileNames.length ?? 0);
+      console.info("[Safe1080pBeta] INPUT_DIR_SYNC", {
+        api_input_dir: failedInputDir,
+        ui_input_dir: failedInputDir,
+        explorer_open_path: failedInputDir,
+        input_dir_file_count: failedInputFileCount,
+        input_dir_files: failedInputFileNames,
+      });
       logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
         error: failureMessage,
         stage: errorPayload.stage || "",
@@ -1455,6 +1521,10 @@ export default function DashboardPage() {
         contact_sheet_count: 0,
         skipped_count: skippedCount,
         output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        input_dir: failedInputDir,
+        input_files: Array.isArray(errorPayload.input_files) ? errorPayload.input_files : Array.isArray(errorData.input_files) ? errorData.input_files : [],
+        input_file_names: failedInputFileNames,
+        input_file_count: failedInputFileCount,
         has_enhanced: false,
         has_contact_sheet: false,
         elapsed_seconds: Math.round((Date.now() - startedAt) / 1000),
@@ -2628,6 +2698,26 @@ export default function DashboardPage() {
                   <span className="shrink-0">输入目录</span>
                   <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.input_dir || "等待当前队列图片"}</span>
                 </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="shrink-0">输入文件数</span>
+                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.input_file_count ?? 0}</span>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="shrink-0">输入文件</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">
+                    {Array.isArray(safeBetaResult?.input_file_names) && safeBetaResult.input_file_names.length > 0
+                      ? safeBetaResult.input_file_names.join(" / ")
+                      : "--"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOpenSafeBetaInputDir}
+                  disabled={!safeBetaResult?.input_dir || Number(safeBetaResult?.input_file_count ?? 0) <= 0}
+                  className="w-full rounded-sm border border-[#6feaf0]/40 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
+                >
+                  打开本次输入目录
+                </button>
                 {safeBetaFailureSummary ? (
                   <div className="rounded-sm border border-[#4b1f2a] bg-[#1b0b10] px-2 py-1.5 text-[11px] leading-5 text-[#ff8a8a]">
                     {safeBetaFailureSummary}
@@ -2652,6 +2742,8 @@ export default function DashboardPage() {
                       processed_count: safeBetaResult?.processed_count || 0,
                       skipped_count: safeBetaResult?.skipped_count || 0,
                       input_dir: safeBetaResult?.input_dir || "",
+                      input_file_count: safeBetaResult?.input_file_count || 0,
+                      input_dir_files: safeBetaResult?.input_file_names || [],
                       output_dir: safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
                     }, null, 2)}
                   </pre>

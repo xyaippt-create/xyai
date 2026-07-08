@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 const API_BASE = "http://localhost:8787";
-const DEFAULT_INPUT_DIR = "D:\\影界文件\\真实业务测试_6张";
+const DEFAULT_INPUT_DIR = "";
 const DEFAULT_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
 
 function statusTone(status) {
@@ -62,6 +62,30 @@ export default function Safe1080pBetaPage({ onBackToDashboard }) {
   );
 
   const runBeta = async () => {
+    if (!inputDir.trim()) {
+      setError("BETA_INPUT_MISSING / 请先添加图片");
+      setResult({
+        verification_result: "BLOCKED",
+        data: {
+          status: "blocked",
+          verification_result: "BLOCKED",
+          mode: "safe_1080p",
+          input_dir: "",
+          output_dir: outputDir,
+          progress: 100,
+          current_file: "BETA_INPUT_MISSING",
+          processed_count: 0,
+          enhanced_count: 0,
+          contact_sheet_count: 0,
+          skipped_count: 0,
+          elapsed_seconds: 0,
+          processed: [],
+          skipped: [],
+          reason: "BETA_INPUT_MISSING",
+        },
+      });
+      return;
+    }
     const started = Date.now();
     setRunning(true);
     setStartedAt(started);
