@@ -239,7 +239,8 @@ def build_target_edge_text_mask(original_target: np.ndarray) -> np.ndarray:
     masks = build_protection_masks(original_target)
     text_mask = cv2.dilate(masks["text_like"], np.ones((5, 5), np.uint8), iterations=1)
     edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((3, 3), np.uint8), iterations=1)
-    mask = cv2.bitwise_or(text_mask, edge_mask)
+    subject_edge = cv2.bitwise_and(edge_mask, cv2.bitwise_or(text_mask, masks["high_sat"]))
+    mask = cv2.bitwise_or(text_mask, subject_edge)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
     return cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 0.65)
 
@@ -274,9 +275,28 @@ def apply_light_edge_restore(image: np.ndarray, original_target: np.ndarray) -> 
     original_blurred = cv2.GaussianBlur(original_target, (0, 0), 0.72).astype(np.float32)
     image_detail = image.astype(np.float32) - blurred
     original_detail = original_target.astype(np.float32) - original_blurred
-    detail = image_detail * 0.20 + original_detail * 0.50
+    detail = image_detail * 0.18 + original_detail * 0.42
     restored = image.astype(np.float32) + detail * edge_mask
+    restored = apply_low_value_background_smoothing(np.clip(restored, 0, 255).astype(np.uint8), original_target)
     return np.clip(restored, 0, 255).astype(np.uint8)
+
+
+def apply_low_value_background_smoothing(image: np.ndarray, original_target: np.ndarray) -> np.ndarray:
+    masks = build_protection_masks(original_target)
+    gray = cv2.cvtColor(original_target, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(original_target, cv2.COLOR_BGR2HSV)
+    _, s, v = cv2.split(hsv)
+
+    protected = cv2.bitwise_or(masks["text_like"], masks["high_contrast_edge"])
+    protected = cv2.bitwise_or(protected, masks["high_sat"])
+    protected = cv2.bitwise_or(protected, masks["skin"])
+    low_information = (protected == 0) & (s < 88) & (v < 180) & (gray > 18)
+    smooth_mask = cv2.morphologyEx(low_information.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
+    smooth_mask = cv2.GaussianBlur(smooth_mask.astype(np.float32) / 255.0, (0, 0), 1.2)[:, :, None]
+    smooth_mask *= 0.16
+
+    smoothed = cv2.GaussianBlur(image, (0, 0), 0.55).astype(np.float32)
+    return np.clip(image.astype(np.float32) * (1.0 - smooth_mask) + smoothed * smooth_mask, 0, 255).astype(np.uint8)
 
 
 def size_ratio(output_size: int | None, input_size: int | None) -> float | None:
