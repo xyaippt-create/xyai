@@ -36,9 +36,35 @@ PROBLEM_CODES = {
     "WARNING_SYSTEM_ENV_UNKNOWN",
 }
 
-DEFAULT_FEEDBACK_DIR = (
-    Path("D:/影界文件/影界测试反馈包") if os.name == "nt" else Path.home() / "影界文件" / "影界测试反馈包"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_app_data_root() -> Path:
+    settings_path = PROJECT_ROOT / "settings" / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except Exception:
+        settings = {}
+    if isinstance(settings, dict):
+        configured = str(settings.get("app_data_root") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        saved = str(settings.get("last_app_data_root") or "").strip()
+        if saved:
+            saved_path = Path(saved).expanduser()
+            try:
+                is_project_tmp = (PROJECT_ROOT / "tmp" / "runtime_data").resolve() in saved_path.resolve().parents
+            except Exception:
+                is_project_tmp = False
+            if not is_project_tmp:
+                return saved_path
+    if os.name == "nt" and Path("D:/").exists():
+        return Path("D:/影界文件")
+    documents = (Path(os.environ["USERPROFILE"]) / "Documents") if os.name == "nt" and os.environ.get("USERPROFILE") else Path.home() / "Documents"
+    return documents / "影界HDDE"
+
+
+DEFAULT_FEEDBACK_DIR = _default_app_data_root() / "影界测试反馈包"
 README_NAME = "README_请把整个ZIP发给开发者.txt"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -870,8 +896,15 @@ def generate_safe_1080p_feedback_package(
         "status": status,
         "problem_stage": problem_stage,
         "problem_code": problem_code,
+        "app_data_root": str(run_result.get("app_data_root") or ""),
+        "app_data_root_source": str(run_result.get("app_data_root_source") or ""),
+        "app_data_root_exists": bool(run_result.get("app_data_root_exists")),
+        "app_data_root_writable": bool(run_result.get("app_data_root_writable")),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
+        "report_dir": str(run_result.get("report_dir") or ""),
+        "feedback_dir": str(run_result.get("feedback_dir") or feedback_dir),
+        "beta_upload_dir": str(run_result.get("beta_upload_dir") or ""),
         "feedback_zip_path": str(zip_path),
         "processed_count": int(run_result.get("processed_count") or 0),
         "success_count": int(run_result.get("processed_count") or 0),

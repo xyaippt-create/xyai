@@ -22,6 +22,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from engine.analysis.quality_compare import compare_quality
+
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 DEFAULT_TOOL_DIR = Path("external_tools/realesrgan-ncnn-vulkan")
@@ -35,8 +41,82 @@ JPG95_CANDIDATE_MIN_OUTPUT_BYTES = 3 * 1024 * 1024
 JPG95_CANDIDATE_MIN_SIZE_RATIO = 4.0
 JPG95_CANDIDATE_MIN_SAVED_RATIO = 0.30
 JPG95_CANDIDATE_TEXT_RATIO_LIMIT = 0.035
-DEFAULT_OUTPUT_DIR = Path("D:/影界文件/1080P安全增强输出")
-DEFAULT_DIAGNOSTIC_DIR = Path("D:/影界文件/影界测试反馈包")
+
+
+def _read_settings_file_safely() -> dict:
+    settings_path = PROJECT_ROOT / "settings" / "settings.json"
+    if not settings_path.exists():
+        return {}
+    try:
+        loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _documents_dir() -> Path:
+    if os.name == "nt" and os.environ.get("USERPROFILE"):
+        return Path(os.environ["USERPROFILE"]) / "Documents"
+    return Path.home() / "Documents"
+
+
+def _directory_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".hdde_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def resolve_default_app_data_root() -> dict[str, object]:
+    settings = _read_settings_file_safely()
+    candidates: list[tuple[str, Path]] = []
+    configured = str(settings.get("app_data_root") or "").strip()
+    saved = str(settings.get("last_app_data_root") or "").strip()
+    project_tmp_root = PROJECT_ROOT / "tmp" / "runtime_data"
+    if configured:
+        candidates.append(("user_config", Path(configured).expanduser()))
+    saved_path = Path(saved).expanduser() if saved and saved != configured else None
+    saved_is_project_tmp = False
+    if saved_path is not None:
+        try:
+            saved_is_project_tmp = project_tmp_root.resolve() in saved_path.resolve().parents or saved_path.resolve() == project_tmp_root.resolve()
+        except Exception:
+            saved_is_project_tmp = False
+    if saved_path is not None and not saved_is_project_tmp:
+        candidates.append(("saved_config", saved_path))
+    if os.name == "nt":
+        candidates.append(("d_drive", Path("D:/影界文件")))
+    candidates.append(("documents", _documents_dir() / "影界HDDE"))
+    if saved_path is not None and saved_is_project_tmp:
+        candidates.append(("saved_config", saved_path))
+    candidates.append(("project_tmp", PROJECT_ROOT / "tmp" / "runtime_data" / "影界HDDE"))
+
+    for source, candidate in candidates:
+        if _directory_writable(candidate):
+            return {
+                "path": candidate,
+                "source": source,
+                "exists": candidate.exists(),
+                "writable": True,
+            }
+    fallback = PROJECT_ROOT / "tmp" / "runtime_data" / "影界HDDE"
+    return {"path": fallback, "source": "project_tmp", "exists": fallback.exists(), "writable": False}
+
+
+def default_safe_beta_output_dir() -> Path:
+    return Path(resolve_default_app_data_root()["path"]) / "1080P安全增强输出"
+
+
+def default_safe_beta_diagnostic_dir() -> Path:
+    return Path(resolve_default_app_data_root()["path"]) / "影界测试反馈包"
+
+
+DEFAULT_OUTPUT_DIR = default_safe_beta_output_dir()
+DEFAULT_DIAGNOSTIC_DIR = default_safe_beta_diagnostic_dir()
 
 
 def parse_args() -> argparse.Namespace:
@@ -245,6 +325,31 @@ def build_target_edge_text_mask(original_target: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 0.65)
 
 
+def build_target_high_value_mask(original_target: np.ndarray) -> np.ndarray:
+    masks = build_protection_masks(original_target)
+    gray = cv2.cvtColor(original_target, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(original_target, cv2.COLOR_BGR2HSV)
+    _, s, v = cv2.split(hsv)
+    local_mean = cv2.GaussianBlur(gray, (0, 0), 1.8)
+    local_detail = cv2.absdiff(gray, local_mean)
+    fine_mean = cv2.GaussianBlur(gray, (0, 0), 0.9)
+    fine_detail = cv2.absdiff(gray, fine_mean)
+
+    text_mask = cv2.dilate(masks["text_like"], np.ones((7, 7), np.uint8), iterations=1)
+    edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((3, 3), np.uint8), iterations=1)
+    material_mask = cv2.dilate(masks["high_sat"], np.ones((5, 5), np.uint8), iterations=1)
+    bright_structure = ((edge_mask > 0) & (v > 82) & (local_detail > 4)).astype(np.uint8) * 255
+    small_object = ((local_detail > 7) & (fine_detail > 3) & (s > 16) & (v > 42)).astype(np.uint8) * 255
+    small_object = cv2.morphologyEx(small_object, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+
+    mask = cv2.bitwise_or(text_mask, edge_mask)
+    mask = cv2.bitwise_or(mask, material_mask)
+    mask = cv2.bitwise_or(mask, bright_structure)
+    mask = cv2.bitwise_or(mask, small_object)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+    return cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (0, 0), 0.58)
+
+
 def target_size_fidelity_blend(original: np.ndarray, model_output: np.ndarray) -> tuple[np.ndarray | None, dict[str, object]]:
     target_width, target_height, profile = true_1080p_target_size(model_output)
     if target_width is None or target_height is None:
@@ -254,31 +359,89 @@ def target_size_fidelity_blend(original: np.ndarray, model_output: np.ndarray) -
     enhanced_target = resize_to_target_for_fidelity(model_output, target_width, target_height)
     masks = build_protection_masks(original_target)
 
-    alpha = np.full(original_target.shape[:2], 0.46, dtype=np.float32)
+    alpha = np.full(original_target.shape[:2], 0.52, dtype=np.float32)
     material_mask = cv2.dilate(masks["high_sat"], np.ones((5, 5), np.uint8), iterations=1)
     edge_mask = cv2.dilate(masks["high_contrast_edge"], np.ones((3, 3), np.uint8), iterations=1)
     text_mask = cv2.dilate(masks["text_like"], np.ones((7, 7), np.uint8), iterations=1)
 
-    alpha[material_mask > 0] = 0.52
-    alpha[edge_mask > 0] = 0.28
-    alpha[text_mask > 0] = 0.12
+    alpha[material_mask > 0] = 0.66
+    alpha[edge_mask > 0] = 0.46
+    alpha[text_mask > 0] = 0.26
     alpha = cv2.GaussianBlur(alpha, (0, 0), 0.9)[:, :, None]
 
     blended = original_target.astype(np.float32) * (1.0 - alpha) + enhanced_target.astype(np.float32) * alpha
-    restored = apply_light_edge_restore(np.clip(blended, 0, 255).astype(np.uint8), original_target)
+    restored = apply_light_edge_restore(np.clip(blended, 0, 255).astype(np.uint8), original_target, enhanced_target)
     return restored, {"output_resolution_profile": profile, **image_dimensions(restored)}
 
 
-def apply_light_edge_restore(image: np.ndarray, original_target: np.ndarray) -> np.ndarray:
+def compute_safe_beta_quality_scores(original: np.ndarray, final_png: np.ndarray) -> dict[str, object]:
+    try:
+        scores = compare_quality(original, final_png)
+    except Exception as exc:
+        return {"quality_score_status": "failed", "quality_score_reason": tail_text(exc, 180)}
+    return {"quality_score_status": "available", **scores}
+
+
+def apply_light_edge_restore(image: np.ndarray, original_target: np.ndarray, enhanced_target: np.ndarray | None = None) -> np.ndarray:
     edge_mask = build_target_edge_text_mask(original_target)[:, :, None]
+    high_value_mask = build_target_high_value_mask(original_target)[:, :, None]
     blurred = cv2.GaussianBlur(image, (0, 0), 0.72).astype(np.float32)
     original_blurred = cv2.GaussianBlur(original_target, (0, 0), 0.72).astype(np.float32)
     image_detail = image.astype(np.float32) - blurred
     original_detail = original_target.astype(np.float32) - original_blurred
-    detail = image_detail * 0.18 + original_detail * 0.42
-    restored = image.astype(np.float32) + detail * edge_mask
+    detail = image_detail * 0.32 + original_detail * 0.64
+    if enhanced_target is not None:
+        enhanced_blurred = cv2.GaussianBlur(enhanced_target, (0, 0), 0.72).astype(np.float32)
+        enhanced_detail = enhanced_target.astype(np.float32) - enhanced_blurred
+        fine_enhanced_blurred = cv2.GaussianBlur(enhanced_target, (0, 0), 0.42).astype(np.float32)
+        fine_enhanced_detail = enhanced_target.astype(np.float32) - fine_enhanced_blurred
+        detail += enhanced_detail * 0.22 + fine_enhanced_detail * 0.12
+    restore_mask = np.clip(edge_mask * 1.0 + high_value_mask * 0.70, 0.0, 1.0)
+    detail = np.clip(detail, -22.0, 22.0)
+    restored = image.astype(np.float32) + detail * restore_mask
+    restored = apply_high_value_micro_contrast(np.clip(restored, 0, 255).astype(np.uint8), original_target, enhanced_target, high_value_mask)
     restored = apply_low_value_background_smoothing(np.clip(restored, 0, 255).astype(np.uint8), original_target)
     return np.clip(restored, 0, 255).astype(np.uint8)
+
+
+def apply_high_value_micro_contrast(
+    image: np.ndarray,
+    original_target: np.ndarray,
+    enhanced_target: np.ndarray | None,
+    high_value_mask: np.ndarray,
+) -> np.ndarray:
+    gray = cv2.cvtColor(original_target, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 55, 150)
+    edge_mask = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1).astype(np.float32) / 255.0
+    edge_mask = cv2.GaussianBlur(edge_mask, (0, 0), 0.48)[:, :, None]
+
+    base = image.astype(np.float32)
+    micro_blur = cv2.GaussianBlur(image, (0, 0), 0.48).astype(np.float32)
+    micro_detail = base - micro_blur
+    original_micro = original_target.astype(np.float32) - cv2.GaussianBlur(original_target, (0, 0), 0.48).astype(np.float32)
+    micro_detail = micro_detail * 0.24 + original_micro * 0.42
+    if enhanced_target is not None:
+        enhanced_micro = enhanced_target.astype(np.float32) - cv2.GaussianBlur(enhanced_target, (0, 0), 0.48).astype(np.float32)
+        micro_detail += enhanced_micro * 0.24
+
+    micro_detail = np.clip(micro_detail, -14.0, 14.0)
+    mask = np.clip(high_value_mask * 0.70 + edge_mask * 0.42, 0.0, 0.92)
+    restored = np.clip(base + micro_detail * mask, 0, 255).astype(np.uint8)
+    return apply_high_value_luma_clarity(restored, high_value_mask, edge_mask)
+
+
+def apply_high_value_luma_clarity(image: np.ndarray, high_value_mask: np.ndarray, edge_mask: np.ndarray) -> np.ndarray:
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=1.45, tileGridSize=(8, 8))
+    l_clahe = clahe.apply(l_channel)
+    bilateral = cv2.bilateralFilter(l_channel, 5, 18, 3)
+    l_detail = np.clip(l_channel.astype(np.float32) - bilateral.astype(np.float32), -12.0, 12.0)
+    l_target = l_clahe.astype(np.float32) * 0.42 + np.clip(l_channel.astype(np.float32) + l_detail * 0.62, 0, 255) * 0.58
+    clarity_mask = np.clip(high_value_mask[:, :, 0] * 0.24 + edge_mask[:, :, 0] * 0.18, 0.0, 0.34)
+    l_new = l_channel.astype(np.float32) * (1.0 - clarity_mask) + l_target * clarity_mask
+    merged = cv2.merge((np.clip(l_new, 0, 255).astype(np.uint8), a_channel, b_channel))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
 
 def apply_low_value_background_smoothing(image: np.ndarray, original_target: np.ndarray) -> np.ndarray:
@@ -290,10 +453,10 @@ def apply_low_value_background_smoothing(image: np.ndarray, original_target: np.
     protected = cv2.bitwise_or(masks["text_like"], masks["high_contrast_edge"])
     protected = cv2.bitwise_or(protected, masks["high_sat"])
     protected = cv2.bitwise_or(protected, masks["skin"])
-    low_information = (protected == 0) & (s < 88) & (v < 180) & (gray > 18)
+    low_information = (protected == 0) & (s < 82) & (v < 188) & (gray > 18)
     smooth_mask = cv2.morphologyEx(low_information.astype(np.uint8) * 255, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8), iterations=1)
-    smooth_mask = cv2.GaussianBlur(smooth_mask.astype(np.float32) / 255.0, (0, 0), 1.2)[:, :, None]
-    smooth_mask *= 0.16
+    smooth_mask = cv2.GaussianBlur(smooth_mask.astype(np.float32) / 255.0, (0, 0), 1.45)[:, :, None]
+    smooth_mask *= 0.26
 
     smoothed = cv2.GaussianBlur(image, (0, 0), 0.55).astype(np.float32)
     return np.clip(image.astype(np.float32) * (1.0 - smooth_mask) + smoothed * smooth_mask, 0, 255).astype(np.uint8)
@@ -781,6 +944,20 @@ def unique_business_path(path: Path, token: str) -> Path:
         index += 1
 
 
+def app_workdir_diagnostics(diagnostic_dir: Path) -> dict[str, object]:
+    root_info = resolve_default_app_data_root()
+    root = Path(root_info["path"])
+    return {
+        "app_data_root": str(root),
+        "app_data_root_source": str(root_info["source"]),
+        "app_data_root_exists": bool(root_info["exists"]),
+        "app_data_root_writable": bool(root_info["writable"]),
+        "report_dir": str(root / "报告"),
+        "feedback_dir": str(diagnostic_dir),
+        "beta_upload_dir": str(root / "beta_uploads"),
+    }
+
+
 def process(args: argparse.Namespace) -> dict[str, object]:
     started_at = datetime.now().isoformat(timespec="seconds")
     start_time = time.perf_counter()
@@ -859,6 +1036,8 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         jpg95_candidate_dir = run_dir / "jpg95_candidates"
         light_delivery_dir = run_dir / "delivery_light"
         summary_dir = run_dir
+        diagnostic_dir = run_dir
+    workdir_diagnostics = app_workdir_diagnostics(diagnostic_dir)
     emit_stage(
         stage_logger,
         "BETA_ENHANCE_START",
@@ -872,6 +1051,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     skipped: list[dict[str, object]] = []
     processed: list[dict[str, object]] = []
     warnings: list[str] = []
+    file_timings: list[dict[str, object]] = []
     failure: Exception | None = None
     failed_file = ""
     failed_input_size_bytes: int | None = None
@@ -882,6 +1062,10 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         for image_path in inputs:
             failed_file = image_path.name
             image_start = time.perf_counter()
+            per_file_timing: dict[str, object] = {
+                "file": image_path.name,
+                "per_file_start": datetime.now().isoformat(timespec="seconds"),
+            }
             input_size = file_size_bytes(image_path)
             failed_input_size_bytes = input_size
             failed_output_size_bytes = None
@@ -928,6 +1112,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 jpg95_candidate_path = unique_business_path(jpg95_candidate_dir / f"{base}_final_candidate_jpg95.jpg", run_token)
                 light_delivery_path = unique_business_path(light_delivery_dir / f"{base}_delivery_light_jpg95.jpg", run_token)
 
+            enhance_start = time.perf_counter()
             run_realesrgan(
                 exe,
                 tool_dir,
@@ -942,9 +1127,12 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 flat_output=flat_output,
                 business_output=business_output,
             )
+            per_file_timing["enhance_seconds"] = round(time.perf_counter() - enhance_start, 3)
             model_output = read_image(after_path)
+            final_stage_start = time.perf_counter()
             blend35 = linear_blend(original, model_output, 0.35)
             final_png, output_resolution_fields = target_size_fidelity_blend(original, model_output)
+            per_file_timing["final_stage_seconds"] = round(time.perf_counter() - final_stage_start, 3)
             if final_png is None:
                 resize_reason = str(output_resolution_fields.get("output_resolution_profile") or "true_1080p_resize_skipped")
                 skipped_candidate_fields = skipped_jpg95_candidate_fields(image_path, image_type, resize_reason, metrics)
@@ -989,6 +1177,10 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             write_image(enhanced_path, final_png)
             output_size = file_size_bytes(enhanced_path)
             failed_output_size_bytes = output_size
+            score_start = time.perf_counter()
+            quality_score_fields = compute_safe_beta_quality_scores(original, final_png)
+            per_file_timing["quality_score_seconds"] = round(time.perf_counter() - score_start, 3)
+            jpg_start = time.perf_counter()
             jpg95_candidate_fields = make_jpg95_candidate(
                 image_path=image_path,
                 enhanced_path=enhanced_path,
@@ -998,11 +1190,14 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                 input_size=input_size,
                 output_size=output_size,
             )
+            per_file_timing["jpg95_candidate_seconds"] = round(time.perf_counter() - jpg_start, 3)
+            light_start = time.perf_counter()
             light_delivery_fields = make_light_delivery_copy(
                 candidate_fields=jpg95_candidate_fields,
                 light_delivery_path=light_delivery_path,
                 output_size=output_size,
             )
+            per_file_timing["delivery_light_seconds"] = round(time.perf_counter() - light_start, 3)
             emit_stage(
                 stage_logger,
                 "BETA_FLAT_OUTPUT_WRITE_DONE",
@@ -1025,6 +1220,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             )
             contact_sheet_value = ""
             contact_sheet_light_value = ""
+            contact_start = time.perf_counter()
             try:
                 make_contact_sheet(original, blend35, final_png, contact_path)
                 contact_sheet_value = relative_or_name(contact_path, run_dir)
@@ -1061,6 +1257,10 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     business_output=business_output,
                     contact_sheet_light=contact_sheet_light_value,
                 )
+            per_file_timing["contact_sheet_seconds"] = round(time.perf_counter() - contact_start, 3)
+            per_file_timing["per_file_finish"] = datetime.now().isoformat(timespec="seconds")
+            per_file_timing["per_file_elapsed_seconds"] = round(time.perf_counter() - image_start, 3)
+            file_timings.append(per_file_timing)
             processed.append(
                 {
                     "file": image_path.name,
@@ -1074,12 +1274,21 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "enhanced": relative_or_name(enhanced_path, run_dir),
                     "contact_sheet": contact_sheet_value,
                     "input_size_bytes": input_size,
+                    "input_width": image_dimensions(original).get("width"),
+                    "input_height": image_dimensions(original).get("height"),
+                    "input_long_edge": image_dimensions(original).get("long_edge"),
+                    "input_short_edge": image_dimensions(original).get("short_edge"),
                     "output_size_bytes": output_size,
                     "output_width": output_resolution_fields.get("width"),
                     "output_height": output_resolution_fields.get("height"),
                     "output_long_edge": output_resolution_fields.get("long_edge"),
                     "output_short_edge": output_resolution_fields.get("short_edge"),
                     "output_resolution_profile": output_resolution_fields.get("output_resolution_profile"),
+                    "enhance_route": output_resolution_fields.get("enhance_route", "safe_beta_general"),
+                    "is_knowledge_poster": output_resolution_fields.get("is_knowledge_poster", False),
+                    "knowledge_poster_score": output_resolution_fields.get("knowledge_poster_score"),
+                    "knowledge_text_ratio": output_resolution_fields.get("knowledge_text_ratio"),
+                    "knowledge_edge_ratio": output_resolution_fields.get("knowledge_edge_ratio"),
                     "contact_sheet_size_bytes": file_size_bytes(contact_path) if contact_sheet_value else None,
                     "contact_sheet_light": contact_sheet_light_value,
                     "contact_sheet_light_size_bytes": file_size_bytes(contact_light_path) if contact_sheet_light_value else None,
@@ -1089,8 +1298,10 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "size_ratio": size_ratio(output_size, input_size),
                     "output_format": file_format(enhanced_path),
                     "contact_sheet_format": file_format(contact_path) if contact_sheet_value else None,
+                    **quality_score_fields,
                     **jpg95_candidate_fields,
                     **light_delivery_fields,
+                    **per_file_timing,
                     "elapsed_seconds": round(time.perf_counter() - image_start, 3),
                 }
             )
@@ -1115,6 +1326,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
 
     finished_at = datetime.now().isoformat(timespec="seconds")
     if failure is not None:
+        report_start = time.perf_counter()
         summary = {
             "status": "failed",
             "verification_result": "FAILED",
@@ -1136,7 +1348,12 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             **default_light_delivery_fields("not_generated", "processing_failed"),
             "mode": args.mode,
             "model": args.model,
+            **workdir_diagnostics,
             "input_dir": str(input_dir),
+            "input_dir_exists": bool(Path(input_dir).exists() and Path(input_dir).is_dir()),
+            "input_image_count": len(inputs),
+            "input_files": [str(item) for item in inputs],
+            "input_file_names": [item.name for item in inputs],
             "output_dir": str(run_dir),
             "diagnostic_dir": str(summary_dir.parent if flat_output else run_dir),
             "flat_output": flat_output,
@@ -1145,6 +1362,9 @@ def process(args: argparse.Namespace) -> dict[str, object]:
             "started_at": started_at,
             "finished_at": finished_at,
             "elapsed_seconds": round(time.perf_counter() - start_time, 3),
+            "total_elapsed_seconds": round(time.perf_counter() - start_time, 3),
+            "timeout_source": "subprocess timeout" if getattr(failure, "reason", "") == "realesrgan_timeout" else "unknown",
+            "file_timings": file_timings,
             "processed_count": len(processed),
             "skipped_count": len(skipped),
             "processed": processed,
@@ -1154,6 +1374,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
         summary_path = summary_dir / summary_name
         summary["summary_path"] = str(summary_path)
+        summary["report_seconds"] = round(time.perf_counter() - report_start, 3)
         summary_error = write_optional_json(summary_path, summary)
         if summary_error:
             summary["summary_path"] = ""
@@ -1174,11 +1395,17 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         )
         return summary
 
+    report_start = time.perf_counter()
     summary = {
         "status": "ok" if processed else "blocked",
         "mode": args.mode,
         "model": args.model,
+        **workdir_diagnostics,
         "input_dir": str(input_dir),
+        "input_dir_exists": bool(Path(input_dir).exists() and Path(input_dir).is_dir()),
+        "input_image_count": len(inputs),
+        "input_files": [str(item) for item in inputs],
+        "input_file_names": [item.name for item in inputs],
         "output_dir": str(run_dir),
         "diagnostic_dir": str(summary_dir.parent if flat_output else run_dir),
         "flat_output": flat_output,
@@ -1187,6 +1414,9 @@ def process(args: argparse.Namespace) -> dict[str, object]:
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_seconds": round(time.perf_counter() - start_time, 3),
+        "total_elapsed_seconds": round(time.perf_counter() - start_time, 3),
+        "timeout_source": "",
+        "file_timings": file_timings,
         "processed_count": len(processed),
         "skipped_count": len(skipped),
         "processed": processed,
@@ -1204,6 +1434,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
     summary_name = f"safe_1080p_beta_summary_{run_token}.json" if flat_output else "summary.json"
     summary_path = summary_dir / summary_name
     summary["summary_path"] = str(summary_path)
+    summary["report_seconds"] = round(time.perf_counter() - report_start, 3)
     summary_error = write_optional_json(summary_path, summary)
     if summary_error:
         summary["summary_path"] = ""
