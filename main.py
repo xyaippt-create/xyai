@@ -1837,6 +1837,23 @@ def build_web_app():
         skip_reason = first_skip.get("reason") or ""
         skip_file = first_skip.get("file") or result.get("failed_file") or ""
         stage = result.get("stage") or ("BETA_INPUT_SKIPPED" if skipped_items else "") or result.get("reason") or "BETA_FAILED"
+        output_dir_text = str(result.get("output_dir") or output_dir_value or "")
+        output_dir_path = Path(output_dir_text) if output_dir_text else Path()
+        rows = []
+        enhanced_files = []
+        for item in result.get("processed") or []:
+            if not isinstance(item, dict):
+                continue
+            input_name = item.get("input_name") or item.get("file") or ""
+            raw_output = item.get("output_path") or item.get("enhanced") or ""
+            output_path = Path(str(raw_output)) if raw_output else Path()
+            if raw_output and not output_path.is_absolute() and output_dir_text:
+                output_path = output_dir_path / output_path
+            output_name = item.get("output_name") or (output_path.name if raw_output else "")
+            output_path_text = str(output_path) if raw_output else ""
+            if output_path_text:
+                enhanced_files.append(output_path_text)
+            rows.append({"input_name": input_name, "output_name": output_name, "output_path": output_path_text})
         error = (
             result.get("error")
             or result.get("error_message")
@@ -1857,14 +1874,14 @@ def build_web_app():
             "message": beta_tail_text(error),
             "processed_count": beta_int(result.get("processed_count"), 0),
             "skipped_count": beta_int(result.get("skipped_count"), 0),
-            "enhanced_files": [],
-            "results": [],
+            "enhanced_files": enhanced_files,
+            "results": rows,
             "skipped": skipped_items,
             "input_dir": str(result.get("input_dir") or ""),
             "input_files": result.get("input_files") if isinstance(result.get("input_files"), list) else [],
             "input_file_names": result.get("input_file_names") if isinstance(result.get("input_file_names"), list) else [],
             "input_file_count": beta_int(result.get("input_file_count"), 0),
-            "output_dir": str(result.get("output_dir") or output_dir_value or ""),
+            "output_dir": output_dir_text,
             "app_data_root": str(result.get("app_data_root") or ""),
             "app_data_root_source": str(result.get("app_data_root_source") or ""),
             "app_data_root_exists": bool(result.get("app_data_root_exists")),
@@ -1872,6 +1889,9 @@ def build_web_app():
             "report_dir": str(result.get("report_dir") or ""),
             "feedback_dir": str(result.get("feedback_dir") or ""),
             "beta_upload_dir": str(result.get("beta_upload_dir") or ""),
+            "timeout_source": result.get("timeout_source", ""),
+            "persisted_input_files": result.get("persisted_input_files") if isinstance(result.get("persisted_input_files"), list) else [],
+            "original_to_persisted_path": result.get("original_to_persisted_path") if isinstance(result.get("original_to_persisted_path"), list) else [],
             "data": result,
         }
         return JSONResponse(status_code=status_code, content=body)
@@ -1937,6 +1957,8 @@ def build_web_app():
             "beta_upload_dir": str(result.get("beta_upload_dir") or ""),
             "total_elapsed_seconds": result.get("total_elapsed_seconds", result.get("elapsed_seconds", "")),
             "timeout_source": result.get("timeout_source", ""),
+            "persisted_input_files": result.get("persisted_input_files") if isinstance(result.get("persisted_input_files"), list) else [],
+            "original_to_persisted_path": result.get("original_to_persisted_path") if isinstance(result.get("original_to_persisted_path"), list) else [],
             "timings": result.get("timings") if isinstance(result.get("timings"), dict) else {},
             "data": result,
         }
@@ -2139,6 +2161,7 @@ def build_web_app():
             stage_logger=beta_run_stage_log,
             diagnostic_dir=user_dirs["safe_beta_feedback_dir"],
             input_files=[item.resolve() for item in input_file_values],
+            persisted_input_files=payload.get("persisted_input_files") if isinstance(payload.get("persisted_input_files"), list) else [],
         )
         script_started = time.perf_counter()
         result = attach_workdir_context(beta_result_dict(module.process(args), output_path))
@@ -2167,10 +2190,66 @@ def build_web_app():
             )
             return result
 
-        result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
+        processed_rows = [item for item in (result.get("processed") or []) if isinstance(item, dict)]
+        fast_rows = [
+            item
+            for item in processed_rows
+            if str(item.get("enhance_route") or "") in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}
+        ]
+        fast_blockers = [item for item in fast_rows if not bool(item.get("fast_route_final_pass"))]
+        speed_risk_rows = [item for item in processed_rows if bool(item.get("speed_risk")) or bool(item.get("heavy_route_speed_risk"))]
+        verification_blockers: list[str] = []
+        for item in processed_rows:
+            file_name = str(item.get("file") or item.get("input_name") or "unknown")
+            route_name = str(item.get("enhance_route") or "")
+            if not route_name:
+                verification_blockers.append(f"{file_name}: missing enhance_route")
+            if not item.get("route_decision_reason"):
+                verification_blockers.append(f"{file_name}: missing route_decision_reason")
+            if item.get("roi_evidence_status") != "available":
+                verification_blockers.append(f"{file_name}: roi_evidence_status={item.get('roi_evidence_status') or 'missing'}")
+            if route_name in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}:
+                if bool(item.get("uses_realesrgan")):
+                    verification_blockers.append(f"{file_name}: fast route uses_realesrgan=true")
+                if not bool(item.get("fast_route_skipped_realesrgan")):
+                    verification_blockers.append(f"{file_name}: fast route skipped_realesrgan=false")
+                try:
+                    if float(item.get("speed_actual_seconds") or 0) > 30.0:
+                        verification_blockers.append(f"{file_name}: fast route speed_actual_seconds>30")
+                except (TypeError, ValueError):
+                    verification_blockers.append(f"{file_name}: invalid speed_actual_seconds")
+                if item.get("fast_route_quality_pass") is not True:
+                    verification_blockers.append(f"{file_name}: fast_route_quality_pass={item.get('fast_route_quality_pass')}")
+                if item.get("fast_route_final_pass") is not True:
+                    verification_blockers.append(f"{file_name}: fast_route_final_pass={item.get('fast_route_final_pass')}")
+        if result.get("diagnostics_consistency") == "BLOCKED":
+            verification_blockers.extend(str(item) for item in (result.get("diagnostics_consistency_blockers") or []) if item)
+        verification_blockers = list(dict.fromkeys(verification_blockers))
+        result["verification_blockers"] = verification_blockers
+        result["diagnostics_consistency"] = "PASS" if not verification_blockers else "BLOCKED"
+        result["diagnostics_consistency_blockers"] = verification_blockers
+        if fast_rows:
+            result["fast_route_speed_pass"] = all(bool(item.get("fast_route_speed_pass")) for item in fast_rows)
+            result["fast_route_quality_pass"] = all(bool(item.get("fast_route_quality_pass")) for item in fast_rows)
+            result["fast_route_final_pass"] = all(bool(item.get("fast_route_final_pass")) for item in fast_rows)
+        if verification_blockers:
+            result["verification_result"] = "BLOCKED"
+            result["reason"] = "diagnostics_consistency_blocked"
+            result["error_message"] = "; ".join(verification_blockers[:5])
+        elif fast_blockers:
+            result["verification_result"] = "BLOCKED"
+            result["reason"] = "fast_route_quality_floor_failed"
+            result["error_message"] = "; ".join(
+                f"{item.get('file')}: {item.get('fast_route_quality_reason') or item.get('fast_route_speed_reason') or 'fast_route_final_pass=false'}"
+                for item in fast_blockers[:3]
+            )
+        elif speed_risk_rows:
+            result["verification_result"] = "PASS_WITH_NOTES"
+        else:
+            result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
         result["beta_policy"] = {
             "mode": "safe_1080p",
-            "strategy": "35% protected",
+            "strategy": "route-aware safe beta",
             "scope": "Chinese commercial non-portrait visuals only",
             "main_pipeline": False,
         }
@@ -2216,6 +2295,7 @@ def build_web_app():
                 temp_input_dir.mkdir(parents=True, exist_ok=True)
                 input_files: list[str] = []
                 selected_names: list[str] = []
+                persisted_input_files: list[dict[str, str]] = []
                 declared_names = beta_decode_selected_names(form)
                 beta_stage_log(
                     "BETA_API_FILES_RECEIVED",
@@ -2245,6 +2325,12 @@ def build_web_app():
                             if not saved_path.exists() or not saved_path.is_file():
                                 raise RuntimeError(f"BETA_MULTIPART_TEMP_FILE_MISSING: {upload_name}")
                             input_files.append(str(saved_path))
+                            persisted_input_files.append(
+                                {
+                                    "original_filename": upload_name,
+                                    "persisted_path": str(saved_path),
+                                }
+                            )
                     else:
                         payload[key] = value
                 output_dir_value = payload.get("output_dir") or output_dir_value
@@ -2254,6 +2340,8 @@ def build_web_app():
                         "beta_run_id": beta_run_id,
                         "input_dir": str(temp_input_dir),
                         "input_files": input_files,
+                        "persisted_input_files": persisted_input_files,
+                        "original_to_persisted_path": persisted_input_files,
                         "selected_file_names": selected_names,
                         "flat_output": parse_bool_value(payload.get("flat_output"), True),
                         "business_output": parse_bool_value(payload.get("business_output"), True),
@@ -2364,6 +2452,9 @@ def build_web_app():
                 result["input_files"] = input_files
                 result["input_file_names"] = [Path(item).name for item in input_files]
                 result["input_file_count"] = len(input_files)
+                if isinstance(payload.get("persisted_input_files"), list):
+                    result["persisted_input_files"] = payload.get("persisted_input_files")
+                    result["original_to_persisted_path"] = payload.get("persisted_input_files")
             beta_stage_log(
                 "BETA_API_ENHANCE_DONE",
                 input_path=(payload or {}).get("input_dir"),

@@ -182,6 +182,101 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+def _processed_rows(run_result: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in (run_result.get("processed") or []) if isinstance(item, dict)]
+
+
+def _unique_present(rows: list[dict[str, Any]], key: str) -> list[Any]:
+    values: list[Any] = []
+    for row in rows:
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _one_or_status(values: list[Any], missing: str = "missing") -> Any:
+    if not values:
+        return missing
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _truthy_aggregate(rows: list[dict[str, Any]], key: str) -> bool | str:
+    values = [row.get(key) for row in rows if row.get(key) is not None and row.get(key) != ""]
+    if not values:
+        return "missing"
+    return any(bool(value) for value in values)
+
+
+def _route_truth_config(run_result: dict[str, Any], tool_checks: dict[str, Any]) -> dict[str, Any]:
+    rows = _processed_rows(run_result)
+    routes = _unique_present(rows, "enhance_route")
+    speed_classes = _unique_present(rows, "speed_class")
+    speed_values = [row.get("speed_actual_seconds") for row in rows if row.get("speed_actual_seconds") not in (None, "")]
+    speed_risk = _truthy_aggregate(rows, "speed_risk")
+    uses_realesrgan = _truthy_aggregate(rows, "uses_realesrgan")
+    skipped_realesrgan = _truthy_aggregate(rows, "fast_route_skipped_realesrgan")
+    skipped_heavy = _truthy_aggregate(rows, "fast_route_skipped_protected_heavy_chain")
+    route_reasons = _unique_present(rows, "route_decision_reason")
+    beta_policy = run_result.get("beta_policy") if isinstance(run_result.get("beta_policy"), dict) else {}
+    blockers: list[str] = []
+    for row in rows:
+        name = str(row.get("file") or row.get("input_name") or "unknown")
+        route = str(row.get("enhance_route") or "")
+        if not route:
+            blockers.append(f"{name}: missing enhance_route")
+        if not row.get("route_decision_reason"):
+            blockers.append(f"{name}: missing route_decision_reason")
+        if row.get("roi_evidence_status") != "available":
+            blockers.append(f"{name}: roi_evidence_status={row.get('roi_evidence_status') or 'missing'}")
+        if row.get("speed_actual_seconds") in (None, ""):
+            blockers.append(f"{name}: missing speed_actual_seconds")
+        if route in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}:
+            if bool(row.get("uses_realesrgan")):
+                blockers.append(f"{name}: fast route uses_realesrgan=true")
+            if not bool(row.get("fast_route_skipped_realesrgan")):
+                blockers.append(f"{name}: fast route skipped_realesrgan=false")
+            if not bool(row.get("fast_route_skipped_protected_heavy_chain")):
+                blockers.append(f"{name}: fast route skipped_heavy_chain=false")
+    blockers.extend(str(item) for item in (run_result.get("diagnostics_consistency_blockers") or []) if item)
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "route": _one_or_status(routes),
+        "routes": routes or ["missing"],
+        "strategy": beta_policy.get("strategy") or run_result.get("strategy") or "missing",
+        "blend_ratio": _first_present(run_result.get("blend_ratio"), _one_or_status(_unique_present(rows, "blend_ratio"), "not_available")) or "not_available",
+        "uses_realesrgan": uses_realesrgan,
+        "speed_class": _one_or_status(speed_classes),
+        "speed_actual_seconds": max(speed_values) if speed_values else "missing",
+        "speed_risk": speed_risk,
+        "route_decision_reason": _one_or_status(route_reasons),
+        "fast_route_skipped_realesrgan": skipped_realesrgan,
+        "fast_route_skipped_protected_heavy_chain": skipped_heavy,
+        "diagnostics_consistency": "PASS" if not blockers else "BLOCKED",
+        "diagnostics_consistency_blockers": blockers,
+        "per_file_route_diagnostics": [
+            {
+                "file": row.get("file") or row.get("input_name") or "missing",
+                "route": row.get("enhance_route") or "missing",
+                "uses_realesrgan": row.get("uses_realesrgan", "missing"),
+                "speed_class": row.get("speed_class") or "missing",
+                "speed_actual_seconds": row.get("speed_actual_seconds", "missing"),
+                "speed_risk": row.get("speed_risk", "missing"),
+                "route_decision_reason": row.get("route_decision_reason") or "missing",
+                "fast_route_skipped_realesrgan": row.get("fast_route_skipped_realesrgan", "missing"),
+                "fast_route_skipped_protected_heavy_chain": row.get("fast_route_skipped_protected_heavy_chain", "missing"),
+                "roi_evidence_status": row.get("roi_evidence_status") or "missing",
+            }
+            for row in rows
+        ],
+        "realesrgan_tool_path": tool_checks.get("realesrgan_tool_dir") or "not_available",
+    }
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         if value is None or value == "":
@@ -582,11 +677,11 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or (run_result.get("beta_policy") or {}).get("strategy") if isinstance(run_result.get("beta_policy"), dict) else item.get("enhance_route") or "missing",
                 "enhanced_generated": enhanced.exists(),
                 "contact_sheet_generated": bool(contact and contact.exists()),
                 "elapsed_seconds": item.get("elapsed_seconds", ""),
-                "quality_note": "35% protected candidate generated; inspect contact sheet before use.",
+                "quality_note": item.get("route_decision_reason") or "route-aware safe beta candidate generated; inspect diagnostics before use.",
                 "risk_tags": ";".join(risk_tags),
                 "error_message": "",
             }
@@ -643,7 +738,7 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or "not_available",
                 "enhanced_generated": bool(output_path),
                 "contact_sheet_generated": False,
                 "elapsed_seconds": run_result.get("elapsed_seconds", ""),
@@ -700,7 +795,7 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or "missing",
                 "enhanced_generated": False,
                 "contact_sheet_generated": False,
                 "elapsed_seconds": "",
@@ -887,12 +982,24 @@ def generate_safe_1080p_feedback_package(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_path = feedback_dir / f"HDDE_V046_测试反馈包_{timestamp}.zip"
 
+    route_truth_config = _route_truth_config(run_result, tool_checks)
+    if route_truth_config["diagnostics_consistency"] == "BLOCKED":
+        status = "BLOCKED"
+        problem_stage = "diagnostics_consistency"
+        problem_code = "WARNING_SYSTEM_ENV_UNKNOWN"
     diagnostics = {
         "version": "V0.4.6 RC1",
         "generated_at": _now_iso(),
         "commit": env["commit"],
         "mode": run_result.get("mode") or "safe_1080p",
-        "strategy": "35% protected",
+        "strategy": route_truth_config["strategy"],
+        "route": route_truth_config["route"],
+        "uses_realesrgan": route_truth_config["uses_realesrgan"],
+        "speed_class": route_truth_config["speed_class"],
+        "speed_actual_seconds": route_truth_config["speed_actual_seconds"],
+        "speed_risk": route_truth_config["speed_risk"],
+        "diagnostics_consistency": route_truth_config["diagnostics_consistency"],
+        "diagnostics_consistency_blockers": route_truth_config["diagnostics_consistency_blockers"],
         "status": status,
         "problem_stage": problem_stage,
         "problem_code": problem_code,
@@ -927,10 +1034,7 @@ def generate_safe_1080p_feedback_package(
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "beta_default_output_dir": "runtime/experiments/safe_1080p_beta",
-        "strategy": "35% protected",
-        "blend_ratio": 0.35,
-        "uses_realesrgan": True,
-        "realesrgan_tool_path": tool_checks["realesrgan_tool_dir"],
+        **route_truth_config,
         "generate_contact_sheet": True,
         "include_original_images": False,
         "include_enhanced_outputs": False,

@@ -628,6 +628,8 @@ async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
   } catch (error) {
     if (error?.name === "AbortError") {
       const timeoutError = new Error(`Beta request timed out after ${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}s`);
+      timeoutError.isSafeBetaTimeout = true;
+      timeoutError.timeout_source = "frontend";
       logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
         stage: "BETA_FETCH_TIMEOUT",
         error: timeoutError.message,
@@ -664,6 +666,52 @@ const isBetaSuccess = (data) =>
   data?.code === 200 ||
   Number(data?.processed_count || 0) > 0 ||
   (Array.isArray(data?.enhanced_files) && data.enhanced_files.length > 0);
+
+function betaPayloadArrays(payload = {}, data = {}) {
+  const processed = Array.isArray(payload.processed) ? payload.processed : Array.isArray(data.processed) ? data.processed : [];
+  const results = Array.isArray(payload.results) ? payload.results : Array.isArray(data.results) ? data.results : [];
+  const enhancedFiles = Array.isArray(payload.enhanced_files) ? payload.enhanced_files : Array.isArray(data.enhanced_files) ? data.enhanced_files : [];
+  return { processed: processed.map(addJpg95ReviewDefaults), results, enhancedFiles };
+}
+
+function processedOutputPath(row = {}) {
+  return row.output_path || row.enhanced || "";
+}
+
+function isTextLogoRiskRow(row = {}) {
+  const reason = `${row.jpg95_candidate_reason || ""} ${row.final_output_fallback_reason || ""}`;
+  return reason.includes("text_logo_risk");
+}
+
+function betaQueuePatchFromProcessed(item, processedRows, results, fallbackOutputDir, fallbackMessage) {
+  const processed = processedRows.find((row) => row.input_name === item.name || row.file === item.name) || {};
+  const mapped = results.find((row) => row.input_name === item.name || row.file === item.name) || {};
+  const outputPath = processedOutputPath(processed) || mapped.output_path || "";
+  if (!outputPath) return null;
+  const outputName = mapped.output_name || processed.output_name || outputPath.split(/[\\/]/).pop() || "";
+  const textLogoRisk = isTextLogoRiskRow(processed);
+  const reason = textLogoRisk ? "已生成但不建议交付：text_logo_risk，需要人工复核文字与 Logo。" : fallbackMessage;
+  return {
+    status: "completed",
+    progress: 100,
+    output_dir: fallbackOutputDir,
+    output_filename: outputName || "已生成",
+    output_path: outputPath,
+    contact_sheet: processed.contact_sheet || "",
+    contact_sheet_light: processed.contact_sheet_light || "",
+    jpg95_candidate_status: processed.jpg95_candidate_status || "",
+    jpg95_candidate_reason: processed.jpg95_candidate_reason || "",
+    final_output_source: processed.final_output_source || "png_main",
+    final_output_fallback_reason: processed.final_output_fallback_reason || "",
+    beta_result: mapped,
+    beta_processed: processed,
+    beta_status: textLogoRisk ? "PASS_WITH_LIMITATION" : "PASS",
+    final_delivery_status: "PASS_WITH_LIMITATION",
+    final_delivery_reason: reason,
+    error: "",
+    logs: [reason],
+  };
+}
 
 function formatBetaFailureMessage(payload, fallback = "1080P安全增强 Beta 处理失败") {
   const data = payload?.data || {};
@@ -1593,12 +1641,18 @@ export default function DashboardPage() {
     } catch (error) {
       const errorPayload = error?.payload || {};
       const errorData = errorPayload?.data || {};
+      const timeoutSource = error?.timeout_source || errorPayload.timeout_source || errorData.timeout_source || (error?.isSafeBetaTimeout ? "frontend" : "unknown");
+      const isFrontendTimeout = error?.isSafeBetaTimeout || timeoutSource === "frontend";
+      const partialPayload = betaPayloadArrays(errorPayload, errorData);
       const skippedRows = Array.isArray(errorPayload.skipped) ? errorPayload.skipped : Array.isArray(errorData.skipped) ? errorData.skipped : [];
       const skippedCount = Number(errorPayload.skipped_count ?? errorData.skipped_count ?? skippedRows.length ?? 0);
       const failureMessage = formatBetaFailureMessage(errorPayload, error.message);
       const failedInputDir = errorPayload.input_dir || errorData.input_dir || "";
       const failedInputFileNames = Array.isArray(errorPayload.input_file_names) ? errorPayload.input_file_names : Array.isArray(errorData.input_file_names) ? errorData.input_file_names : [];
       const failedInputFileCount = Number(errorPayload.input_file_count ?? errorData.input_file_count ?? failedInputFileNames.length ?? 0);
+      const partialProcessedCount = Number(errorPayload.processed_count ?? errorData.processed_count ?? partialPayload.processed.length ?? partialPayload.results.length ?? partialPayload.enhancedFiles.length ?? 0);
+      const hasPartialOutput = partialProcessedCount > 0 || partialPayload.enhancedFiles.length > 0 || partialPayload.results.some((row) => row.output_path);
+      const timeoutMessage = isFrontendTimeout ? "前端请求超时，后台可能仍在处理；已生成文件会保留映射，请稍后查看输出目录或反馈包。" : failureMessage;
       console.info("[Safe1080pBeta] INPUT_DIR_SYNC", {
         api_input_dir: failedInputDir,
         ui_input_dir: failedInputDir,
@@ -1635,12 +1689,43 @@ export default function DashboardPage() {
         has_contact_sheet: false,
         elapsed_seconds: Math.round((Date.now() - startedAt) / 1000),
         skipped: skippedRows,
-        message: failureMessage,
+        timeout_source: timeoutSource,
+        message: timeoutMessage,
       });
+      setSafeBetaResult((prev) => ({
+        ...(prev || {}),
+        status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : prev?.status || "BLOCKED",
+        progress: isFrontendTimeout && !hasPartialOutput ? 75 : 100,
+        processed_count: partialProcessedCount,
+        enhanced_count: partialProcessedCount || partialPayload.enhancedFiles.length,
+        contact_sheet_count: partialPayload.processed.filter((row) => Boolean(row.contact_sheet)).length,
+        has_enhanced: hasPartialOutput,
+        has_contact_sheet: partialPayload.processed.some((row) => Boolean(row.contact_sheet)),
+        results: partialPayload.results,
+        enhanced_files: partialPayload.enhancedFiles,
+        processed: partialPayload.processed,
+        timeout_source: timeoutSource,
+        message: timeoutMessage,
+      }));
       setFileQueue((prev) =>
         prev.map((item) => {
           if (!betaItemIds.includes(item.id)) return item;
           const skipped = skippedRows.find((row) => row?.input_name === item.name || row?.file === item.name) || skippedRows[0] || {};
+          const partialPatch = betaQueuePatchFromProcessed(item, partialPayload.processed, partialPayload.results, errorPayload.output_dir || errorData.output_dir || betaOutputDir, timeoutMessage);
+          if (partialPatch) return { ...item, ...partialPatch };
+          if (isFrontendTimeout) {
+            return {
+              ...item,
+              status: "processing",
+              progress: Math.max(Number(item.progress || 0), 75),
+              output_dir: errorPayload.output_dir || errorData.output_dir || betaOutputDir,
+              final_delivery_status: "",
+              final_delivery_reason: timeoutMessage,
+              beta_status: "TIMEOUT_PENDING",
+              error: "",
+              logs: [timeoutMessage],
+            };
+          }
           const itemMessage = skipped?.reason ? `${item.name} 被 1080P安全增强 Beta 安全策略跳过：${skipped.reason}` : failureMessage;
           return {
             ...item,
@@ -1658,10 +1743,11 @@ export default function DashboardPage() {
         }),
       );
       logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
-        status: "BLOCKED",
-        error: failureMessage,
+        status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : "BLOCKED",
+        error: timeoutMessage,
       });
       setNotice(`1080P安全增强 Beta 处理失败：${failureMessage}`);
+      setNotice(timeoutMessage);
     } finally {
       stageTimers.forEach((timer) => window.clearTimeout(timer));
       processingRef.current = false;
