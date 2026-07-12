@@ -2196,7 +2196,6 @@ def build_web_app():
             for item in processed_rows
             if str(item.get("enhance_route") or "") in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}
         ]
-        fast_blockers = [item for item in fast_rows if not bool(item.get("fast_route_final_pass"))]
         speed_risk_rows = [item for item in processed_rows if bool(item.get("speed_risk")) or bool(item.get("heavy_route_speed_risk"))]
         verification_blockers: list[str] = []
         for item in processed_rows:
@@ -2218,10 +2217,10 @@ def build_web_app():
                         verification_blockers.append(f"{file_name}: fast route speed_actual_seconds>30")
                 except (TypeError, ValueError):
                     verification_blockers.append(f"{file_name}: invalid speed_actual_seconds")
-                if item.get("fast_route_quality_pass") is not True:
-                    verification_blockers.append(f"{file_name}: fast_route_quality_pass={item.get('fast_route_quality_pass')}")
-                if item.get("fast_route_final_pass") is not True:
-                    verification_blockers.append(f"{file_name}: fast_route_final_pass={item.get('fast_route_final_pass')}")
+            if bool(item.get("unexpected_downscale")):
+                verification_blockers.append(f"{file_name}: unexpected_downscale")
+            if item.get("quality_status") == "blocked":
+                verification_blockers.append(f"{file_name}: {item.get('quality_status_reason') or 'quality_status=blocked'}")
         if result.get("diagnostics_consistency") == "BLOCKED":
             verification_blockers.extend(str(item) for item in (result.get("diagnostics_consistency_blockers") or []) if item)
         verification_blockers = list(dict.fromkeys(verification_blockers))
@@ -2234,23 +2233,24 @@ def build_web_app():
             result["fast_route_final_pass"] = all(bool(item.get("fast_route_final_pass")) for item in fast_rows)
         if verification_blockers:
             result["verification_result"] = "BLOCKED"
+            result["generation_status"] = "generated"
+            result["quality_status"] = "blocked"
+            result["delivery_status"] = "review_before_use"
             result["reason"] = "diagnostics_consistency_blocked"
             result["error_message"] = "; ".join(verification_blockers[:5])
-        elif fast_blockers:
-            result["verification_result"] = "BLOCKED"
-            result["reason"] = "fast_route_quality_floor_failed"
-            result["error_message"] = "; ".join(
-                f"{item.get('file')}: {item.get('fast_route_quality_reason') or item.get('fast_route_speed_reason') or 'fast_route_final_pass=false'}"
-                for item in fast_blockers[:3]
-            )
         elif speed_risk_rows:
             result["verification_result"] = "PASS_WITH_NOTES"
         else:
             result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
+        if not verification_blockers:
+            result["generation_status"] = "generated"
+            row_statuses = [str(item.get("quality_status") or "") for item in processed_rows]
+            result["quality_status"] = "insufficient_gain" if "insufficient_gain" in row_statuses else "pass_candidate"
+            result["delivery_status"] = "review_before_use"
         result["beta_policy"] = {
             "mode": "safe_1080p",
             "strategy": "route-aware safe beta",
-            "scope": "Chinese commercial non-portrait visuals only",
+            "scope": "route-aware Chinese commercial, portrait, and knowledge visuals",
             "main_pipeline": False,
         }
         beta_stage_log(

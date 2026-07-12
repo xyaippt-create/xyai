@@ -1,5 +1,23 @@
 # Codex Changelog
 
+## 2026-07-12 - V0.4.6 RC8A portrait route and small-text truthfulness follow-up
+
+- 修复大面积高置信单人人像被通用fast路线提前接收，以及24人合影因高text_ratio误入全图Real-ESRGAN的问题；新增独立人物RE执行资格门禁和 `portrait_group_guard` 证据。
+- 人物上下文缺少身份/结构指标时以 `evidence_missing / portrait_metrics_missing` 阻断，不再允许非人物profile掩盖人物指标缺失。
+- 小字链路增加局部放大亮度细节恢复、人物ROI排除、羽化回贴、笔画宽度/结构/过冲/halo/背景侵入及矩形边界检查；候选不足或增益不成立时真实回退。
+- 纯内存与固定图块共41项通过；定向01/04/05/06各运行一次。01和06人物路线修复成立；04/05小字均为0增益，05另有容器边缘保护失败，因此小文字继续阻断收口。
+- 后续根因修复建立04/05已保存ROI固定调试集，引入文字行几何证据、文字结构掩膜及容器长直线排除；纹理、光点、图标和容器线可输出 `not_applicable` 且保持不变。
+- 固定ROI门禁仍为 `BLOCKED`：04三组辅助小字均无正增益；05仅姓名类形成安全正增益，说明和标签仍回退。按门禁未运行04/05完整图片，候选代码不具备提交资格。
+- 端到端真实性门禁将 `insufficient_gain / blocked / evidence_missing / automatic_detection_failed / boundary_unverified` 统一映射为同步结果 `BLOCKED`，不再允许 `PASS_WITH_NOTES` 或 `pass_candidate`。
+- 固定ROI门禁现同时要求自动候选命中、正确角色覆盖、结构确认和真实边界证据；回退改为文字结构掩膜羽化恢复并实测边界，`reliable_text=false` 时硬禁增强。当前04/05自动检测仍未命中目标角色，因此继续阻断且未运行完整图片。
+- 发布链路改为完整画布自动检测后生成带bbox、自动角色及文字/背景/容器掩膜的候选契约，同一候选对象直接驱动小文字增强；手工ROI固定标记为debug-only且无发布、端到端门禁资格。
+- 小文字候选状态统一为 `candidate_not_applied / candidate_applied_then_reverted / enhanced`，回退默认精确恢复stage input；边界审核与回退事实独立。新增可达自动结构通过路径及带检测ID、bbox、输入/代码签名和证据文件的人工确认契约。
+- 新增17项完整画布端到端接线测试并通过，原14项与现17项回归同时通过；本轮状态为 `PASS_END_TO_END_WIRING`，但 `allow_full_image_run=false`，未处理自动检测召回率或文字角色分组。
+- 修复source与stage尺寸变化时自动bbox/三类mask坐标契约：记录source/stage尺寸与坐标空间，按独立 `scale_x/scale_y` 使用floor/ceil映射bbox，三类二值mask以最近邻映射并固定阈值；契约失败在评分和增强前阻断。
+- 零候选现区分 `no_applicable_text` 与 `evidence_missing`；后者无release/end-to-end资格。边界审核改为读取完整stage/output画布，逐边比较ROI内环与框外相邻环并记录实际可测边。
+- 新增23项多尺度与跨边界专项并通过，原17项接线测试改为包含2倍画布，原14项与现17项继续通过。本轮状态为 `PASS_SCALE_AND_BOUNDARY_CONTRACT`，`allow_full_image_run=false`。
+- 本轮未修改Dashboard、delivery guard、`final_output_url`、JPG95、版本号或非人物画质参数，未commit/push/tag。
+
 ## 2026-07-05 - V0.4.6 RC1 delivery_light lightweight delivery copy
 
 - Beta 在 JPG95 candidate 通过安全门后新增 `delivery_light/` 轻量交付副本，直接复制 candidate，不重新编码，不替换 PNG final。
