@@ -36,9 +36,35 @@ PROBLEM_CODES = {
     "WARNING_SYSTEM_ENV_UNKNOWN",
 }
 
-DEFAULT_FEEDBACK_DIR = (
-    Path("D:/影界文件/影界测试反馈包") if os.name == "nt" else Path.home() / "影界文件" / "影界测试反馈包"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_app_data_root() -> Path:
+    settings_path = PROJECT_ROOT / "settings" / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except Exception:
+        settings = {}
+    if isinstance(settings, dict):
+        configured = str(settings.get("app_data_root") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        saved = str(settings.get("last_app_data_root") or "").strip()
+        if saved:
+            saved_path = Path(saved).expanduser()
+            try:
+                is_project_tmp = (PROJECT_ROOT / "tmp" / "runtime_data").resolve() in saved_path.resolve().parents
+            except Exception:
+                is_project_tmp = False
+            if not is_project_tmp:
+                return saved_path
+    if os.name == "nt" and Path("D:/").exists():
+        return Path("D:/影界文件")
+    documents = (Path(os.environ["USERPROFILE"]) / "Documents") if os.name == "nt" and os.environ.get("USERPROFILE") else Path.home() / "Documents"
+    return documents / "影界HDDE"
+
+
+DEFAULT_FEEDBACK_DIR = _default_app_data_root() / "影界测试反馈包"
 README_NAME = "README_请把整个ZIP发给开发者.txt"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -154,6 +180,161 @@ def _first_present(*values: Any) -> Any:
         if value is not None and value != "":
             return value
     return None
+
+
+def _processed_rows(run_result: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in (run_result.get("processed") or []) if isinstance(item, dict)]
+
+
+def _unique_present(rows: list[dict[str, Any]], key: str) -> list[Any]:
+    values: list[Any] = []
+    for row in rows:
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _one_or_status(values: list[Any], missing: str = "missing") -> Any:
+    if not values:
+        return missing
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _truthy_aggregate(rows: list[dict[str, Any]], key: str) -> bool | str:
+    values = [row.get(key) for row in rows if row.get(key) is not None and row.get(key) != ""]
+    if not values:
+        return "missing"
+    return any(bool(value) for value in values)
+
+
+def _route_truth_config(run_result: dict[str, Any], tool_checks: dict[str, Any]) -> dict[str, Any]:
+    rows = _processed_rows(run_result)
+    routes = _unique_present(rows, "enhance_route")
+    speed_classes = _unique_present(rows, "speed_class")
+    speed_values = [row.get("speed_actual_seconds") for row in rows if row.get("speed_actual_seconds") not in (None, "")]
+    speed_risk = _truthy_aggregate(rows, "speed_risk")
+    uses_realesrgan = _truthy_aggregate(rows, "uses_realesrgan")
+    skipped_realesrgan = _truthy_aggregate(rows, "fast_route_skipped_realesrgan")
+    skipped_heavy = _truthy_aggregate(rows, "fast_route_skipped_protected_heavy_chain")
+    route_reasons = _unique_present(rows, "route_decision_reason")
+    beta_policy = run_result.get("beta_policy") if isinstance(run_result.get("beta_policy"), dict) else {}
+    blockers: list[str] = []
+    for row in rows:
+        name = str(row.get("file") or row.get("input_name") or "unknown")
+        route = str(row.get("enhance_route") or "")
+        if not route:
+            blockers.append(f"{name}: missing enhance_route")
+        if not row.get("route_decision_reason"):
+            blockers.append(f"{name}: missing route_decision_reason")
+        if row.get("roi_evidence_status") != "available":
+            blockers.append(f"{name}: roi_evidence_status={row.get('roi_evidence_status') or 'missing'}")
+        if row.get("speed_actual_seconds") in (None, ""):
+            blockers.append(f"{name}: missing speed_actual_seconds")
+        if route in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}:
+            if bool(row.get("uses_realesrgan")):
+                blockers.append(f"{name}: fast route uses_realesrgan=true")
+            if not bool(row.get("fast_route_skipped_realesrgan")):
+                blockers.append(f"{name}: fast route skipped_realesrgan=false")
+            if not bool(row.get("fast_route_skipped_protected_heavy_chain")):
+                blockers.append(f"{name}: fast route skipped_heavy_chain=false")
+    blockers.extend(str(item) for item in (run_result.get("diagnostics_consistency_blockers") or []) if item)
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "route": _one_or_status(routes),
+        "routes": routes or ["missing"],
+        "strategy": beta_policy.get("strategy") or run_result.get("strategy") or "missing",
+        "blend_ratio": _first_present(run_result.get("blend_ratio"), _one_or_status(_unique_present(rows, "blend_ratio"), "not_available")) or "not_available",
+        "uses_realesrgan": uses_realesrgan,
+        "speed_class": _one_or_status(speed_classes),
+        "speed_actual_seconds": max(speed_values) if speed_values else "missing",
+        "speed_risk": speed_risk,
+        "route_decision_reason": _one_or_status(route_reasons),
+        "fast_route_skipped_realesrgan": skipped_realesrgan,
+        "fast_route_skipped_protected_heavy_chain": skipped_heavy,
+        "diagnostics_consistency": "PASS" if not blockers else "BLOCKED",
+        "diagnostics_consistency_blockers": blockers,
+        "per_file_route_diagnostics": [
+            {
+                "file": row.get("file") or row.get("input_name") or "missing",
+                "route": row.get("enhance_route") or "missing",
+                "uses_realesrgan": row.get("uses_realesrgan", "missing"),
+                "speed_class": row.get("speed_class") or "missing",
+                "speed_actual_seconds": row.get("speed_actual_seconds", "missing"),
+                "speed_risk": row.get("speed_risk", "missing"),
+                "route_decision_reason": row.get("route_decision_reason") or "missing",
+                "fast_route_skipped_realesrgan": row.get("fast_route_skipped_realesrgan", "missing"),
+                "fast_route_skipped_protected_heavy_chain": row.get("fast_route_skipped_protected_heavy_chain", "missing"),
+                "roi_evidence_status": row.get("roi_evidence_status") or "missing",
+                "resolution_route": row.get("resolution_route") or "missing",
+                "scale_factor": row.get("scale_factor", "missing"),
+                "quality_status": row.get("quality_status") or "missing",
+                "delivery_status": row.get("delivery_status") or "missing",
+                "delivery_reason": row.get("delivery_reason") or row.get("quality_status_reason") or "missing",
+                "image_quality_profile": row.get("image_quality_profile") or "missing",
+                "content_type": row.get("content_type") or "unknown",
+                "content_type_review": row.get("content_type_review") or "manual_review",
+                "content_type_reason": row.get("content_type_reason") or "missing",
+                "roi_source": row.get("roi_source") or "missing",
+                "model_name": row.get("model_name", "not_applicable"),
+                "subprocess_started_at": row.get("subprocess_started_at", "not_applicable"),
+                "subprocess_finished_at": row.get("subprocess_finished_at", "not_applicable"),
+                "subprocess_seconds": row.get("subprocess_seconds", "not_applicable"),
+                "subprocess_exit_code": row.get("subprocess_exit_code", "not_applicable"),
+                "command_signature": row.get("command_signature", "not_applicable"),
+                "realesrgan_requested": row.get("realesrgan_requested", False),
+                "realesrgan_request_blocked": row.get("realesrgan_request_blocked", False),
+                "realesrgan_block_reason": row.get("realesrgan_block_reason", "not_applicable"),
+                "face_count_raw": row.get("face_count_raw", row.get("face_candidate_count_raw", "not_applicable")),
+                "face_count_filtered": row.get("face_count_filtered", row.get("face_candidate_count_filtered", "not_applicable")),
+                "face_candidates": row.get("face_candidates", []),
+                "route_evidence": row.get("route_evidence", {}),
+                "identity_protection_pass": row.get("identity_protection_pass", "not_applicable"),
+                "identity_protection_status": row.get("identity_protection_status", "not_applicable"),
+                "face_structure_protection_pass": row.get("face_structure_protection_pass", "not_applicable"),
+                "skin_protection_pass": row.get("skin_protection_pass", "not_applicable"),
+                "hair_protection_pass": row.get("hair_protection_pass", "not_applicable"),
+                "background_blur_protection_pass": row.get("background_blur_protection_pass", "not_applicable"),
+                "text_logo_risk_status": row.get("text_logo_risk_status") or "missing",
+                "text_logo_risk_reason": row.get("text_logo_risk_reason") or "missing",
+                "primary_text_roi_score": row.get("primary_text_roi_score", "not_applicable"),
+                "primary_text_roi_gain": row.get("primary_text_roi_gain", "not_applicable"),
+                "knowledge_text_line_roi_score": row.get("knowledge_text_line_roi_score", "not_applicable"),
+                "knowledge_text_line_roi_gain": row.get("knowledge_text_line_roi_gain", "not_applicable"),
+                "face_protection_pass": row.get("face_protection_pass", "not_applicable"),
+                "product_material_protection_pass": row.get("product_material_protection_pass", "not_applicable"),
+                "background_blur_protection_pass": row.get("background_blur_protection_pass", "not_applicable"),
+                "texture_roi_score": row.get("texture_roi_score", "not_applicable"),
+                "texture_roi_gain": row.get("texture_roi_gain", "not_applicable"),
+                "valid_text_roi_count": row.get("valid_text_roi_count", "not_applicable"),
+                "text_roi_details": row.get("text_roi_details", "not_applicable"),
+                "text_score_100_eligible": row.get("text_score_100_eligible", False),
+                "text_glyph_integrity_review": row.get("text_glyph_integrity_review", "not_applicable"),
+                "small_text_stage": row.get("small_text_stage", "not_applicable"),
+                "small_text_detected_count": row.get("small_text_detected_count", 0),
+                "small_text_valid_count": row.get("small_text_valid_count", 0),
+                "small_text_enhanced_count": row.get("small_text_enhanced_count", 0),
+                "small_text_reverted_count": row.get("small_text_reverted_count", 0),
+                "small_text_roi_details": row.get("small_text_roi_details", []),
+                "global_halo_ringing_pass": row.get("global_halo_ringing_pass", "not_applicable"),
+                "face_halo_ringing_pass": row.get("face_halo_ringing_pass", "not_applicable"),
+                "primary_text_halo_ringing_pass": row.get("primary_text_halo_ringing_pass", "not_applicable"),
+                "small_text_halo_ringing_pass": row.get("small_text_halo_ringing_pass", "not_applicable"),
+                "small_text_roi_applicable": row.get("small_text_roi_applicable", False),
+                "small_text_character_structure_protection_pass": row.get("small_text_character_structure_protection_pass", "not_applicable"),
+                "small_text_stroke_width_delta": row.get("small_text_stroke_width_delta", "not_applicable"),
+                "small_text_edge_overshoot": row.get("small_text_edge_overshoot", "not_applicable"),
+                "small_text_background_intrusion_pass": row.get("small_text_background_intrusion_pass", "not_applicable"),
+                "small_text_person_roi_unchanged": row.get("small_text_person_roi_unchanged", "not_applicable"),
+            }
+            for row in rows
+        ],
+        "realesrgan_tool_path": tool_checks.get("realesrgan_tool_dir") or "not_available",
+    }
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -433,6 +614,8 @@ def _minimal_problem_from_result(run_result: dict[str, Any]) -> tuple[str, str, 
     status = str(run_result.get("verification_result") or run_result.get("status") or "").upper()
     processed_count = int(run_result.get("processed_count") or 0)
     skipped_count = int(run_result.get("skipped_count") or 0)
+    if status in {"BLOCKED", "FAILED", "FAIL"} or str(run_result.get("quality_status") or "").lower() == "blocked":
+        return "BLOCKED", "Dashboard Beta", "FAILED_MODEL_RUN"
     if status in {"PASS", "SUCCESS", "COMPLETED"} or processed_count > 0:
         return "PASS_WITH_NOTES", "Dashboard Beta", "PASS_WITH_NOTES"
     if skipped_count > 0:
@@ -459,6 +642,93 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
             "output_long_edge",
             "output_short_edge",
             "output_resolution_profile",
+            "resolution_route",
+            "input_width",
+            "input_height",
+            "scale_factor",
+            "route_name",
+            "uses_realesrgan",
+            "quality_status",
+            "delivery_status",
+            "delivery_reason",
+            "image_quality_profile",
+            "content_type",
+            "content_type_review",
+            "content_type_reason",
+            "roi_source",
+            "model_name",
+            "subprocess_started_at",
+            "subprocess_finished_at",
+            "subprocess_seconds",
+            "subprocess_exit_code",
+            "command_signature",
+            "realesrgan_requested",
+            "realesrgan_request_blocked",
+            "realesrgan_block_reason",
+            "face_count_raw",
+            "face_count_filtered",
+            "face_candidates",
+            "route_evidence",
+            "identity_protection_pass",
+            "identity_protection_status",
+            "face_structure_protection_pass",
+            "skin_protection_pass",
+            "skin_texture_change",
+            "hair_protection_pass",
+            "hair_edge_consistency",
+            "clothing_texture_gain",
+            "clothing_hallucination_risk",
+            "background_blur_change",
+            "global_halo_ringing_pass",
+            "face_halo_ringing_pass",
+            "primary_text_glyph_review",
+            "primary_text_halo_ringing_pass",
+            "small_text_roi_score",
+            "small_text_roi_gain",
+            "small_text_glyph_review",
+            "small_text_halo_ringing_pass",
+            "small_text_roi_applicable",
+            "small_text_character_structure_protection_pass",
+            "small_text_stroke_width_delta",
+            "small_text_edge_overshoot",
+            "small_text_background_intrusion_pass",
+            "small_text_person_roi_unchanged",
+            "small_text_enhancement_applied",
+            "commercial_layout_protection_pass",
+            "transparent_material_protection_pass",
+            "container_edge_protection_pass",
+            "primary_text_roi_score",
+            "primary_text_roi_gain",
+            "commercial_text_quality_pass",
+            "knowledge_text_line_roi_score",
+            "knowledge_text_line_roi_gain",
+            "face_protection_pass",
+            "product_material_protection_pass",
+            "background_blur_protection_pass",
+            "texture_roi_score",
+            "texture_roi_gain",
+            "valid_text_roi_count",
+            "text_roi_details",
+            "text_score_100_eligible",
+            "text_glyph_integrity_review",
+            "small_text_stage",
+            "small_text_detected_count",
+            "small_text_valid_count",
+            "small_text_recoverable_count",
+            "small_text_limited_count",
+            "small_text_unrecoverable_count",
+            "small_text_enhanced_count",
+            "small_text_reverted_count",
+            "small_text_manual_review_count",
+            "small_text_quality_status",
+            "small_text_delivery_status",
+            "small_text_overview_path",
+            "small_text_comparison_path",
+            "small_text_roi_details",
+            "text_logo_risk_status",
+            "text_logo_risk_reason",
+            "text_ratio",
+            "text_logo_risk_threshold",
             "contact_sheet_size_bytes",
             "contact_sheet_light_size_bytes",
             "contact_sheet_light_format",
@@ -514,8 +784,8 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
         writer.writerow(
             {
                 "file_name": item.get("file", ""),
-                "status": "PASS",
-                "problem_code": "PASS" if not risk_tags else ";".join(risk_tags),
+                "status": item.get("quality_status") or "not_available",
+                "problem_code": item.get("quality_status_reason") or ("PASS" if not risk_tags else ";".join(risk_tags)),
                 "input_size": input_size,
                 "input_size_bytes": input_size,
                 "output_size": output_size,
@@ -527,6 +797,93 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "output_long_edge": item.get("output_long_edge", ""),
                 "output_short_edge": item.get("output_short_edge", ""),
                 "output_resolution_profile": item.get("output_resolution_profile", ""),
+                "resolution_route": item.get("resolution_route", ""),
+                "input_width": item.get("input_width", ""),
+                "input_height": item.get("input_height", ""),
+                "scale_factor": item.get("scale_factor", ""),
+                "route_name": item.get("enhance_route", ""),
+                "uses_realesrgan": item.get("uses_realesrgan", ""),
+                "quality_status": item.get("quality_status", ""),
+                "delivery_status": item.get("delivery_status", ""),
+                "delivery_reason": item.get("delivery_reason") or item.get("quality_status_reason", ""),
+                "image_quality_profile": item.get("image_quality_profile", ""),
+                "content_type": item.get("content_type", "unknown"),
+                "content_type_review": item.get("content_type_review", "manual_review"),
+                "content_type_reason": item.get("content_type_reason", ""),
+                "roi_source": item.get("roi_source", ""),
+                "model_name": item.get("model_name", "not_applicable"),
+                "subprocess_started_at": item.get("subprocess_started_at", "not_applicable"),
+                "subprocess_finished_at": item.get("subprocess_finished_at", "not_applicable"),
+                "subprocess_seconds": item.get("subprocess_seconds", "not_applicable"),
+                "subprocess_exit_code": item.get("subprocess_exit_code", "not_applicable"),
+                "realesrgan_requested": item.get("realesrgan_requested", False),
+                "realesrgan_request_blocked": item.get("realesrgan_request_blocked", False),
+                "realesrgan_block_reason": item.get("realesrgan_block_reason", "not_applicable"),
+                "command_signature": item.get("command_signature", "not_applicable"),
+                "face_count_raw": item.get("face_count_raw", item.get("face_candidate_count_raw", "not_applicable")),
+                "face_count_filtered": item.get("face_count_filtered", item.get("face_candidate_count_filtered", "not_applicable")),
+                "face_candidates": json.dumps(item.get("face_candidates") or [], ensure_ascii=False),
+                "route_evidence": json.dumps(item.get("route_evidence") or {}, ensure_ascii=False),
+                "identity_protection_pass": item.get("identity_protection_pass", "not_applicable"),
+                "identity_protection_status": item.get("identity_protection_status", "not_applicable"),
+                "face_structure_protection_pass": item.get("face_structure_protection_pass", "not_applicable"),
+                "skin_protection_pass": item.get("skin_protection_pass", "not_applicable"),
+                "skin_texture_change": item.get("skin_texture_change", "not_applicable"),
+                "hair_protection_pass": item.get("hair_protection_pass", "not_applicable"),
+                "hair_edge_consistency": item.get("hair_edge_consistency", "not_applicable"),
+                "clothing_texture_gain": item.get("clothing_texture_gain", "not_applicable"),
+                "clothing_hallucination_risk": item.get("clothing_hallucination_risk", "not_applicable"),
+                "background_blur_change": item.get("background_blur_change", "not_applicable"),
+                "global_halo_ringing_pass": item.get("global_halo_ringing_pass", "not_applicable"),
+                "face_halo_ringing_pass": item.get("face_halo_ringing_pass", "not_applicable"),
+                "primary_text_glyph_review": item.get("primary_text_glyph_review", "not_applicable"),
+                "primary_text_halo_ringing_pass": item.get("primary_text_halo_ringing_pass", "not_applicable"),
+                "small_text_roi_score": item.get("small_text_roi_score", "not_applicable"),
+                "small_text_roi_gain": item.get("small_text_roi_gain", "not_applicable"),
+                "small_text_glyph_review": item.get("small_text_glyph_review", "not_applicable"),
+                "small_text_halo_ringing_pass": item.get("small_text_halo_ringing_pass", "not_applicable"),
+                "small_text_roi_applicable": item.get("small_text_roi_applicable", False),
+                "small_text_character_structure_protection_pass": item.get("small_text_character_structure_protection_pass", "not_applicable"),
+                "small_text_stroke_width_delta": item.get("small_text_stroke_width_delta", "not_applicable"),
+                "small_text_edge_overshoot": item.get("small_text_edge_overshoot", "not_applicable"),
+                "small_text_background_intrusion_pass": item.get("small_text_background_intrusion_pass", "not_applicable"),
+                "small_text_person_roi_unchanged": item.get("small_text_person_roi_unchanged", "not_applicable"),
+                "small_text_enhancement_applied": item.get("small_text_enhancement_applied", False),
+                "commercial_layout_protection_pass": item.get("commercial_layout_protection_pass", "not_applicable"),
+                "transparent_material_protection_pass": item.get("transparent_material_protection_pass", "not_applicable"),
+                "container_edge_protection_pass": item.get("container_edge_protection_pass", "not_applicable"),
+                "primary_text_roi_score": item.get("primary_text_roi_score", ""),
+                "primary_text_roi_gain": item.get("primary_text_roi_gain", ""),
+                "commercial_text_quality_pass": item.get("commercial_text_quality_pass", ""),
+                "knowledge_text_line_roi_score": item.get("knowledge_text_line_roi_score", ""),
+                "knowledge_text_line_roi_gain": item.get("knowledge_text_line_roi_gain", ""),
+                "face_protection_pass": item.get("face_protection_pass", ""),
+                "product_material_protection_pass": item.get("product_material_protection_pass", ""),
+                "background_blur_protection_pass": item.get("background_blur_protection_pass", ""),
+                "texture_roi_score": item.get("texture_roi_score", ""),
+                "texture_roi_gain": item.get("texture_roi_gain", ""),
+                "valid_text_roi_count": item.get("valid_text_roi_count", ""),
+                "text_roi_details": json.dumps(item.get("text_roi_details") or [], ensure_ascii=False),
+                "text_score_100_eligible": item.get("text_score_100_eligible", False),
+                "text_glyph_integrity_review": item.get("text_glyph_integrity_review", "not_applicable"),
+                "small_text_stage": item.get("small_text_stage", "not_applicable"),
+                "small_text_detected_count": item.get("small_text_detected_count", 0),
+                "small_text_valid_count": item.get("small_text_valid_count", 0),
+                "small_text_recoverable_count": item.get("small_text_recoverable_count", 0),
+                "small_text_limited_count": item.get("small_text_limited_count", 0),
+                "small_text_unrecoverable_count": item.get("small_text_unrecoverable_count", 0),
+                "small_text_enhanced_count": item.get("small_text_enhanced_count", 0),
+                "small_text_reverted_count": item.get("small_text_reverted_count", 0),
+                "small_text_manual_review_count": item.get("small_text_manual_review_count", 0),
+                "small_text_quality_status": item.get("small_text_quality_status", "not_applicable"),
+                "small_text_delivery_status": item.get("small_text_delivery_status", "review_before_use"),
+                "small_text_overview_path": item.get("small_text_overview_path", ""),
+                "small_text_comparison_path": item.get("small_text_comparison_path", ""),
+                "small_text_roi_details": json.dumps(item.get("small_text_roi_details") or [], ensure_ascii=False),
+                "text_logo_risk_status": item.get("text_logo_risk_status", ""),
+                "text_logo_risk_reason": item.get("text_logo_risk_reason", ""),
+                "text_ratio": item.get("text_ratio", metrics.get("text_ratio", "")),
+                "text_logo_risk_threshold": item.get("text_logo_risk_threshold", ""),
                 "contact_sheet_size_bytes": contact_sheet_size,
                 "contact_sheet_light_size_bytes": item.get("contact_sheet_light_size_bytes", ""),
                 "contact_sheet_light_format": item.get("contact_sheet_light_format", ""),
@@ -556,19 +913,26 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or (run_result.get("beta_policy") or {}).get("strategy") if isinstance(run_result.get("beta_policy"), dict) else item.get("enhance_route") or "missing",
                 "enhanced_generated": enhanced.exists(),
                 "contact_sheet_generated": bool(contact and contact.exists()),
                 "elapsed_seconds": item.get("elapsed_seconds", ""),
-                "quality_note": "35% protected candidate generated; inspect contact sheet before use.",
+                "quality_note": item.get("route_decision_reason") or "route-aware safe beta candidate generated; inspect diagnostics before use.",
                 "risk_tags": ";".join(risk_tags),
                 "error_message": "",
             }
         )
+    processed_names = {
+        str(item.get("input_name") or item.get("file") or "")
+        for item in (run_result.get("processed") or [])
+        if isinstance(item, dict)
+    }
     for item in run_result.get("results") or []:
         if not isinstance(item, dict):
             continue
         input_name = str(item.get("input_name") or "")
+        if input_name and input_name in processed_names:
+            continue
         output_path = str(item.get("output_path") or "")
         input_size = _int_or_none(_first_present(item.get("input_size_bytes"), item.get("input_size"))) or (_safe_stat(input_dir / input_name) if input_name else 0)
         output_size = _int_or_none(_first_present(item.get("output_size_bytes"), item.get("output_size"))) or (_safe_stat(Path(output_path)) if output_path else 0)
@@ -617,7 +981,7 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or "not_available",
                 "enhanced_generated": bool(output_path),
                 "contact_sheet_generated": False,
                 "elapsed_seconds": run_result.get("elapsed_seconds", ""),
@@ -674,7 +1038,7 @@ def _image_results_csv(run_result: dict[str, Any], run_dir: Path, input_dir: Pat
                 "final_output_source": item.get("final_output_source", ""),
                 "final_output_fallback_reason": item.get("final_output_fallback_reason", ""),
                 "mode": run_result.get("mode") or "safe_1080p",
-                "strategy": "35% protected",
+                "strategy": item.get("enhance_route") or "missing",
                 "enhanced_generated": False,
                 "contact_sheet_generated": False,
                 "elapsed_seconds": "",
@@ -861,17 +1225,36 @@ def generate_safe_1080p_feedback_package(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_path = feedback_dir / f"HDDE_V046_测试反馈包_{timestamp}.zip"
 
+    route_truth_config = _route_truth_config(run_result, tool_checks)
+    if route_truth_config["diagnostics_consistency"] == "BLOCKED":
+        status = "BLOCKED"
+        problem_stage = "diagnostics_consistency"
+        problem_code = "WARNING_SYSTEM_ENV_UNKNOWN"
     diagnostics = {
         "version": "V0.4.6 RC1",
         "generated_at": _now_iso(),
         "commit": env["commit"],
         "mode": run_result.get("mode") or "safe_1080p",
-        "strategy": "35% protected",
+        "strategy": route_truth_config["strategy"],
+        "route": route_truth_config["route"],
+        "uses_realesrgan": route_truth_config["uses_realesrgan"],
+        "speed_class": route_truth_config["speed_class"],
+        "speed_actual_seconds": route_truth_config["speed_actual_seconds"],
+        "speed_risk": route_truth_config["speed_risk"],
+        "diagnostics_consistency": route_truth_config["diagnostics_consistency"],
+        "diagnostics_consistency_blockers": route_truth_config["diagnostics_consistency_blockers"],
         "status": status,
         "problem_stage": problem_stage,
         "problem_code": problem_code,
+        "app_data_root": str(run_result.get("app_data_root") or ""),
+        "app_data_root_source": str(run_result.get("app_data_root_source") or ""),
+        "app_data_root_exists": bool(run_result.get("app_data_root_exists")),
+        "app_data_root_writable": bool(run_result.get("app_data_root_writable")),
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
+        "report_dir": str(run_result.get("report_dir") or ""),
+        "feedback_dir": str(run_result.get("feedback_dir") or feedback_dir),
+        "beta_upload_dir": str(run_result.get("beta_upload_dir") or ""),
         "feedback_zip_path": str(zip_path),
         "processed_count": int(run_result.get("processed_count") or 0),
         "success_count": int(run_result.get("processed_count") or 0),
@@ -894,10 +1277,7 @@ def generate_safe_1080p_feedback_package(
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
         "beta_default_output_dir": "runtime/experiments/safe_1080p_beta",
-        "strategy": "35% protected",
-        "blend_ratio": 0.35,
-        "uses_realesrgan": True,
-        "realesrgan_tool_path": tool_checks["realesrgan_tool_dir"],
+        **route_truth_config,
         "generate_contact_sheet": True,
         "include_original_images": False,
         "include_enhanced_outputs": False,

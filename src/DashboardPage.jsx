@@ -11,7 +11,7 @@ const DEFAULT_SCALE = "2";
 const DEFAULT_LEGACY_FORMAT = "png";
 const PROCESSING_MODE_STANDARD = "standard";
 const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
-const DEFAULT_SAFE_BETA_OUTPUT_DIR = "D:\\影界文件\\1080P安全增强输出";
+const DEFAULT_SAFE_BETA_OUTPUT_DIR = "";
 const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
 
 const JPG95_REVIEW_OPTIONS = [
@@ -221,10 +221,19 @@ function firstSafeBetaOutputPath(item, result) {
 
 function normalizeSafeBetaPreviewUrl(url) {
   if (!url) return "";
-  const value = String(url);
-  if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value) || /^file:\/\//i.test(value)) return "";
+  let value = String(url).trim();
+  if (!value) return "";
+  if (/^\/[a-zA-Z]:[\\/]/.test(value)) value = value.slice(1);
+  if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value) || /^file:\/\//i.test(value)) {
+    let localPath = value.replace(/^file:\/\//i, "");
+    if (/^\/[a-zA-Z]:[\\/]/.test(localPath)) localPath = localPath.slice(1);
+    return `${API_BASE}/api/file/safe-beta/${encodeURIComponent(localPath)}`;
+  }
   if (/^https?:\/\//i.test(value)) return value;
   if (value.startsWith("/")) return normalizeApiUrl(value);
+  if (/^[^?#]+\.(png|jpe?g|webp|bmp)$/i.test(value) || value.includes("\\") || value.startsWith("tmp/")) {
+    return `${API_BASE}/api/file/safe-beta/${encodeURIComponent(value)}`;
+  }
   return "";
 }
 
@@ -264,6 +273,12 @@ function firstSafeBetaContactSheetPreviewUrl(item, result) {
   const processed = findSafeBetaProcessedRow(item, result);
   const mapped = findSafeBetaResultRow(item, result);
   const candidates = [
+    item?.contact_sheet_light,
+    item?.contact_sheet,
+    processed?.contact_sheet_light,
+    processed?.contact_sheet,
+    mapped?.contact_sheet_light,
+    mapped?.contact_sheet,
     item?.contact_sheet_light_url,
     item?.contact_sheet_light_preview_url,
     item?.contact_sheet_url,
@@ -280,9 +295,6 @@ function firstSafeBetaContactSheetPreviewUrl(item, result) {
     result?.contact_sheet_light_preview_url,
     result?.contact_sheet_url,
     result?.contact_sheet_preview_url,
-    item?.contact_sheet,
-    processed?.contact_sheet,
-    mapped?.contact_sheet,
   ];
   return candidates.map(normalizeSafeBetaPreviewUrl).find(Boolean) || "";
 }
@@ -336,7 +348,9 @@ function safeBetaReasonText(item, result) {
 }
 
 function SafeBetaMetricBar({ label, keyName, value, active }) {
-  const width = active ? 100 : 0;
+  const number = Number(value);
+  const hasMetric = Number.isFinite(number);
+  const width = hasMetric ? Math.max(4, Math.min(100, number)) : active ? 100 : 0;
   return (
     <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/70 px-3 py-2">
       <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -344,7 +358,7 @@ function SafeBetaMetricBar({ label, keyName, value, active }) {
           <p className="truncate text-xs font-medium text-[#e2e8f0]">{label}</p>
           <p className="mt-0.5 truncate font-mono text-[9px] uppercase tracking-[0.2em] text-[#475569]" title={keyName}>{keyName}</p>
         </div>
-        <span className={`shrink-0 font-mono text-sm font-bold tracking-tight ${active ? "text-[#00ffcc]" : "text-[#64748b]"}`}>
+        <span className={`shrink-0 font-mono text-sm font-bold tracking-tight ${hasMetric || active ? "text-[#00ffcc]" : "text-[#64748b]"}`}>
           {value || "-"}
         </span>
       </div>
@@ -359,12 +373,26 @@ function isBrowserPreviewablePath(path) {
   return /^https?:\/\//i.test(path || "");
 }
 
-function makeSafeBetaQualityMetrics() {
+function readSafeBetaMetric(item, result, key) {
+  const processed = findSafeBetaProcessedRow(item, result);
+  const mapped = findSafeBetaResultRow(item, result);
+  const value = processed?.[key] ?? mapped?.[key] ?? item?.[key] ?? result?.[key] ?? null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function makeSafeBetaQualityMetrics(item, result) {
+  const fields = [
+    ["text_clarity_score", "文字清晰度"],
+    ["edge_quality_score", "边缘质量"],
+    ["color_fidelity_score", "色彩忠实度"],
+    ["texture_score", "纹理保持力"],
+  ];
   return [
-    ["text_clarity_score", "文字清晰度", "待接入"],
-    ["edge_quality_score", "边缘质量", "待接入"],
-    ["color_fidelity_score", "色彩忠实度", "待接入"],
-    ["texture_score", "纹理保持力", "待接入"],
+    ...fields.map(([key, label]) => {
+      const metric = readSafeBetaMetric(item, result, key);
+      return [key, label, metric == null ? "需重新运行生成" : metric.toFixed(2)];
+    }),
   ];
 }
 
@@ -551,14 +579,14 @@ function requestJson(method, url, body) {
   });
 }
 
-async function requestBetaSafeEnhance(url, items, betaRunId) {
+async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
   logSafeBeta(betaRunId, "BETA_FORMDATA_BUILD_START", {
     frontend_selected_file_name: items.map((item) => item.name || item.file?.name || "image.png"),
   });
   const formData = new FormData();
   formData.append("beta_run_id", betaRunId);
   formData.append("mode", "safe_1080p");
-  formData.append("output_dir", DEFAULT_SAFE_BETA_OUTPUT_DIR);
+  if (outputDir) formData.append("output_dir", outputDir);
   formData.append("flat_output", "true");
   formData.append("business_output", "true");
   const selectedNames = items.map((item) => item.name || item.file?.name || "image.png");
@@ -581,7 +609,7 @@ async function requestBetaSafeEnhance(url, items, betaRunId) {
     request_payload: {
       beta_run_id: betaRunId,
       mode: "safe_1080p",
-      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      output_dir: outputDir,
       flat_output: true,
       business_output: true,
       files: selectedNames,
@@ -600,6 +628,8 @@ async function requestBetaSafeEnhance(url, items, betaRunId) {
   } catch (error) {
     if (error?.name === "AbortError") {
       const timeoutError = new Error(`Beta request timed out after ${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}s`);
+      timeoutError.isSafeBetaTimeout = true;
+      timeoutError.timeout_source = "frontend";
       logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
         stage: "BETA_FETCH_TIMEOUT",
         error: timeoutError.message,
@@ -636,6 +666,52 @@ const isBetaSuccess = (data) =>
   data?.code === 200 ||
   Number(data?.processed_count || 0) > 0 ||
   (Array.isArray(data?.enhanced_files) && data.enhanced_files.length > 0);
+
+function betaPayloadArrays(payload = {}, data = {}) {
+  const processed = Array.isArray(payload.processed) ? payload.processed : Array.isArray(data.processed) ? data.processed : [];
+  const results = Array.isArray(payload.results) ? payload.results : Array.isArray(data.results) ? data.results : [];
+  const enhancedFiles = Array.isArray(payload.enhanced_files) ? payload.enhanced_files : Array.isArray(data.enhanced_files) ? data.enhanced_files : [];
+  return { processed: processed.map(addJpg95ReviewDefaults), results, enhancedFiles };
+}
+
+function processedOutputPath(row = {}) {
+  return row.output_path || row.enhanced || "";
+}
+
+function isTextLogoRiskRow(row = {}) {
+  const reason = `${row.jpg95_candidate_reason || ""} ${row.final_output_fallback_reason || ""}`;
+  return reason.includes("text_logo_risk");
+}
+
+function betaQueuePatchFromProcessed(item, processedRows, results, fallbackOutputDir, fallbackMessage) {
+  const processed = processedRows.find((row) => row.input_name === item.name || row.file === item.name) || {};
+  const mapped = results.find((row) => row.input_name === item.name || row.file === item.name) || {};
+  const outputPath = processedOutputPath(processed) || mapped.output_path || "";
+  if (!outputPath) return null;
+  const outputName = mapped.output_name || processed.output_name || outputPath.split(/[\\/]/).pop() || "";
+  const textLogoRisk = isTextLogoRiskRow(processed);
+  const reason = textLogoRisk ? "已生成但不建议交付：text_logo_risk，需要人工复核文字与 Logo。" : fallbackMessage;
+  return {
+    status: "completed",
+    progress: 100,
+    output_dir: fallbackOutputDir,
+    output_filename: outputName || "已生成",
+    output_path: outputPath,
+    contact_sheet: processed.contact_sheet || "",
+    contact_sheet_light: processed.contact_sheet_light || "",
+    jpg95_candidate_status: processed.jpg95_candidate_status || "",
+    jpg95_candidate_reason: processed.jpg95_candidate_reason || "",
+    final_output_source: processed.final_output_source || "png_main",
+    final_output_fallback_reason: processed.final_output_fallback_reason || "",
+    beta_result: mapped,
+    beta_processed: processed,
+    beta_status: textLogoRisk ? "PASS_WITH_LIMITATION" : "PASS",
+    final_delivery_status: "PASS_WITH_LIMITATION",
+    final_delivery_reason: reason,
+    error: "",
+    logs: [reason],
+  };
+}
 
 function formatBetaFailureMessage(payload, fallback = "1080P安全增强 Beta 处理失败") {
   const data = payload?.data || {};
@@ -980,6 +1056,8 @@ export default function DashboardPage() {
   const [safeBetaTick, setSafeBetaTick] = useState(0);
   const [appliedOutputDir, setAppliedOutputDir] = useState("");
   const [defaultOutputDir, setDefaultOutputDir] = useState("");
+  const [workdirInfo, setWorkdirInfo] = useState(null);
+  const [workdirError, setWorkdirError] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
   const [outputDirSuccess, setOutputDirSuccess] = useState("");
   const [notice, setNotice] = useState("请选择图片，或更换输出文件夹后开始处理。");
@@ -994,6 +1072,18 @@ export default function DashboardPage() {
         setDefaultOutputDir(dir);
       })
       .catch(() => setDefaultOutputDir(""));
+    requestJson("GET", `${API_BASE}/api/app/workdir`)
+      .then((payload) => {
+        const data = payload?.data || payload || {};
+        setWorkdirInfo(data);
+        const fallbackDir = data.beta_output_dir || data.legacy_output_dir || data.safe_beta_output_dir || data.output_dir || "";
+        if (fallbackDir) setDefaultOutputDir(fallbackDir);
+        setWorkdirError("");
+      })
+      .catch((error) => {
+        setWorkdirInfo(null);
+        setWorkdirError(error.message || "工作目录初始化失败，请检查权限");
+      });
   }, []);
 
   useEffect(() => {
@@ -1006,6 +1096,10 @@ export default function DashboardPage() {
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
   const completedItems = fileQueue.filter((item) => item.status === "completed");
   const canStartExecution = (processingMode === PROCESSING_MODE_SAFE_BETA || fileQueue.length > 0) && !isProcessingQueue;
+  const safeBetaDefaultOutputDir = workdirInfo?.beta_output_dir || workdirInfo?.legacy_output_dir || workdirInfo?.safe_beta_output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR;
+  const currentWorkdirRoot = workdirInfo?.app_data_root || "";
+  const currentWorkdirSource = workdirInfo?.app_data_root_source || "";
+  const currentWorkdirWritable = Boolean(workdirInfo?.app_data_root_writable);
 
   const updateQueueItem = (id, patch) => {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -1133,7 +1227,7 @@ export default function DashboardPage() {
   };
 
   const handleOpenOutputDir = () => {
-    const target = processingMode === PROCESSING_MODE_SAFE_BETA ? DEFAULT_SAFE_BETA_OUTPUT_DIR : appliedOutputDir.trim() || defaultOutputDir;
+    const target = processingMode === PROCESSING_MODE_SAFE_BETA ? appliedOutputDir.trim() || safeBetaDefaultOutputDir : appliedOutputDir.trim() || defaultOutputDir;
     if (!target) {
       setOutputDirError("当前没有可打开的输出目录。");
       return;
@@ -1148,6 +1242,24 @@ export default function DashboardPage() {
         setOutputDirError(error.message);
         setOutputDirSuccess("");
         setNotice(error.message);
+      });
+  };
+
+  const handleOpenWorkdir = () => {
+    if (!currentWorkdirRoot) {
+      setNotice("当前工作目录尚未接入，请确认本地后端已启动。");
+      return;
+    }
+    requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: currentWorkdirRoot })
+      .then((payload) => {
+        setOutputDirError("");
+        setOutputDirSuccess("");
+        setNotice(payload.message || "已打开当前工作目录。");
+      })
+      .catch((error) => {
+        setOutputDirError(error.message);
+        setOutputDirSuccess("");
+        setNotice(error.message || "打开当前工作目录失败。");
       });
   };
 
@@ -1200,6 +1312,7 @@ export default function DashboardPage() {
   const runSafeBetaModeV2 = async () => {
     const startedAt = Date.now();
     const betaRunId = makeBetaRunId();
+    const betaOutputDir = appliedOutputDir.trim() || safeBetaDefaultOutputDir;
     const betaItems = fileQueue.filter(isCurrentSafeBetaInputItem);
     const betaItemIds = betaItems.map((item) => item.id);
     const firstFileName = betaItems[0]?.name || "";
@@ -1230,7 +1343,7 @@ export default function DashboardPage() {
         enhanced_count: 0,
         contact_sheet_count: 0,
         skipped_count: 0,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: betaOutputDir,
         input_dir: "",
         input_files: [],
         input_file_names: [],
@@ -1244,6 +1357,33 @@ export default function DashboardPage() {
         message: "BETA_INPUT_MISSING / 请先添加图片",
       });
       setNotice("BETA_INPUT_MISSING / 请先添加图片");
+      return;
+    }
+    if (!betaOutputDir) {
+      const message = workdirError || "工作目录初始化失败，请检查权限";
+      setSafeBetaResult({
+        status: "BLOCKED",
+        beta_run_id: betaRunId,
+        progress: 100,
+        current_file: firstFileName || "",
+        processed_count: 0,
+        enhanced_count: 0,
+        contact_sheet_count: 0,
+        skipped_count: 0,
+        output_dir: "",
+        input_dir: "",
+        input_files: [],
+        input_file_names: [],
+        input_file_count: 0,
+        has_enhanced: false,
+        has_contact_sheet: false,
+        elapsed_seconds: 0,
+        stage: "BETA_OUTPUT_DIR_MISSING",
+        reason: "BETA_OUTPUT_DIR_MISSING",
+        error: message,
+        message,
+      });
+      setNotice(message);
       return;
     }
     logSafeBeta(betaRunId, "BETA_FILE_OBJECT_CHECK_START", {
@@ -1265,7 +1405,7 @@ export default function DashboardPage() {
         enhanced_count: 0,
         contact_sheet_count: 0,
         skipped_count: 0,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: betaOutputDir,
         input_dir: "",
         input_files: [],
         input_file_names: [],
@@ -1278,7 +1418,7 @@ export default function DashboardPage() {
       setBetaQueuePatch({
         status: "need_reselect",
         progress: 100,
-        output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: betaOutputDir,
         output_filename: "",
         final_delivery_status: "",
         final_delivery_reason: message,
@@ -1308,7 +1448,7 @@ export default function DashboardPage() {
             ...item,
             status: "completed",
             progress: 100,
-            output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+            output_dir: betaOutputDir,
             output_filename: outputName || "已生成",
             output_path: outputPath,
             contact_sheet: processed.contact_sheet || "",
@@ -1368,7 +1508,7 @@ export default function DashboardPage() {
     };
     const setBetaStage = (progress, currentFile, message) => {
       setSafeBetaResult((prev) => (prev?.status === "RUNNING" ? { ...prev, progress, current_file: currentFile, message } : prev));
-      setBetaQueuePatch({ status: "processing", progress, error: "", logs: [message], output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR, mode: PROCESSING_MODE_SAFE_BETA });
+      setBetaQueuePatch({ status: "processing", progress, error: "", logs: [message], output_dir: betaOutputDir, mode: PROCESSING_MODE_SAFE_BETA });
       if (currentFile) setNotice(`${message}：${currentFile}`);
     };
     processingRef.current = true;
@@ -1386,7 +1526,7 @@ export default function DashboardPage() {
       status: "processing",
       progress: 5,
       mode: PROCESSING_MODE_SAFE_BETA,
-      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      output_dir: betaOutputDir,
       output_filename: "",
       final_delivery_status: "",
       final_delivery_reason: "Beta 处理中",
@@ -1403,7 +1543,7 @@ export default function DashboardPage() {
       enhanced_count: "处理中",
       contact_sheet_count: "生成中",
       skipped_count: 0,
-      output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+      output_dir: betaOutputDir,
       has_enhanced: false,
       has_contact_sheet: false,
       elapsed_seconds: 0,
@@ -1424,13 +1564,13 @@ export default function DashboardPage() {
         request_payload: {
           beta_run_id: betaRunId,
           mode: "safe_1080p",
-          output_dir: DEFAULT_SAFE_BETA_OUTPUT_DIR,
+          output_dir: betaOutputDir,
           flat_output: true,
           business_output: true,
           files: betaItems.map((item) => item.name),
         },
       });
-      const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems, betaRunId);
+      const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems, betaRunId, betaOutputDir);
       const data = payload?.data || {};
       if (!isBetaSuccess(payload) && !isBetaSuccess(data)) {
         throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "Beta run failed");
@@ -1468,7 +1608,14 @@ export default function DashboardPage() {
         enhanced_count: enhancedCount,
         contact_sheet_count: contactSheetCount,
         skipped_count: skippedCount,
-        output_dir: payload.output_dir || data.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: payload.output_dir || data.output_dir || betaOutputDir,
+        app_data_root: payload.app_data_root || data.app_data_root || workdirInfo?.app_data_root || "",
+        app_data_root_source: payload.app_data_root_source || data.app_data_root_source || workdirInfo?.app_data_root_source || "",
+        app_data_root_exists: payload.app_data_root_exists ?? data.app_data_root_exists ?? workdirInfo?.app_data_root_exists ?? false,
+        app_data_root_writable: payload.app_data_root_writable ?? data.app_data_root_writable ?? workdirInfo?.app_data_root_writable ?? false,
+        report_dir: payload.report_dir || data.report_dir || workdirInfo?.report_dir || "",
+        feedback_dir: payload.feedback_dir || data.feedback_dir || workdirInfo?.feedback_dir || "",
+        beta_upload_dir: payload.beta_upload_dir || data.beta_upload_dir || workdirInfo?.beta_upload_dir || "",
         has_enhanced: enhancedCount > 0,
         has_contact_sheet: contactSheetCount > 0,
         input_dir: inputDir,
@@ -1494,12 +1641,18 @@ export default function DashboardPage() {
     } catch (error) {
       const errorPayload = error?.payload || {};
       const errorData = errorPayload?.data || {};
+      const timeoutSource = error?.timeout_source || errorPayload.timeout_source || errorData.timeout_source || (error?.isSafeBetaTimeout ? "frontend" : "unknown");
+      const isFrontendTimeout = error?.isSafeBetaTimeout || timeoutSource === "frontend";
+      const partialPayload = betaPayloadArrays(errorPayload, errorData);
       const skippedRows = Array.isArray(errorPayload.skipped) ? errorPayload.skipped : Array.isArray(errorData.skipped) ? errorData.skipped : [];
       const skippedCount = Number(errorPayload.skipped_count ?? errorData.skipped_count ?? skippedRows.length ?? 0);
       const failureMessage = formatBetaFailureMessage(errorPayload, error.message);
       const failedInputDir = errorPayload.input_dir || errorData.input_dir || "";
       const failedInputFileNames = Array.isArray(errorPayload.input_file_names) ? errorPayload.input_file_names : Array.isArray(errorData.input_file_names) ? errorData.input_file_names : [];
       const failedInputFileCount = Number(errorPayload.input_file_count ?? errorData.input_file_count ?? failedInputFileNames.length ?? 0);
+      const partialProcessedCount = Number(errorPayload.processed_count ?? errorData.processed_count ?? partialPayload.processed.length ?? partialPayload.results.length ?? partialPayload.enhancedFiles.length ?? 0);
+      const hasPartialOutput = partialProcessedCount > 0 || partialPayload.enhancedFiles.length > 0 || partialPayload.results.some((row) => row.output_path);
+      const timeoutMessage = isFrontendTimeout ? "前端请求超时，后台可能仍在处理；已生成文件会保留映射，请稍后查看输出目录或反馈包。" : failureMessage;
       console.info("[Safe1080pBeta] INPUT_DIR_SYNC", {
         api_input_dir: failedInputDir,
         ui_input_dir: failedInputDir,
@@ -1520,7 +1673,14 @@ export default function DashboardPage() {
         enhanced_count: 0,
         contact_sheet_count: 0,
         skipped_count: skippedCount,
-        output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+        output_dir: errorPayload.output_dir || errorData.output_dir || betaOutputDir,
+        app_data_root: errorPayload.app_data_root || errorData.app_data_root || workdirInfo?.app_data_root || "",
+        app_data_root_source: errorPayload.app_data_root_source || errorData.app_data_root_source || workdirInfo?.app_data_root_source || "",
+        app_data_root_exists: errorPayload.app_data_root_exists ?? errorData.app_data_root_exists ?? workdirInfo?.app_data_root_exists ?? false,
+        app_data_root_writable: errorPayload.app_data_root_writable ?? errorData.app_data_root_writable ?? workdirInfo?.app_data_root_writable ?? false,
+        report_dir: errorPayload.report_dir || errorData.report_dir || workdirInfo?.report_dir || "",
+        feedback_dir: errorPayload.feedback_dir || errorData.feedback_dir || workdirInfo?.feedback_dir || "",
+        beta_upload_dir: errorPayload.beta_upload_dir || errorData.beta_upload_dir || workdirInfo?.beta_upload_dir || "",
         input_dir: failedInputDir,
         input_files: Array.isArray(errorPayload.input_files) ? errorPayload.input_files : Array.isArray(errorData.input_files) ? errorData.input_files : [],
         input_file_names: failedInputFileNames,
@@ -1529,18 +1689,49 @@ export default function DashboardPage() {
         has_contact_sheet: false,
         elapsed_seconds: Math.round((Date.now() - startedAt) / 1000),
         skipped: skippedRows,
-        message: failureMessage,
+        timeout_source: timeoutSource,
+        message: timeoutMessage,
       });
+      setSafeBetaResult((prev) => ({
+        ...(prev || {}),
+        status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : prev?.status || "BLOCKED",
+        progress: isFrontendTimeout && !hasPartialOutput ? 75 : 100,
+        processed_count: partialProcessedCount,
+        enhanced_count: partialProcessedCount || partialPayload.enhancedFiles.length,
+        contact_sheet_count: partialPayload.processed.filter((row) => Boolean(row.contact_sheet)).length,
+        has_enhanced: hasPartialOutput,
+        has_contact_sheet: partialPayload.processed.some((row) => Boolean(row.contact_sheet)),
+        results: partialPayload.results,
+        enhanced_files: partialPayload.enhancedFiles,
+        processed: partialPayload.processed,
+        timeout_source: timeoutSource,
+        message: timeoutMessage,
+      }));
       setFileQueue((prev) =>
         prev.map((item) => {
           if (!betaItemIds.includes(item.id)) return item;
           const skipped = skippedRows.find((row) => row?.input_name === item.name || row?.file === item.name) || skippedRows[0] || {};
+          const partialPatch = betaQueuePatchFromProcessed(item, partialPayload.processed, partialPayload.results, errorPayload.output_dir || errorData.output_dir || betaOutputDir, timeoutMessage);
+          if (partialPatch) return { ...item, ...partialPatch };
+          if (isFrontendTimeout) {
+            return {
+              ...item,
+              status: "processing",
+              progress: Math.max(Number(item.progress || 0), 75),
+              output_dir: errorPayload.output_dir || errorData.output_dir || betaOutputDir,
+              final_delivery_status: "",
+              final_delivery_reason: timeoutMessage,
+              beta_status: "TIMEOUT_PENDING",
+              error: "",
+              logs: [timeoutMessage],
+            };
+          }
           const itemMessage = skipped?.reason ? `${item.name} 被 1080P安全增强 Beta 安全策略跳过：${skipped.reason}` : failureMessage;
           return {
             ...item,
             status: "failed",
             progress: 100,
-            output_dir: errorPayload.output_dir || errorData.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+            output_dir: errorPayload.output_dir || errorData.output_dir || betaOutputDir,
             output_filename: "",
             final_delivery_status: "FAIL",
             final_delivery_reason: itemMessage,
@@ -1552,10 +1743,11 @@ export default function DashboardPage() {
         }),
       );
       logSafeBeta(betaRunId, "BETA_FINAL_STATE_APPLIED", {
-        status: "BLOCKED",
-        error: failureMessage,
+        status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : "BLOCKED",
+        error: timeoutMessage,
       });
       setNotice(`1080P安全增强 Beta 处理失败：${failureMessage}`);
+      setNotice(timeoutMessage);
     } finally {
       stageTimers.forEach((timer) => window.clearTimeout(timer));
       processingRef.current = false;
@@ -1578,6 +1770,15 @@ export default function DashboardPage() {
           mode: "safe_1080p",
           input_dir: safeBetaResult.input_dir || "",
           output_dir: safeBetaResult.output_dir,
+          app_data_root: safeBetaResult.app_data_root || workdirInfo?.app_data_root || "",
+          app_data_root_source: safeBetaResult.app_data_root_source || workdirInfo?.app_data_root_source || "",
+          app_data_root_exists: safeBetaResult.app_data_root_exists ?? workdirInfo?.app_data_root_exists ?? false,
+          app_data_root_writable: safeBetaResult.app_data_root_writable ?? workdirInfo?.app_data_root_writable ?? false,
+          report_dir: safeBetaResult.report_dir || workdirInfo?.report_dir || "",
+          feedback_dir: safeBetaResult.feedback_dir || workdirInfo?.feedback_dir || "",
+          beta_upload_dir: safeBetaResult.beta_upload_dir || workdirInfo?.beta_upload_dir || "",
+          input_dir_exists: Boolean(safeBetaResult.input_dir),
+          input_image_count: safeBetaResult.input_file_count || 0,
           processed_count: safeBetaResult.processed_count || 0,
           skipped_count: safeBetaResult.skipped_count || 0,
           beta_run_id: safeBetaResult.beta_run_id || "",
@@ -2030,7 +2231,7 @@ export default function DashboardPage() {
     const previewImageUrl = contactSheetPreviewUrl || outputPreviewUrl;
     const previewImageLabel = contactSheetPreviewUrl ? "CONTACT SHEET" : outputPreviewUrl ? "OUTPUT PREVIEW" : "";
     const compareTitle = previewImageUrl ? "1080P安全增强版 Beta · 对比结果" : "1080P安全增强版 Beta · 本地对比查看";
-    const compareMetrics = makeSafeBetaQualityMetrics();
+    const compareMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
     const compareStatusRows = [
       ["成品状态", outputPath ? "已生成" : statusTextValue],
       ["contact sheet", contactSheet ? "已生成" : "未生成"],
@@ -2128,10 +2329,10 @@ export default function DashboardPage() {
                         <p className="font-mono text-[9px] uppercase tracking-[0.22em] text-[#418c80]">{keyName}</p>
                         <p className="mt-1 text-xs text-slate-400">{name}</p>
                       </div>
-                      <span className="font-mono text-sm font-bold text-slate-500">{value}</span>
+                      <span className={`font-mono text-sm font-bold ${Number.isFinite(Number(value)) ? "text-[#8effed]" : "text-slate-500"}`}>{value}</span>
                     </div>
                     <div className="mt-3 h-[3px] overflow-hidden rounded-full bg-[#0e1d1f]">
-                      <div className="h-full rounded-full bg-[#3f6f68]" style={{ width: "0%" }} />
+                      <div className="h-full rounded-full bg-[#3f6f68]" style={{ width: `${Number.isFinite(Number(value)) ? Math.max(4, Math.min(100, Number(value))) : 0}%` }} />
                     </div>
                   </div>
                 ))}
@@ -2226,6 +2427,8 @@ export default function DashboardPage() {
     const contactSheetFormatValue = processed?.contact_sheet_format || activeItem?.contact_sheet_format || pathFormat(contactSheet) || "-";
     const contactSheetLightFormatValue = processed?.contact_sheet_light_format || activeItem?.contact_sheet_light_format || pathFormat(contactSheetLight) || "-";
     const outputDimensions = activeItem?.output_width && activeItem?.output_height ? `${activeItem.output_width} × ${activeItem.output_height}` : processed?.output_width && processed?.output_height ? `${processed.output_width} × ${processed.output_height}` : "-";
+    const inputDimensions = processed?.input_width && processed?.input_height ? `${processed.input_width} × ${processed.input_height}` : "-";
+    const reportMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
     const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
     const isPortraitSkip = reasonText === "人物图保护跳过";
     const reportConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "已生成" : activeItem?.status === "failed" ? "失败" : "未生成";
@@ -2312,13 +2515,13 @@ export default function DashboardPage() {
                 <h2 className="mt-2 text-lg font-semibold text-white">核心质量指标</h2>
               </div>
               <div className="text-right font-mono text-xs leading-6 text-white/40">
-                <p>输入：待接入</p>
+                <p>输入：{inputDimensions === "-" ? "需重新运行生成" : inputDimensions}</p>
                 <p>输出：{outputDimensions}</p>
               </div>
             </div>
             <div className="grid gap-2.5">
-              {makeSafeBetaQualityMetrics().map(([keyName, label, value]) => (
-                <SafeBetaMetricBar key={keyName} label={label} keyName={keyName} value={value} active={false} />
+              {reportMetrics.map(([keyName, label, value]) => (
+                <SafeBetaMetricBar key={keyName} label={label} keyName={keyName} value={value} active={Number.isFinite(Number(value))} />
               ))}
             </div>
           </section>
@@ -2505,7 +2708,7 @@ export default function DashboardPage() {
   }
 
   const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA ? "当前状态：Beta输出目录" : appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
-  const currentOutputDir = processingMode === PROCESSING_MODE_SAFE_BETA ? DEFAULT_SAFE_BETA_OUTPUT_DIR : appliedOutputDir.trim() || defaultOutputDir || "等待后端返回默认目录";
+  const currentOutputDir = processingMode === PROCESSING_MODE_SAFE_BETA ? appliedOutputDir.trim() || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录" : appliedOutputDir.trim() || defaultOutputDir || workdirError || "正在初始化工作目录";
   const safeBetaElapsedSeconds =
     safeBetaResult?.status === "RUNNING" && safeBetaStartedAt
       ? Math.max(0, Math.round((Date.now() - safeBetaStartedAt) / 1000) + safeBetaTick * 0)
@@ -2668,6 +2871,30 @@ export default function DashboardPage() {
                   <span>当前状态</span>
                   <span className="font-semibold text-[#6feaf0]">{safeBetaUserStatus}</span>
                 </div>
+                <div className="rounded-sm border border-[#1c1f26] bg-[#05090a]/55 p-2">
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <span className="shrink-0 text-[#94a3b8]">当前工作目录</span>
+                    <span className={currentWorkdirWritable ? "text-[#8be6b1]" : "text-[#ff8a8a]"}>
+                      {workdirError ? "未接入" : currentWorkdirWritable ? "可写" : "不可写"}
+                    </span>
+                  </div>
+                  <p className="break-all font-mono text-[11px] leading-5 text-[#64748b]">{currentWorkdirRoot || workdirError || "等待后端返回工作目录"}</p>
+                  <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-[#64748b]">
+                    <span>来源：{currentWorkdirSource || "-"}</span>
+                    <span>存在：{workdirInfo?.app_data_root_exists ? "是" : "否"}</span>
+                  </div>
+                  {workdirInfo?.switched_from_d_drive ? (
+                    <p className="mt-1 text-[11px] leading-5 text-[#f0c36f]">D 盘不可用，已自动切换到 Documents\\影界HDDE。</p>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={handleOpenWorkdir}
+                    disabled={!currentWorkdirRoot}
+                    className="mt-2 w-full rounded-sm border border-[#6feaf0]/35 px-3 py-1.5 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
+                  >
+                    打开当前工作目录
+                  </button>
+                </div>
                 <div className="flex items-start justify-between gap-3">
                   <span className="shrink-0">当前文件</span>
                   <span className="min-w-0 max-w-[150px] truncate text-right font-mono text-[#e2e8f0]" title={safeBetaCurrentFile}>{safeBetaCurrentFile}</span>
@@ -2692,7 +2919,7 @@ export default function DashboardPage() {
                 </div>
                 <div className="flex items-start justify-between gap-3">
                   <span className="shrink-0">输出目录</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录"}</span>
                 </div>
                 <div className="flex items-start justify-between gap-3">
                   <span className="shrink-0">输入目录</span>
@@ -2744,7 +2971,7 @@ export default function DashboardPage() {
                       input_dir: safeBetaResult?.input_dir || "",
                       input_file_count: safeBetaResult?.input_file_count || 0,
                       input_dir_files: safeBetaResult?.input_file_names || [],
-                      output_dir: safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR,
+                      output_dir: safeBetaResult?.output_dir || safeBetaDefaultOutputDir,
                     }, null, 2)}
                   </pre>
                   <button
@@ -2781,7 +3008,7 @@ export default function DashboardPage() {
                 </div>
                 <div className="flex items-start justify-between gap-3">
                   <span className="shrink-0">输出目录:</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR}</span>
+                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录"}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span>progress:</span>

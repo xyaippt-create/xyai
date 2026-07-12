@@ -11,7 +11,35 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_FEEDBACK_DIR = Path("D:/影界文件/诊断反馈") if os.name == "nt" else Path.home() / "影界文件" / "诊断反馈"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_app_data_root() -> Path:
+    settings_path = PROJECT_ROOT / "settings" / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except Exception:
+        settings = {}
+    if isinstance(settings, dict):
+        configured = str(settings.get("app_data_root") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        saved = str(settings.get("last_app_data_root") or "").strip()
+        if saved:
+            saved_path = Path(saved).expanduser()
+            try:
+                is_project_tmp = (PROJECT_ROOT / "tmp" / "runtime_data").resolve() in saved_path.resolve().parents
+            except Exception:
+                is_project_tmp = False
+            if not is_project_tmp:
+                return saved_path
+    if os.name == "nt" and Path("D:/").exists():
+        return Path("D:/影界文件")
+    documents = (Path(os.environ["USERPROFILE"]) / "Documents") if os.name == "nt" and os.environ.get("USERPROFILE") else Path.home() / "Documents"
+    return documents / "影界HDDE"
+
+
+DEFAULT_FEEDBACK_DIR = _default_app_data_root() / "诊断反馈"
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|cookie|authorization|password|secret)[\"']?\s*[:=]\s*[\"']?[^\"'\s,}]+"),

@@ -44,9 +44,19 @@ SUPPORTED_MODES = [
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
-DEFAULT_WORK_DIR_NAME = "影界文件"
-DEFAULT_INPUT_DIR_NAME = "\u8f93\u5165\u56fe\u7247"
-DEFAULT_OUTPUT_DIR_NAME = "\u8f93\u51fa\u6210\u54c1"
+APP_DATA_ROOT_NAME = "\u5f71\u754cHDDE"
+LEGACY_WORK_DIR_NAME = "\u5f71\u754c\u6587\u4ef6"
+DEFAULT_INPUT_DIR_NAME = "\u8f93\u5165"
+DEFAULT_OUTPUT_DIR_NAME = "\u8f93\u51fa"
+DEFAULT_REPORT_DIR_NAME = "\u62a5\u544a"
+DEFAULT_FEEDBACK_DIR_NAME = "\u53cd\u9988\u5305"
+DEFAULT_TMP_DIR_NAME = "\u4e34\u65f6"
+DEFAULT_DELIVERY_PACKAGE_DIR_NAME = "\u4ea4\u4ed8\u5305"
+DEFAULT_CONFIG_DIR_NAME = "\u914d\u7f6e"
+DEFAULT_BETA_UPLOAD_DIR_NAME = "beta_uploads"
+LEGACY_SAFE_BETA_INPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u5165"
+LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u51fa"
+LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME = "\u5f71\u754c\u6d4b\u8bd5\u53cd\u9988\u5305"
 BETA_LOG_QUEUE: queue.Queue[str] = queue.Queue(maxsize=256)
 
 
@@ -70,14 +80,98 @@ def enqueue_beta_log(line: str) -> None:
         pass
 
 
-def default_output_dir() -> Path:
+def _read_settings_file_safely() -> dict:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _documents_dir() -> Path:
     if os.name == "nt":
-        return Path("D:/影界文件/输出成品")
-    return Path.home() / DEFAULT_WORK_DIR_NAME / DEFAULT_OUTPUT_DIR_NAME
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            return Path(user_profile) / "Documents"
+    return Path.home() / "Documents"
+
+
+def _directory_writable(path: Path) -> tuple[bool, str]:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".hdde_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def resolve_app_data_root(settings: dict | None = None) -> dict:
+    settings = settings if isinstance(settings, dict) else _read_settings_file_safely()
+    candidates: list[tuple[str, Path]] = []
+    configured = str(settings.get("app_data_root") or "").strip()
+    saved = str(settings.get("last_app_data_root") or "").strip()
+    project_tmp_root = PROJECT_ROOT / "tmp" / "runtime_data"
+    if configured:
+        candidates.append(("user_config", Path(configured).expanduser()))
+    saved_path = Path(saved).expanduser() if saved and saved != configured else None
+    saved_is_project_tmp = False
+    if saved_path is not None:
+        try:
+            saved_is_project_tmp = project_tmp_root.resolve() in saved_path.resolve().parents or saved_path.resolve() == project_tmp_root.resolve()
+        except Exception:
+            saved_is_project_tmp = False
+    if saved_path is not None and not saved_is_project_tmp:
+        candidates.append(("saved_config", saved_path))
+    if os.name == "nt":
+        candidates.append(("d_drive", Path("D:/") / LEGACY_WORK_DIR_NAME))
+    else:
+        candidates.append(("documents", Path.home() / APP_DATA_ROOT_NAME))
+    candidates.append(("documents", _documents_dir() / APP_DATA_ROOT_NAME))
+    if saved_path is not None and saved_is_project_tmp:
+        candidates.append(("saved_config", saved_path))
+    candidates.append(("project_tmp", PROJECT_ROOT / "tmp" / "runtime_data" / APP_DATA_ROOT_NAME))
+
+    failures: list[dict] = []
+    for source, candidate in candidates:
+        writable, error = _directory_writable(candidate)
+        if writable:
+            return {
+                "path": candidate,
+                "source": source,
+                "exists": candidate.exists(),
+                "writable": True,
+                "error": "",
+                "fallback_errors": failures,
+            }
+        failures.append({"source": source, "path": str(candidate), "error": error})
+    fallback = PROJECT_ROOT / "tmp" / "runtime_data" / APP_DATA_ROOT_NAME
+    return {
+        "path": fallback,
+        "source": "project_tmp",
+        "exists": fallback.exists(),
+        "writable": False,
+        "error": failures[-1]["error"] if failures else "no writable app data root",
+        "fallback_errors": failures,
+    }
+
+
+def get_app_data_root() -> Path:
+    return Path(resolve_app_data_root()["path"])
+
+
+def default_output_dir() -> Path:
+    return get_app_data_root() / DEFAULT_OUTPUT_DIR_NAME
 
 
 def default_settings() -> dict:
+    app_data_root = get_app_data_root()
     return {
+        "app_data_root": "",
+        "last_app_data_root": str(app_data_root),
         "default_output_dir": str(default_output_dir()),
         "input_cache_policy": "keep",
         "cleanup_input_cache_days": 0,
@@ -102,6 +196,12 @@ def load_settings() -> dict:
             pass
     if any(marker in str(settings.get("default_output_dir", "")) for marker in ("闆", "杈", "澧", "雪原Ai增强引擎")):
         settings["default_output_dir"] = str(default_output_dir())
+    root_info = resolve_app_data_root(settings)
+    settings["last_app_data_root"] = str(root_info["path"])
+    default_output_text = str(settings.get("default_output_dir") or "").strip()
+    legacy_d_output = default_output_text.replace("\\", "/").startswith("D:/影界文件/")
+    if not default_output_text or (legacy_d_output and root_info["source"] != "d_drive"):
+        settings["default_output_dir"] = str(Path(root_info["path"]) / DEFAULT_OUTPUT_DIR_NAME)
     SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     return settings
 
@@ -117,12 +217,8 @@ def get_desktop_work_dirs() -> tuple[Path, Path]:
 
 
 def get_desktop_work_dirs() -> tuple[Path, Path]:
-    work_dir = Path("D:/影界文件") if os.name == "nt" else Path.home() / DEFAULT_WORK_DIR_NAME
-    input_dir = work_dir / DEFAULT_INPUT_DIR_NAME
-    output_dir = work_dir / DEFAULT_OUTPUT_DIR_NAME
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return input_dir, output_dir
+    user_dirs = resolve_hdde_user_dirs()
+    return user_dirs["normal_input_dir"], user_dirs["normal_output_dir"]
 
 
 def normalize_user_output_root(output_root: Path) -> Path:
@@ -132,17 +228,51 @@ def normalize_user_output_root(output_root: Path) -> Path:
 
 
 def resolve_hdde_user_dirs() -> dict[str, Path]:
-    base_dir = Path("D:/影界文件") if os.name == "nt" else Path.home() / DEFAULT_WORK_DIR_NAME
+    root_info = resolve_app_data_root()
+    base_dir = Path(root_info["path"])
     normal_input_dir = base_dir / DEFAULT_INPUT_DIR_NAME
-    safe_beta_input_root = base_dir / "1080P安全增强输入"
-    safe_beta_output_dir = base_dir / "1080P安全增强输出"
-    for directory in (base_dir, normal_input_dir, safe_beta_input_root, safe_beta_output_dir):
+    normal_output_dir = base_dir / DEFAULT_OUTPUT_DIR_NAME
+    report_dir = base_dir / DEFAULT_REPORT_DIR_NAME
+    feedback_dir = base_dir / DEFAULT_FEEDBACK_DIR_NAME
+    tmp_dir = base_dir / DEFAULT_TMP_DIR_NAME
+    beta_upload_dir = base_dir / DEFAULT_BETA_UPLOAD_DIR_NAME
+    delivery_package_dir = base_dir / DEFAULT_DELIVERY_PACKAGE_DIR_NAME
+    config_dir = base_dir / DEFAULT_CONFIG_DIR_NAME
+    safe_beta_input_root = base_dir / LEGACY_SAFE_BETA_INPUT_DIR_NAME
+    safe_beta_output_dir = base_dir / LEGACY_SAFE_BETA_OUTPUT_DIR_NAME
+    safe_beta_feedback_dir = base_dir / LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME
+    for directory in (
+        base_dir,
+        normal_input_dir,
+        normal_output_dir,
+        report_dir,
+        feedback_dir,
+        tmp_dir,
+        beta_upload_dir,
+        delivery_package_dir,
+        config_dir,
+        safe_beta_input_root,
+        safe_beta_output_dir,
+        safe_beta_feedback_dir,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     return {
         "base_dir": base_dir,
+        "app_data_root": base_dir,
+        "app_data_root_source": root_info["source"],
+        "app_data_root_exists": bool(root_info["exists"]),
+        "app_data_root_writable": bool(root_info["writable"]),
         "normal_input_dir": normal_input_dir,
+        "normal_output_dir": normal_output_dir,
+        "report_dir": report_dir,
+        "feedback_dir": feedback_dir,
+        "tmp_dir": tmp_dir,
+        "beta_upload_dir": beta_upload_dir,
+        "delivery_package_dir": delivery_package_dir,
+        "config_dir": config_dir,
         "safe_beta_input_root": safe_beta_input_root,
         "safe_beta_output_dir": safe_beta_output_dir,
+        "safe_beta_feedback_dir": safe_beta_feedback_dir,
     }
 
 
@@ -159,8 +289,8 @@ def safe_beta_run_id(value: str | None) -> str:
 
 def prepare_safe_beta_user_input_dir(beta_run_id: str | None) -> Path:
     user_dirs = resolve_hdde_user_dirs()
-    input_root = user_dirs["safe_beta_input_root"]
-    task_dir = input_root / f"当前任务_{safe_beta_run_id(beta_run_id)}"
+    input_root = user_dirs["beta_upload_dir"]
+    task_dir = input_root / safe_beta_run_id(beta_run_id)
     input_root_resolved = input_root.resolve()
     if task_dir.exists():
         task_dir_resolved = task_dir.resolve()
@@ -1141,6 +1271,30 @@ def build_web_app():
                         return target
             root = output_formal_dir.resolve()
             target = (output_formal_dir / filename).resolve()
+        elif kind == "safe-beta":
+            user_dirs = resolve_hdde_user_dirs()
+            candidate_roots = [
+                user_dirs["safe_beta_output_dir"],
+                user_dirs["safe_beta_input_root"],
+                user_dirs["safe_beta_feedback_dir"],
+                user_dirs["feedback_dir"],
+                user_dirs["beta_upload_dir"],
+                PROJECT_ROOT / "tmp",
+            ]
+            raw_filename = urllib.parse.unquote(filename)
+            if re.match(r"^/[a-zA-Z]:[\\/]", raw_filename):
+                raw_filename = raw_filename[1:]
+            raw_target = Path(raw_filename).expanduser()
+            target = raw_target.resolve() if raw_target.is_absolute() else (PROJECT_ROOT / raw_target).resolve()
+            for candidate_root in candidate_roots:
+                root = candidate_root.resolve()
+                try:
+                    common_path = os.path.commonpath([os.path.normcase(str(root)), os.path.normcase(str(target))])
+                except ValueError:
+                    common_path = ""
+                if common_path == os.path.normcase(str(root)) and target.exists() and target.is_file():
+                    return target
+            root = candidate_roots[0].resolve()
         else:
             raise HTTPException(status_code=404, detail="未知文件类型。")
         if root not in target.parents and target != root:
@@ -1346,8 +1500,59 @@ def build_web_app():
             )
         yield "data: [DONE]\n\n"
 
+    def app_workdir_payload() -> dict:
+        user_dirs = resolve_hdde_user_dirs()
+        input_dir_path = user_dirs["normal_input_dir"]
+        beta_upload_dir = user_dirs["beta_upload_dir"]
+        input_image_count = 0
+        if input_dir_path.exists() and input_dir_path.is_dir():
+            input_image_count = sum(
+                1
+                for item in input_dir_path.iterdir()
+                if item.is_file() and item.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+            )
+        d_drive_available = os.name == "nt" and Path("D:/").exists()
+        data = {
+            "app_data_root": str(user_dirs["app_data_root"]),
+            "app_data_root_source": str(user_dirs["app_data_root_source"]),
+            "app_data_root_exists": bool(user_dirs["app_data_root_exists"]),
+            "app_data_root_writable": bool(user_dirs["app_data_root_writable"]),
+            "d_drive_available": bool(d_drive_available),
+            "switched_from_d_drive": bool(os.name == "nt" and not d_drive_available and user_dirs["app_data_root_source"] != "d_drive"),
+            "input_dir": str(user_dirs["normal_input_dir"]),
+            "output_dir": str(user_dirs["normal_output_dir"]),
+            "legacy_output_dir": str(user_dirs["safe_beta_output_dir"]),
+            "beta_output_dir": str(user_dirs["safe_beta_output_dir"]),
+            "report_dir": str(user_dirs["report_dir"]),
+            "feedback_dir": str(user_dirs["feedback_dir"]),
+            "tmp_dir": str(user_dirs["tmp_dir"]),
+            "beta_upload_dir": str(beta_upload_dir),
+            "delivery_package_dir": str(user_dirs["delivery_package_dir"]),
+            "config_dir": str(user_dirs["config_dir"]),
+            "safe_beta_input_root": str(user_dirs["safe_beta_input_root"]),
+            "safe_beta_output_dir": str(user_dirs["safe_beta_output_dir"]),
+            "safe_beta_feedback_dir": str(user_dirs["safe_beta_feedback_dir"]),
+            "input_dir_exists": bool(input_dir_path.exists() and input_dir_path.is_dir()),
+            "input_image_count": input_image_count,
+            "beta_upload_dir_exists": bool(beta_upload_dir.exists() and beta_upload_dir.is_dir()),
+        }
+        return data
+
+    @app.get("/api/app/workdir")
+    async def get_app_workdir():
+        data = app_workdir_payload()
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "message": "当前影界工作目录已就绪。",
+            "data": data,
+            **data,
+        }
+
     @app.get("/api/health")
     async def health():
+        workdir = app_workdir_payload()
         return {
             "code": 200,
             "status": "success",
@@ -1358,6 +1563,10 @@ def build_web_app():
                 "host": SERVER_HOST,
                 "port": SERVER_PORT,
                 "default_output_dir": str(output_formal_dir),
+                "app_data_root": workdir["app_data_root"],
+                "app_data_root_source": workdir["app_data_root_source"],
+                "safe_beta_output_dir": workdir["safe_beta_output_dir"],
+                "beta_output_dir": workdir["beta_output_dir"],
                 "target_resolution": "1080P",
                 "uploadEndpoint": "/api/upload",
                 "taskEndpoint": "/api/v1/tasks/{task_id}",
@@ -1562,7 +1771,7 @@ def build_web_app():
             "skipped_count": 0,
             "processed": [],
             "skipped": [],
-            "output_dir": str(output_dir_value or "D:/影界文件/1080P安全增强输出"),
+            "output_dir": str(output_dir_value or resolve_hdde_user_dirs()["safe_beta_output_dir"]),
         }
 
     def beta_decode_selected_names(form) -> list[str]:
@@ -1628,6 +1837,23 @@ def build_web_app():
         skip_reason = first_skip.get("reason") or ""
         skip_file = first_skip.get("file") or result.get("failed_file") or ""
         stage = result.get("stage") or ("BETA_INPUT_SKIPPED" if skipped_items else "") or result.get("reason") or "BETA_FAILED"
+        output_dir_text = str(result.get("output_dir") or output_dir_value or "")
+        output_dir_path = Path(output_dir_text) if output_dir_text else Path()
+        rows = []
+        enhanced_files = []
+        for item in result.get("processed") or []:
+            if not isinstance(item, dict):
+                continue
+            input_name = item.get("input_name") or item.get("file") or ""
+            raw_output = item.get("output_path") or item.get("enhanced") or ""
+            output_path = Path(str(raw_output)) if raw_output else Path()
+            if raw_output and not output_path.is_absolute() and output_dir_text:
+                output_path = output_dir_path / output_path
+            output_name = item.get("output_name") or (output_path.name if raw_output else "")
+            output_path_text = str(output_path) if raw_output else ""
+            if output_path_text:
+                enhanced_files.append(output_path_text)
+            rows.append({"input_name": input_name, "output_name": output_name, "output_path": output_path_text})
         error = (
             result.get("error")
             or result.get("error_message")
@@ -1648,14 +1874,24 @@ def build_web_app():
             "message": beta_tail_text(error),
             "processed_count": beta_int(result.get("processed_count"), 0),
             "skipped_count": beta_int(result.get("skipped_count"), 0),
-            "enhanced_files": [],
-            "results": [],
+            "enhanced_files": enhanced_files,
+            "results": rows,
             "skipped": skipped_items,
             "input_dir": str(result.get("input_dir") or ""),
             "input_files": result.get("input_files") if isinstance(result.get("input_files"), list) else [],
             "input_file_names": result.get("input_file_names") if isinstance(result.get("input_file_names"), list) else [],
             "input_file_count": beta_int(result.get("input_file_count"), 0),
-            "output_dir": str(result.get("output_dir") or output_dir_value or ""),
+            "output_dir": output_dir_text,
+            "app_data_root": str(result.get("app_data_root") or ""),
+            "app_data_root_source": str(result.get("app_data_root_source") or ""),
+            "app_data_root_exists": bool(result.get("app_data_root_exists")),
+            "app_data_root_writable": bool(result.get("app_data_root_writable")),
+            "report_dir": str(result.get("report_dir") or ""),
+            "feedback_dir": str(result.get("feedback_dir") or ""),
+            "beta_upload_dir": str(result.get("beta_upload_dir") or ""),
+            "timeout_source": result.get("timeout_source", ""),
+            "persisted_input_files": result.get("persisted_input_files") if isinstance(result.get("persisted_input_files"), list) else [],
+            "original_to_persisted_path": result.get("original_to_persisted_path") if isinstance(result.get("original_to_persisted_path"), list) else [],
             "data": result,
         }
         return JSONResponse(status_code=status_code, content=body)
@@ -1706,10 +1942,24 @@ def build_web_app():
             "enhanced_files": enhanced_files,
             "results": rows,
             "input_dir": str(result.get("input_dir") or ""),
+            "input_dir_exists": bool(result.get("input_dir_exists")),
+            "input_image_count": beta_int(result.get("input_image_count"), len(input_files)),
             "input_files": input_files,
             "input_file_names": input_file_names,
             "input_file_count": len(input_files),
             "output_dir": str(output_dir_value),
+            "app_data_root": str(result.get("app_data_root") or ""),
+            "app_data_root_source": str(result.get("app_data_root_source") or ""),
+            "app_data_root_exists": bool(result.get("app_data_root_exists")),
+            "app_data_root_writable": bool(result.get("app_data_root_writable")),
+            "report_dir": str(result.get("report_dir") or ""),
+            "feedback_dir": str(result.get("feedback_dir") or ""),
+            "beta_upload_dir": str(result.get("beta_upload_dir") or ""),
+            "total_elapsed_seconds": result.get("total_elapsed_seconds", result.get("elapsed_seconds", "")),
+            "timeout_source": result.get("timeout_source", ""),
+            "persisted_input_files": result.get("persisted_input_files") if isinstance(result.get("persisted_input_files"), list) else [],
+            "original_to_persisted_path": result.get("original_to_persisted_path") if isinstance(result.get("original_to_persisted_path"), list) else [],
+            "timings": result.get("timings") if isinstance(result.get("timings"), dict) else {},
             "data": result,
         }
 
@@ -1717,6 +1967,27 @@ def build_web_app():
         import importlib.util
         beta_started = time.perf_counter()
         beta_run_id = str((payload or {}).get("beta_run_id") or "")
+        backend_timings = dict((payload or {}).get("timings") or {})
+        workdir_context = app_workdir_payload()
+        queue_prepare_started = time.perf_counter()
+
+        def attach_workdir_context(result: dict) -> dict:
+            for key in (
+                "app_data_root",
+                "app_data_root_source",
+                "app_data_root_exists",
+                "app_data_root_writable",
+                "report_dir",
+                "feedback_dir",
+                "beta_upload_dir",
+                "delivery_package_dir",
+                "config_dir",
+                "safe_beta_input_root",
+                "safe_beta_output_dir",
+                "safe_beta_feedback_dir",
+            ):
+                result[key] = workdir_context.get(key)
+            return result
 
         input_file_values = [
             Path(str(item)).expanduser()
@@ -1724,6 +1995,7 @@ def build_web_app():
             if str(item or "").strip()
         ]
         input_file_names = [item.name for item in input_file_values]
+        backend_timings["queue_prepare_seconds"] = round(time.perf_counter() - queue_prepare_started, 3)
         beta_stage_log(
             "BETA_REQUEST_RECEIVED",
             input_path=(payload or {}).get("input_dir"),
@@ -1755,7 +2027,7 @@ def build_web_app():
                 error_message="BETA_INPUT_MISSING",
                 beta_run_id=beta_run_id,
             )
-            return {
+            return attach_workdir_context({
                 "ok": False,
                 "success": False,
                 "beta_run_id": beta_run_id,
@@ -1769,8 +2041,8 @@ def build_web_app():
                 "skipped_count": 0,
                 "processed": [],
                 "skipped": [],
-                "output_dir": str((payload or {}).get("output_dir") or "D:/影界文件/1080P安全增强输出"),
-            }
+                "output_dir": str((payload or {}).get("output_dir") or resolve_hdde_user_dirs()["safe_beta_output_dir"]),
+            })
 
         module_path = PROJECT_ROOT / "tools" / "experiments" / "safe_1080p_enhance.py"
         if not module_path.exists():
@@ -1813,7 +2085,9 @@ def build_web_app():
         spec.loader.exec_module(module)
 
         input_dir_value = payload.get("input_dir") or str(input_file_values[0].parent)
-        output_dir_value = payload.get("output_dir") or "D:/影界文件/1080P安全增强输出"
+        user_dirs = resolve_hdde_user_dirs()
+        workdir_context = app_workdir_payload()
+        output_dir_value = payload.get("output_dir") or str(user_dirs["safe_beta_output_dir"])
         mode_value = payload.get("mode") or "safe_1080p"
         if mode_value != "safe_1080p":
             beta_stage_log(
@@ -1885,11 +2159,17 @@ def build_web_app():
             business_output=True,
             timeout_seconds=300,
             stage_logger=beta_run_stage_log,
-            diagnostic_dir=Path("D:/影界文件/影界测试反馈包"),
+            diagnostic_dir=user_dirs["safe_beta_feedback_dir"],
             input_files=[item.resolve() for item in input_file_values],
+            persisted_input_files=payload.get("persisted_input_files") if isinstance(payload.get("persisted_input_files"), list) else [],
         )
-        result = beta_result_dict(module.process(args), output_path)
+        script_started = time.perf_counter()
+        result = attach_workdir_context(beta_result_dict(module.process(args), output_path))
+        backend_timings["script_start_seconds"] = round(script_started - beta_started, 3)
+        backend_timings["backend_api_blocking_seconds"] = round(time.perf_counter() - script_started, 3)
+        backend_timings["backend_total_seconds"] = round(time.perf_counter() - beta_started, 3)
         result["beta_run_id"] = beta_run_id
+        result["timings"] = {**backend_timings, **(result.get("timings") if isinstance(result.get("timings"), dict) else {})}
         processed_count = beta_int(result.get("processed_count"), 0)
         skipped_count = beta_int(result.get("skipped_count"), 0)
         if result.get("status") != "ok" or processed_count <= 0:
@@ -1910,11 +2190,67 @@ def build_web_app():
             )
             return result
 
-        result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
+        processed_rows = [item for item in (result.get("processed") or []) if isinstance(item, dict)]
+        fast_rows = [
+            item
+            for item in processed_rows
+            if str(item.get("enhance_route") or "") in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}
+        ]
+        speed_risk_rows = [item for item in processed_rows if bool(item.get("speed_risk")) or bool(item.get("heavy_route_speed_risk"))]
+        verification_blockers: list[str] = []
+        for item in processed_rows:
+            file_name = str(item.get("file") or item.get("input_name") or "unknown")
+            route_name = str(item.get("enhance_route") or "")
+            if not route_name:
+                verification_blockers.append(f"{file_name}: missing enhance_route")
+            if not item.get("route_decision_reason"):
+                verification_blockers.append(f"{file_name}: missing route_decision_reason")
+            if item.get("roi_evidence_status") != "available":
+                verification_blockers.append(f"{file_name}: roi_evidence_status={item.get('roi_evidence_status') or 'missing'}")
+            if route_name in {"already_1080p_fast_safe_enhance", "already_1080p_balanced_fast_enhance"}:
+                if bool(item.get("uses_realesrgan")):
+                    verification_blockers.append(f"{file_name}: fast route uses_realesrgan=true")
+                if not bool(item.get("fast_route_skipped_realesrgan")):
+                    verification_blockers.append(f"{file_name}: fast route skipped_realesrgan=false")
+                try:
+                    if float(item.get("speed_actual_seconds") or 0) > 30.0:
+                        verification_blockers.append(f"{file_name}: fast route speed_actual_seconds>30")
+                except (TypeError, ValueError):
+                    verification_blockers.append(f"{file_name}: invalid speed_actual_seconds")
+            if bool(item.get("unexpected_downscale")):
+                verification_blockers.append(f"{file_name}: unexpected_downscale")
+            if item.get("quality_status") == "blocked":
+                verification_blockers.append(f"{file_name}: {item.get('quality_status_reason') or 'quality_status=blocked'}")
+        if result.get("diagnostics_consistency") == "BLOCKED":
+            verification_blockers.extend(str(item) for item in (result.get("diagnostics_consistency_blockers") or []) if item)
+        verification_blockers = list(dict.fromkeys(verification_blockers))
+        result["verification_blockers"] = verification_blockers
+        result["diagnostics_consistency"] = "PASS" if not verification_blockers else "BLOCKED"
+        result["diagnostics_consistency_blockers"] = verification_blockers
+        if fast_rows:
+            result["fast_route_speed_pass"] = all(bool(item.get("fast_route_speed_pass")) for item in fast_rows)
+            result["fast_route_quality_pass"] = all(bool(item.get("fast_route_quality_pass")) for item in fast_rows)
+            result["fast_route_final_pass"] = all(bool(item.get("fast_route_final_pass")) for item in fast_rows)
+        if verification_blockers:
+            result["verification_result"] = "BLOCKED"
+            result["generation_status"] = "generated"
+            result["quality_status"] = "blocked"
+            result["delivery_status"] = "review_before_use"
+            result["reason"] = "diagnostics_consistency_blocked"
+            result["error_message"] = "; ".join(verification_blockers[:5])
+        elif speed_risk_rows:
+            result["verification_result"] = "PASS_WITH_NOTES"
+        else:
+            result["verification_result"] = "PASS_WITH_NOTES" if skipped_count else "PASS"
+        if not verification_blockers:
+            result["generation_status"] = "generated"
+            row_statuses = [str(item.get("quality_status") or "") for item in processed_rows]
+            result["quality_status"] = "insufficient_gain" if "insufficient_gain" in row_statuses else "pass_candidate"
+            result["delivery_status"] = "review_before_use"
         result["beta_policy"] = {
             "mode": "safe_1080p",
-            "strategy": "35% protected",
-            "scope": "Chinese commercial non-portrait visuals only",
+            "strategy": "route-aware safe beta",
+            "scope": "route-aware Chinese commercial, portrait, and knowledge visuals",
             "main_pipeline": False,
         }
         beta_stage_log(
@@ -1959,6 +2295,7 @@ def build_web_app():
                 temp_input_dir.mkdir(parents=True, exist_ok=True)
                 input_files: list[str] = []
                 selected_names: list[str] = []
+                persisted_input_files: list[dict[str, str]] = []
                 declared_names = beta_decode_selected_names(form)
                 beta_stage_log(
                     "BETA_API_FILES_RECEIVED",
@@ -1988,6 +2325,12 @@ def build_web_app():
                             if not saved_path.exists() or not saved_path.is_file():
                                 raise RuntimeError(f"BETA_MULTIPART_TEMP_FILE_MISSING: {upload_name}")
                             input_files.append(str(saved_path))
+                            persisted_input_files.append(
+                                {
+                                    "original_filename": upload_name,
+                                    "persisted_path": str(saved_path),
+                                }
+                            )
                     else:
                         payload[key] = value
                 output_dir_value = payload.get("output_dir") or output_dir_value
@@ -1997,6 +2340,8 @@ def build_web_app():
                         "beta_run_id": beta_run_id,
                         "input_dir": str(temp_input_dir),
                         "input_files": input_files,
+                        "persisted_input_files": persisted_input_files,
+                        "original_to_persisted_path": persisted_input_files,
                         "selected_file_names": selected_names,
                         "flat_output": parse_bool_value(payload.get("flat_output"), True),
                         "business_output": parse_bool_value(payload.get("business_output"), True),
@@ -2107,6 +2452,9 @@ def build_web_app():
                 result["input_files"] = input_files
                 result["input_file_names"] = [Path(item).name for item in input_files]
                 result["input_file_count"] = len(input_files)
+                if isinstance(payload.get("persisted_input_files"), list):
+                    result["persisted_input_files"] = payload.get("persisted_input_files")
+                    result["original_to_persisted_path"] = payload.get("persisted_input_files")
             beta_stage_log(
                 "BETA_API_ENHANCE_DONE",
                 input_path=(payload or {}).get("input_dir"),
@@ -2165,7 +2513,7 @@ def build_web_app():
     async def beta_safe_1080p_output_status(payload: dict = Body(default_factory=dict)):
         payload = payload if isinstance(payload, dict) else {}
         beta_run_id = str(payload.get("beta_run_id") or "")
-        output_dir_value = payload.get("output_dir") or "D:/影界文件/1080P安全增强输出"
+        output_dir_value = payload.get("output_dir") or str(resolve_hdde_user_dirs()["safe_beta_output_dir"])
         output_dir = Path(str(output_dir_value)).expanduser()
         selected_names_raw = payload.get("selected_file_names") or payload.get("files") or []
         if isinstance(selected_names_raw, str):
