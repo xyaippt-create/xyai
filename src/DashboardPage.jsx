@@ -1040,7 +1040,7 @@ function makeTaskConfig(item) {
   };
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ onTaskContextChange }) {
   const fileInputRef = useRef(null);
   const processingRef = useRef(false);
   const [activeScreen, setActiveScreen] = useState("dashboard");
@@ -1094,6 +1094,37 @@ export default function DashboardPage() {
 
   const activeItem = useMemo(() => fileQueue.find((item) => item.id === activeItemId) || fileQueue.find((item) => item.status === "processing") || fileQueue.find((item) => item.status === "completed") || null, [fileQueue, activeItemId]);
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
+  const taskContextSnapshot = useMemo(() => {
+    if (!activeItem?.taskId) return null;
+    const originalSource = activeItem.originalUrl || activeItem.task_result?.original_url || activeItem.task_result?.input_url || "";
+    const resultSource =
+      activeItem.preview_output_url ||
+      activeItem.final_output_url ||
+      activeItem.task_result?.preview_output_url ||
+      activeItem.task_result?.final_output_url ||
+      "";
+    return {
+      taskId: activeItem.taskId,
+      taskResult: activeItem.task_result && typeof activeItem.task_result === "object" ? activeItem.task_result : null,
+      taskReport: activeItem.task_report && typeof activeItem.task_report === "object" ? activeItem.task_report : null,
+      debugQuality: activeItem.debug_quality && typeof activeItem.debug_quality === "object" ? activeItem.debug_quality : null,
+      comparisonAssets: originalSource && resultSource ? { originalUrl: originalSource, resultUrl: resultSource } : null,
+    };
+  }, [
+    activeItem?.taskId,
+    activeItem?.originalUrl,
+    activeItem?.preview_output_url,
+    activeItem?.final_output_url,
+    activeItem?.task_result,
+    activeItem?.task_report,
+    activeItem?.debug_quality,
+  ]);
+
+  useEffect(() => {
+    if (!taskContextSnapshot || typeof onTaskContextChange !== "function") return;
+    onTaskContextChange(taskContextSnapshot);
+  }, [onTaskContextChange, taskContextSnapshot]);
+
   const completedItems = fileQueue.filter((item) => item.status === "completed");
   const canStartExecution = (processingMode === PROCESSING_MODE_SAFE_BETA || fileQueue.length > 0) && !isProcessingQueue;
   const safeBetaDefaultOutputDir = workdirInfo?.beta_output_dir || workdirInfo?.legacy_output_dir || workdirInfo?.safe_beta_output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR;
