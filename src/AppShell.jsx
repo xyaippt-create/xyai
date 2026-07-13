@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import { APP_ROUTES } from "./appRoutes.js";
 import FeatureStatusBadge from "./FeatureStatusBadge.jsx";
 
@@ -8,6 +8,14 @@ const THEME_MODES = Object.freeze([
   { value: "dark", label: "深色" },
   { value: "light", label: "浅色" },
 ]);
+
+const AppThemeContext = createContext(null);
+
+export function useAppTheme() {
+  const context = useContext(AppThemeContext);
+  if (!context) throw new Error("useAppTheme must be used inside AppShell.");
+  return context;
+}
 
 function readStoredThemeMode() {
   try {
@@ -68,9 +76,11 @@ export default function AppShell({ route, currentPath, onNavigate, legacyDarkCom
   };
 
   const showLegacyCompatibilityNotice = legacyDarkCompatibility && resolvedTheme === "light";
+  const themeContextValue = { themeMode, resolvedTheme, themeModes: THEME_MODES, selectThemeMode };
 
   return (
-    <div className="hdde-app-shell" data-resolved-theme={resolvedTheme}>
+    <AppThemeContext.Provider value={themeContextValue}>
+      <div className="hdde-app-shell" data-resolved-theme={resolvedTheme}>
       <aside className="hdde-sidebar" aria-label="影界HDDE一级导航">
         <div className="hdde-sidebar-brand">
           <p className="hdde-eyebrow">多分辨率交付平台</p>
@@ -135,6 +145,7 @@ export default function AppShell({ route, currentPath, onNavigate, legacyDarkCom
           <div className={legacyDarkCompatibility ? "hdde-legacy-surface" : "hdde-platform-surface"}>{children}</div>
         </main>
       </div>
-    </div>
+      </div>
+    </AppThemeContext.Provider>
   );
 }

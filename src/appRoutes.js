@@ -115,7 +115,7 @@ export const APP_ROUTES = Object.freeze([
     key: "settings",
     name: "系统设置",
     path: "/settings",
-    status: FEATURE_STATUSES.IN_DEVELOPMENT,
+    status: FEATURE_STATUSES.BETA,
     pageTitle: "系统设置",
     description: "用于承载主题偏好、本地目录状态和平台信息。",
     implementationType: "placeholder",

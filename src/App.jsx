@@ -4,6 +4,7 @@ import DashboardPage from "./DashboardPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
 import Safe1080pBetaPage from "./Safe1080pBetaPage.jsx";
+import SystemSettingsPage from "./SystemSettingsPage.jsx";
 import FeaturePlaceholderPage, { UnknownRoutePage } from "./FeaturePlaceholderPage.jsx";
 import { DEFAULT_APP_PATH, findAppRoute, normalizeAppPath } from "./appRoutes.js";
 import { validateComparisonAssets, validateQualityReport } from "./platformStatus.js";
@@ -179,6 +180,8 @@ export default function App() {
   } else if (route.key === "safe-1080p-beta") {
     legacyDarkCompatibility = true;
     content = <Safe1080pBetaPage onBackToDashboard={() => navigateTo(DEFAULT_APP_PATH)} />;
+  } else if (route.key === "settings") {
+    content = <SystemSettingsPage />;
   } else {
     content = <FeaturePlaceholderPage route={route} />;
   }
