@@ -1,0 +1,215 @@
+{
+  "schema": "hdde_image_upload_adaptation_visual_review_fixture_v1",
+  "authority": {
+    "status_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+    "status_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816",
+    "real_alpha_failure_cross_evidence_path": "C:\\Users\\xyppt\\.codex\\attachments\\41af1f2c-f3c9-421a-a0dd-7ec01181def3\\pasted-text.txt",
+    "real_alpha_failure_cross_evidence_sha256": "a5939be028095527e1e56618062b9fe9478a9a803c6f469c01cdbbf4b6c54bef"
+  },
+  "reviews": [
+    {
+      "task_id": "people_jpeg__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "people_jpeg__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "historical_jpeg__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "historical_jpeg__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "historical_jpeg__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_title__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_small__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "logo_product__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "dark_material__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "light_infographic__D",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "real_alpha__D",
+      "visual_review_status": "FAIL",
+      "review_notes": [
+        "结果图中“ALPHA COPY 01—14”等多行正式小字，在最终图片原生100%尺寸下已经接近或达到无法正常阅读，结果不再具备安全交付价值。"
+      ],
+      "review_notes_availability": "PERSISTED_CROSS_EVIDENCE",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816",
+      "review_note_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\41af1f2c-f3c9-421a-a0dd-7ec01181def3\\pasted-text.txt",
+      "review_note_source_sha256": "a5939be028095527e1e56618062b9fe9478a9a803c6f469c01cdbbf4b6c54bef"
+    },
+    {
+      "task_id": "real_alpha__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "real_alpha__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_title__B",
+      "visual_review_status": "PASS",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_small__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "logo_product__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "dark_material__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "light_infographic__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_title__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [],
+      "review_notes_availability": "NOT_PERSISTED",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\7d6174a7-287a-49f0-b930-d0ff07217bf4\\pasted-text.txt",
+      "review_source_sha256": "3d3287fbc84373b6eb5c83f93155ff4ae4287e0d1ab54df85f2eae4222a96816"
+    },
+    {
+      "task_id": "cn_small__B",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [
+        "候选图原生100%尺寸下，核心标题、人物名称、品牌Logo及主要说明保持可读；蓝色辅助说明与底部小字锐度略有下降，阅读压力有所增加，但未造成核心信息丢失。允许交付，不建议继续降低像素尺寸。"
+      ],
+      "review_notes_availability": "PERSISTED",
+      "review_source_type": "USER_AUTHORIZED_MANUAL_REVIEW",
+      "review_source_reference": "HDDE_STAGE2_FINAL_FOUR_TASK_REVIEW_20260716",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\11ebb5bb-5beb-4de6-a522-f977902f597e\\pasted-text.txt",
+      "review_source_sha256": "314d22c530bfc62ff13c132a4d1f91dfd4c4154871fffedae5874c8381316cfa"
+    },
+    {
+      "task_id": "dark_material__B",
+      "visual_review_status": "PASS",
+      "review_notes": [
+        "候选图原生100%尺寸下，黑色丝绒层次、金属高光、钻石切面及蓝色宝石细节保持稳定，未发现黑位压死、色带、轮廓丢失或材质身份改变，文字与主体均具备安全交付价值。"
+      ],
+      "review_notes_availability": "PERSISTED",
+      "review_source_type": "USER_AUTHORIZED_MANUAL_REVIEW",
+      "review_source_reference": "HDDE_STAGE2_FINAL_FOUR_TASK_REVIEW_20260716",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\11ebb5bb-5beb-4de6-a522-f977902f597e\\pasted-text.txt",
+      "review_source_sha256": "314d22c530bfc62ff13c132a4d1f91dfd4c4154871fffedae5874c8381316cfa"
+    },
+    {
+      "task_id": "light_infographic__C",
+      "visual_review_status": "PASS",
+      "review_notes": [
+        "候选图原生100%尺寸下，主标题、四组动作说明、浅蓝连接线、节点、卡片边界及图标均保持清楚，信息层级和阅读路径完整，未发现浅色元素丢失或关键文字不可读。"
+      ],
+      "review_notes_availability": "PERSISTED",
+      "review_source_type": "USER_AUTHORIZED_MANUAL_REVIEW",
+      "review_source_reference": "HDDE_STAGE2_FINAL_FOUR_TASK_REVIEW_20260716",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\11ebb5bb-5beb-4de6-a522-f977902f597e\\pasted-text.txt",
+      "review_source_sha256": "314d22c530bfc62ff13c132a4d1f91dfd4c4154871fffedae5874c8381316cfa"
+    },
+    {
+      "task_id": "logo_product__C",
+      "visual_review_status": "PASS_WITH_NOTES",
+      "review_notes": [
+        "候选图原生100%尺寸下，品牌Logo、产品轮廓、灯组、轮毂、主要功能标签及核心数据保持完整；底部规格标注和极小辅助文字锐度略有下降，但不影响品牌识别和核心产品信息。允许交付，不建议继续降低尺寸。"
+      ],
+      "review_notes_availability": "PERSISTED",
+      "review_source_type": "USER_AUTHORIZED_MANUAL_REVIEW",
+      "review_source_reference": "HDDE_STAGE2_FINAL_FOUR_TASK_REVIEW_20260716",
+      "review_source_path": "C:\\Users\\xyppt\\.codex\\attachments\\11ebb5bb-5beb-4de6-a522-f977902f597e\\pasted-text.txt",
+      "review_source_sha256": "314d22c530bfc62ff13c132a4d1f91dfd4c4154871fffedae5874c8381316cfa"
+    }
+  ]
+}
