@@ -53,6 +53,7 @@ DEFAULT_FEEDBACK_DIR_NAME = "\u53cd\u9988\u5305"
 DEFAULT_TMP_DIR_NAME = "\u4e34\u65f6"
 DEFAULT_DELIVERY_PACKAGE_DIR_NAME = "\u4ea4\u4ed8\u5305"
 DEFAULT_CONFIG_DIR_NAME = "\u914d\u7f6e"
+DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT = Path("D:/\u5f71\u754c\u6587\u4ef6/\u56fe\u7247\u538b\u7f29\u8f93\u51fa")
 DEFAULT_BETA_UPLOAD_DIR_NAME = "beta_uploads"
 LEGACY_SAFE_BETA_INPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u5165"
 LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u51fa"
@@ -173,6 +174,7 @@ def default_settings() -> dict:
         "app_data_root": "",
         "last_app_data_root": str(app_data_root),
         "default_output_dir": str(default_output_dir()),
+        "image_compression_default_output_root": str(DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
         "input_cache_policy": "keep",
         "cleanup_input_cache_days": 0,
         "cleanup_input_cache_max_files": 0,
@@ -966,6 +968,7 @@ def build_web_app():
         raise RuntimeError("缺少 FastAPI 服务依赖，请先安装 requirements.txt。") from exc
 
     from backend.v036_output_core import build_output_plan, sha256_file
+    from backend.image_compression_api import register_image_compression_routes
     from engine.diagnostics.feedback_bundle import generate_feedback_bundle
     from engine.pipeline import process_v046_delivery
 
@@ -997,7 +1000,6 @@ def build_web_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
     def save_settings(next_settings: dict) -> None:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_PATH.write_text(json.dumps(next_settings, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1146,6 +1148,24 @@ def build_web_app():
     def resolve_output_dir_for_open(output_dir_value: str | None) -> dict:
         checked = validate_output_dir_value(output_dir_value, allow_create=False, source_hint="request")
         return checked
+
+    def compression_output_settings_provider() -> dict[str, str]:
+        return {
+            "built_in_default_root": str(DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
+            "saved_default_root": str(settings_data.get("image_compression_default_output_root") or DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
+        }
+
+    def save_compression_default_output_root(value: str) -> None:
+        settings_data["image_compression_default_output_root"] = value
+        save_settings(settings_data)
+
+    register_image_compression_routes(
+        app,
+        user_dirs_provider=resolve_hdde_user_dirs,
+        output_settings_provider=compression_output_settings_provider,
+        output_default_saver=save_compression_default_output_root,
+        output_dir_validator=lambda value: validate_output_dir_value(value, source_hint="image_compression"),
+    )
 
     def update_task_result_output_meta(task_result: dict, task: dict, final_path: Path) -> dict:
         meta = task.get("output_dir_meta") or {}
@@ -1618,7 +1638,12 @@ def build_web_app():
         }
 
     @app.post("/api/output/select-popup")
-    async def select_output_popup():
+    async def select_output_popup(payload: dict = Body(default_factory=dict)):
+        unknown_fields = sorted(str(key) for key in payload if key not in {"persist_last_output_dir"})
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"文件夹选择请求包含未知字段：{', '.join(unknown_fields)}。")
+        persist_last_output_dir = payload.get("persist_last_output_dir", True) is not False
+
         def ask_directory() -> str:
             import tkinter as tk
             from tkinter import filedialog
@@ -1630,7 +1655,7 @@ def build_web_app():
             except Exception:
                 pass
             try:
-                selected = filedialog.askdirectory(title="选择雪原增强引擎高清成品输出文件夹")
+                selected = filedialog.askdirectory(title="选择影界输出文件夹")
             finally:
                 root.destroy()
             return selected or ""
@@ -1667,8 +1692,9 @@ def build_web_app():
                 "output_dir": "",
                 "data": checked,
             }
-        settings_data["last_output_dir"] = checked["normalized_path"]
-        save_settings(settings_data)
+        if persist_last_output_dir:
+            settings_data["last_output_dir"] = checked["normalized_path"]
+            save_settings(settings_data)
         return {
             "code": 200,
             "status": "success",

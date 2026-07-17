@@ -35,10 +35,10 @@ export const APP_ROUTES = Object.freeze([
     key: "compression",
     name: "图片压缩",
     path: "/compression",
-    status: FEATURE_STATUSES.PLANNED,
+    status: FEATURE_STATUSES.BETA,
     pageTitle: "图片压缩",
-    description: "用于比较文件体积与可见画质收益，并由人工决定是否采用候选文件。",
-    implementationType: "placeholder",
+    description: "无损压缩、尺寸缩小与上传适配",
+    implementationType: "existing",
     plannedCapabilities: ["体积收益比较", "格式候选查看", "人工采用判断"],
   },
   {

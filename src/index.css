@@ -1049,3 +1049,1101 @@ select {
     animation: vmpSpinSlow 8s linear infinite;
   }
 }
+
+/* Stage 4 image-compression workbench. */
+.hdde-compression-page {
+  display: grid;
+  width: min(100%, 1380px);
+  min-width: 0;
+  gap: 12px;
+  margin: 0 auto;
+  color: var(--text-primary);
+}
+
+.hdde-compression-runtimebar {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 3px 8px;
+  border-bottom: 1px solid var(--divider-color);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-compression-runtimebar strong {
+  color: var(--status-info);
+}
+
+.hdde-compression-runtimebar span i {
+  margin-right: 4px;
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.hdde-compression-runtimebar span.is-connected i {
+  color: var(--status-success);
+}
+
+.hdde-compression-runtimebar small,
+.hdde-compression-offline-note {
+  color: var(--text-muted);
+}
+
+.hdde-compression-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 58fr) minmax(320px, 42fr);
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--card-background);
+  box-shadow: 0 12px 36px var(--shadow-color);
+}
+
+.hdde-compression-source-panel,
+.hdde-compression-control-panel {
+  min-width: 0;
+  padding: 16px;
+}
+
+.hdde-compression-source-panel {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  border-right: 1px solid var(--divider-color);
+}
+
+.hdde-compression-dropzone {
+  position: relative;
+  display: grid;
+  min-height: 340px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px dashed color-mix(in srgb, var(--text-muted) 70%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(45deg, color-mix(in srgb, var(--elevated-background) 88%, transparent) 25%, transparent 25%) 0 0 / 18px 18px,
+    linear-gradient(-45deg, color-mix(in srgb, var(--elevated-background) 88%, transparent) 25%, transparent 25%) 0 0 / 18px 18px,
+    var(--content-background);
+}
+
+.hdde-compression-dropzone.has-file {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 30%);
+  align-items: stretch;
+  justify-items: stretch;
+  border-style: solid;
+}
+
+.hdde-compression-dropzone > input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hdde-compression-empty-source {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 32px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.hdde-compression-empty-source strong {
+  color: var(--text-primary);
+  font-size: 17px;
+}
+
+.hdde-compression-empty-source span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.hdde-compression-empty-source b {
+  padding: 8px 13px;
+  border-radius: 8px;
+  background: var(--brand-primary);
+  color: #fff;
+  font-size: 12px;
+}
+
+.hdde-compression-pending-source {
+  display: grid;
+  place-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-compression-pending-source strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.hdde-compression-dropzone figure {
+  min-width: 0;
+  margin: 0;
+  border-right: 1px solid var(--divider-color);
+}
+
+.hdde-compression-file-meta {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-compression-file-meta strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdde-compression-file-meta code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdde-compression-source-actions,
+.hdde-compression-result-actions,
+.hdde-compression-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hdde-compression-review-actions {
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.hdde-compression-review-actions > button {
+  display: inline-flex;
+  width: 112px;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  box-sizing: border-box;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.hdde-compression-control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hdde-compression-section-label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.hdde-compression-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.hdde-compression-mode-tabs button {
+  min-height: 42px;
+  padding: 7px 8px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--content-background);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-compression-mode-tabs button.is-active {
+  border-color: var(--brand-primary);
+  background: var(--feature-enabled-background);
+  color: var(--feature-enabled-color);
+  font-weight: 700;
+}
+
+.hdde-compression-mode-tabs button small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.hdde-compression-mode-help {
+  min-height: 36px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.hdde-compression-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hdde-upload-dimension-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px minmax(0, 1fr);
+  align-items: end;
+  gap: 10px;
+}
+
+.hdde-compression-settings label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-aspect-ratio-lock {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 37px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--content-background);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hdde-aspect-ratio-lock:hover:not(:disabled) {
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+}
+
+.hdde-aspect-ratio-lock:focus-visible {
+  outline: none;
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.hdde-aspect-ratio-lock.is-locked {
+  border-color: var(--brand-primary);
+  background: color-mix(in srgb, var(--brand-primary) 9%, var(--content-background));
+  color: var(--brand-primary);
+  font-weight: 600;
+}
+
+.hdde-aspect-ratio-lock:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.hdde-upload-aspect-ratio-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--brand-primary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.hdde-long-image-field-warning {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--status-warning) 9%, transparent);
+  color: var(--status-warning);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.hdde-long-image-preflight,
+.hdde-long-image-result-audit,
+.hdde-resize-result-audit {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--status-info) 30%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--status-info) 6%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.hdde-long-image-preflight strong,
+.hdde-long-image-result-audit strong,
+.hdde-resize-result-audit strong {
+  color: var(--text-primary);
+}
+
+.hdde-resize-estimate {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--brand-primary) 4%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.hdde-resize-estimate strong {
+  color: var(--text-primary);
+}
+
+.hdde-long-image-preflight p {
+  margin: 0;
+}
+
+.hdde-long-image-preflight label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  color: var(--status-warning);
+}
+
+.hdde-long-image-preflight input {
+  width: 15px;
+  height: 15px;
+}
+
+.hdde-long-image-preflight.is-blocked {
+  border-color: color-mix(in srgb, var(--status-danger) 40%, transparent);
+  background: color-mix(in srgb, var(--status-danger) 8%, transparent);
+}
+
+.hdde-compression-settings input,
+.hdde-compression-settings select,
+.hdde-compression-review-note textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+  background: var(--content-background);
+  color: var(--text-primary);
+}
+
+.hdde-compression-settings input,
+.hdde-compression-settings select {
+  height: 37px;
+  padding: 0 9px;
+}
+
+.hdde-compression-settings input:focus,
+.hdde-compression-settings select:focus,
+.hdde-compression-review-note textarea:focus {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.hdde-compression-size-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 66px;
+  gap: 5px;
+}
+
+.hdde-compression-output-location {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--elevated-background);
+}
+
+.hdde-compression-output-location .hdde-compression-section-label {
+  margin-bottom: 0;
+}
+
+.hdde-compression-output-location > code {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdde-compression-output-location > small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hdde-compression-output-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.hdde-compression-output-actions label {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hdde-compression-output-actions select {
+  height: 32px;
+  min-width: 118px;
+  padding: 0 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--content-background);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.hdde-compression-safety,
+.hdde-compression-error {
+  padding: 9px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hdde-compression-safety.is-valid {
+  border: 1px solid color-mix(in srgb, var(--status-success) 35%, transparent);
+  background: color-mix(in srgb, var(--status-success) 9%, transparent);
+  color: var(--status-success);
+}
+
+.hdde-compression-safety.is-neutral {
+  border: 1px solid var(--border-color);
+  background: var(--elevated-background);
+  color: var(--text-secondary);
+}
+
+.hdde-compression-safety.is-warning {
+  border: 1px solid color-mix(in srgb, var(--status-warning) 35%, transparent);
+  background: color-mix(in srgb, var(--status-warning) 8%, transparent);
+  color: var(--status-warning);
+}
+
+.hdde-compression-safety.is-invalid,
+.hdde-compression-error {
+  border: 1px solid color-mix(in srgb, var(--status-danger) 35%, transparent);
+  background: color-mix(in srgb, var(--status-danger) 9%, transparent);
+  color: var(--status-danger);
+}
+
+.hdde-compression-run {
+  width: auto;
+  min-height: 41px;
+  align-self: flex-start;
+  padding-inline: 18px !important;
+}
+
+.hdde-compression-page .hdde-primary-action,
+.hdde-compression-page .hdde-secondary-action,
+.hdde-compression-page .hdde-danger-action,
+.hdde-compression-page .hdde-link-action {
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.hdde-compression-page .hdde-secondary-action {
+  border: 1px solid var(--border-color);
+  background: var(--content-background);
+  color: var(--text-primary);
+}
+
+.hdde-compression-page .hdde-danger-action {
+  border: 1px solid color-mix(in srgb, var(--status-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--status-danger) 10%, transparent);
+  color: var(--status-danger);
+}
+
+.hdde-compression-page .hdde-link-action {
+  border: 0;
+  background: transparent;
+  color: var(--feature-enabled-color);
+}
+
+.hdde-compression-page button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.hdde-compression-results {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--card-background);
+}
+
+.hdde-compression-results.is-empty {
+  min-height: 58px;
+  padding: 9px 12px;
+}
+
+.hdde-compression-results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.hdde-compression-results-heading strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.hdde-compression-empty-result {
+  display: grid;
+  min-height: 38px;
+  place-items: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.hdde-compression-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.hdde-compression-metric {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--elevated-background);
+}
+
+.hdde-compression-metric span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hdde-compression-metric strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdde-compression-constraints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.hdde-compression-constraints span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.hdde-compression-constraints .is-met {
+  background: color-mix(in srgb, var(--status-success) 10%, transparent);
+  color: var(--status-success);
+}
+
+.hdde-compression-constraints .is-unmet {
+  background: color-mix(in srgb, var(--status-danger) 10%, transparent);
+  color: var(--status-danger);
+}
+
+.hdde-compression-previews {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hdde-compression-previews figure {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--content-background);
+}
+
+.hdde-product-preview {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.hdde-compression-preview-toolbar {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 11px;
+  border-bottom: 1px solid var(--divider-color);
+}
+
+.hdde-compression-preview-toolbar figcaption {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.hdde-compression-preview-modes,
+.hdde-long-image-switch,
+.hdde-long-image-anchors {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.hdde-compression-preview-modes {
+  justify-content: flex-end;
+}
+
+.hdde-compression-preview-modes button,
+.hdde-long-image-switch button,
+.hdde-long-image-anchors button {
+  padding: 5px 7px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--content-background);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.hdde-compression-preview-modes button.is-active,
+.hdde-long-image-switch button.is-active {
+  border-color: var(--brand-primary);
+  background: var(--feature-enabled-background);
+  color: var(--feature-enabled-color);
+}
+
+.hdde-long-image-anchors {
+  justify-content: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--divider-color);
+}
+
+.hdde-long-image-anchors span {
+  min-width: 36px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: right;
+}
+
+.hdde-compression-preview-canvas {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 190px;
+  max-height: 310px;
+  place-items: center;
+  overflow: auto;
+  background: #fff;
+}
+
+.hdde-compression-preview-canvas img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+}
+
+.hdde-product-preview.is-fit-width .hdde-compression-preview-canvas {
+  display: block;
+  place-items: initial;
+}
+
+.hdde-product-preview.is-fit-width img {
+  width: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: unset;
+}
+
+.hdde-product-preview.is-actual-size .hdde-compression-preview-canvas {
+  display: block;
+  place-items: initial;
+}
+
+.hdde-product-preview.is-actual-size img {
+  width: auto;
+  max-width: none;
+  max-height: none;
+  object-fit: unset;
+}
+
+.hdde-product-preview.is-overview img {
+  width: auto;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+}
+
+.hdde-product-preview.is-long-image .hdde-compression-preview-canvas {
+  max-height: min(64vh, 620px);
+  align-content: start;
+}
+
+.hdde-product-preview.is-fullscreen {
+  position: fixed;
+  z-index: 1000;
+  inset: 12px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--card-background);
+  box-shadow: 0 30px 80px rgb(0 0 0 / 40%);
+}
+
+.hdde-product-preview.is-fullscreen .hdde-compression-preview-canvas {
+  max-height: none;
+  min-height: 0;
+}
+
+.hdde-preview-scale-note {
+  display: block;
+  padding: 6px 9px;
+  border-top: 1px solid var(--divider-color);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hdde-long-image-badge {
+  color: var(--status-info);
+  font-weight: 700;
+}
+
+.hdde-long-image-compare,
+.hdde-no-candidate-state {
+  display: grid;
+  gap: 8px;
+}
+
+.hdde-long-image-switch {
+  justify-content: center;
+}
+
+.hdde-long-image-compare figure,
+.hdde-no-candidate-state figure {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--content-background);
+}
+
+.hdde-no-candidate-state > div:last-child {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  min-height: 78px;
+  padding: 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 9px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.hdde-no-candidate-state strong {
+  color: var(--text-primary);
+}
+
+.hdde-long-image-review-checklist {
+  display: grid;
+  gap: 4px;
+}
+
+.hdde-long-image-review-checklist ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.hdde-feedback-package-result {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--status-success) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--status-success) 7%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.hdde-feedback-package-result code {
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: var(--content-background);
+  overflow-wrap: anywhere;
+}
+
+.hdde-feedback-package-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.hdde-feedback-package-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hdde-feedback-package-heading > div > span {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--status-success) 14%, transparent);
+  color: var(--status-success);
+  font-size: 10px;
+}
+
+.hdde-feedback-package-heading small,
+.hdde-feedback-package-result > small {
+  color: var(--text-muted);
+}
+
+.hdde-feedback-package-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.hdde-feedback-package-actions .hdde-primary-action,
+.hdde-feedback-package-actions .hdde-secondary-action {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 7px 10px;
+  text-decoration: none;
+}
+
+.hdde-feedback-package-notice {
+  color: var(--status-success);
+}
+
+.hdde-feedback-package-error {
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--status-danger) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--status-danger) 9%, transparent);
+  color: var(--status-danger);
+  font-size: 12px;
+}
+
+.hdde-compression-code-list,
+.hdde-compression-review {
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--status-warning) 35%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--status-warning) 8%, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.hdde-compression-code-list strong,
+.hdde-compression-review strong {
+  color: var(--text-primary);
+}
+
+.hdde-compression-code-list ul,
+.hdde-compression-code-list p {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.hdde-compression-code-list.is-danger {
+  border-color: color-mix(in srgb, var(--status-danger) 35%, transparent);
+  background: color-mix(in srgb, var(--status-danger) 8%, transparent);
+}
+
+.hdde-compression-review {
+  display: grid;
+  gap: 10px;
+  border-color: color-mix(in srgb, var(--status-info) 35%, transparent);
+  background: color-mix(in srgb, var(--status-info) 7%, transparent);
+}
+
+.hdde-compression-review > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.hdde-compression-review-note {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px;
+}
+
+.hdde-compression-review-note label {
+  grid-column: 1 / -1;
+}
+
+.hdde-compression-review-note textarea {
+  min-height: 66px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.hdde-compression-sha > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 10px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.hdde-compression-sha summary {
+  cursor: pointer;
+  color: var(--feature-enabled-color);
+  font-size: 11px;
+}
+
+.hdde-compression-sha code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdde-compression-contract {
+  border-top: 1px solid var(--divider-color);
+  padding-top: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.hdde-compression-contract summary {
+  cursor: pointer;
+  color: var(--feature-enabled-color);
+}
+
+.hdde-compression-contract > div {
+  display: grid;
+  gap: 1px;
+  max-height: 360px;
+  margin-top: 9px;
+  overflow: auto;
+}
+
+.hdde-compression-contract > div > div {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 10px;
+  padding: 5px 7px;
+  background: var(--elevated-background);
+}
+
+.hdde-compression-contract code {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+@media (max-width: 1050px) {
+  .hdde-compression-workbench {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hdde-compression-source-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--divider-color);
+  }
+
+  .hdde-compression-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1051px) and (max-height: 820px) {
+  .hdde-compression-workbench {
+    min-height: 360px;
+  }
+
+  .hdde-compression-source-panel,
+  .hdde-compression-control-panel {
+    padding: 12px;
+  }
+
+  .hdde-compression-dropzone {
+    min-height: 300px;
+  }
+
+  .hdde-compression-mode-help {
+    min-height: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .hdde-compression-runtimebar,
+  .hdde-compression-results-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hdde-compression-header-status {
+    justify-items: start;
+  }
+
+  .hdde-compression-mode-tabs,
+  .hdde-compression-settings,
+  .hdde-compression-previews,
+  .hdde-compression-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hdde-upload-dimension-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hdde-compression-dropzone.has-file {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hdde-compression-dropzone figure {
+    border-right: 0;
+    border-bottom: 1px solid var(--divider-color);
+  }
+
+  .hdde-compression-review-note,
+  .hdde-compression-contract > div > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

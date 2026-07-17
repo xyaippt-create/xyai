@@ -4,6 +4,7 @@ import DashboardPage from "./DashboardPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
 import Safe1080pBetaPage from "./Safe1080pBetaPage.jsx";
+import CompressionPage from "./CompressionPage.jsx";
 import SystemSettingsPage from "./SystemSettingsPage.jsx";
 import FeaturePlaceholderPage, { UnknownRoutePage } from "./FeaturePlaceholderPage.jsx";
 import { DEFAULT_APP_PATH, findAppRoute, normalizeAppPath } from "./appRoutes.js";
@@ -180,6 +181,8 @@ export default function App() {
   } else if (route.key === "safe-1080p-beta") {
     legacyDarkCompatibility = true;
     content = <Safe1080pBetaPage onBackToDashboard={() => navigateTo(DEFAULT_APP_PATH)} />;
+  } else if (route.key === "compression") {
+    content = <CompressionPage />;
   } else if (route.key === "settings") {
     content = <SystemSettingsPage />;
   } else {
@@ -193,13 +196,15 @@ export default function App() {
       onNavigate={navigateTo}
       legacyDarkCompatibility={legacyDarkCompatibility}
     >
-      <div
-        hidden={route?.key !== "processing"}
-        aria-hidden={route?.key !== "processing"}
-        inert={route?.key !== "processing" ? "" : undefined}
-      >
-        <DashboardPage onTaskContextChange={rememberTaskContext} />
-      </div>
+      {route?.key === "compression" ? null : (
+        <div
+          hidden={route?.key !== "processing"}
+          aria-hidden={route?.key !== "processing"}
+          inert={route?.key !== "processing" ? "" : undefined}
+        >
+          <DashboardPage onTaskContextChange={rememberTaskContext} />
+        </div>
+      )}
       {route?.key === "processing" ? null : content}
     </AppShell>
   );
