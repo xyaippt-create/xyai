@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { PRODUCT_BRAND_LINE, PRODUCT_VERSION_LABEL } from "./productVersion.js";
 
-const PAGE_FOOTER = "影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎";
+const PAGE_FOOTER = PRODUCT_BRAND_LINE;
 
 const checkGroups = [
   {
@@ -13,7 +14,7 @@ const checkGroups = [
     key: "paths",
     label: "Paths",
     title: "路径与目录",
-    items: ["输入图片", "输出成品", "logs", "runtime"],
+    items: ["1080P标准增强输出", "1080P安全增强输出", "图片压缩输出", "诊断日志"],
   },
   {
     key: "dependencies",
@@ -37,7 +38,7 @@ const initialStatus = checkGroups.reduce((acc, group) => {
 function StatusPill({ status }) {
   const config = {
     waiting: "border-white/10 bg-white/5 text-white/45",
-    running: "border-[#3cb3a0]/50 bg-[#3cb3a0]/10 text-[#8effed]",
+    running: "border-[#8fb0ff]/50 bg-[#2d6fe8]/12 text-[#9ab7ff]",
     done: "border-emerald-400/40 bg-emerald-400/10 text-emerald-300",
   };
   const label = {
@@ -51,8 +52,8 @@ function StatusPill({ status }) {
 function CinematicTerrain() {
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      <div className="absolute inset-0 bg-[#090e10]" />
-      <div className="absolute inset-x-0 top-0 h-px bg-[#263738]" />
+      <div className="absolute inset-0 bg-[#090d14]" />
+      <div className="absolute inset-x-0 top-0 h-px bg-[#2a3546]" />
     </div>
   );
 }
@@ -68,7 +69,7 @@ function SculptedTitle() {
           影界 HDDE
         </h1>
         <p className="mx-auto mt-8 max-w-2xl text-sm leading-8 text-white/62">
-          中文视觉高清交付引擎。以真实画质恢复为核心，保护构图、色彩与原始风格。当前版本锁定 V0.4 1080P 稳定交付基线。
+          中文视觉高清交付引擎。以真实画质恢复为核心，保护构图、色彩与原始风格。当前开发分支版本为 {PRODUCT_VERSION_LABEL}。
         </p>
       </div>
     </div>
@@ -100,7 +101,7 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
 
   const snapshot = useMemo(
     () => ({
-      appVersion: "影界 HDDE V0.4",
+      appVersion: `影界 HDDE ${PRODUCT_VERSION_LABEL}`,
       runtimeReady: allDone,
       checks: statusMap,
       gpuInfo: "Local GPU / CPU Adaptive",
@@ -119,7 +120,7 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
 
   return (
     <section
-      className={`relative flex h-screen w-screen select-none flex-col justify-between overflow-hidden bg-[#090e10] p-6 text-slate-100 transition-all duration-500 ease-out ${
+      className={`relative flex h-screen w-screen select-none flex-col justify-between overflow-hidden bg-[#090d14] p-6 text-slate-100 transition-all duration-500 ease-out ${
         isExiting ? "pointer-events-none -translate-y-4 scale-[0.98] opacity-0" : "translate-y-0 opacity-100"
       }`}
     >
@@ -131,10 +132,10 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
             const status = statusMap[group.key];
             const active = index === activeIndex;
             return (
-              <div key={group.key} className={`rounded-lg border p-6 transition ${active ? "border-[#6f8f8a] bg-[#101819]" : "border-white/10 bg-white/[0.035]"}`}>
+              <div key={group.key} className={`rounded-lg border p-6 transition ${active ? "border-[#5b8cf0] bg-[#151d2a]" : "border-white/10 bg-white/[0.035]"}`}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="text-left">
-                    <p className="font-mono text-xs uppercase tracking-[0.38em] text-[#418c80]">{group.label}</p>
+                    <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#8fb0ff]">{group.label}</p>
                     <h2 className="mt-3 text-xl font-semibold text-white">{group.title}</h2>
                   </div>
                   <StatusPill status={status} />
@@ -159,14 +160,14 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
             setIsExiting(false);
             onOpenSafeBeta?.();
           }}
-          className="mt-6 w-full max-w-7xl rounded-lg border border-[#3cb3a0]/45 bg-[#101819] px-6 py-5 text-left transition hover:border-[#7af4df]/70 hover:bg-[#132022]"
+          className="mt-6 w-full max-w-7xl rounded-lg border border-[#8fb0ff]/45 bg-[#111827] px-6 py-5 text-left transition hover:border-[#9ab7ff]/70 hover:bg-[#17233a]"
         >
-          <span className="font-mono text-xs uppercase tracking-[0.28em] text-[#7af4df]">Beta Entry</span>
-          <span className="mt-2 block text-xl font-semibold text-white">1080P安全增强 Beta</span>
-          <span className="mt-2 block text-sm leading-6 text-white/58">适用于中文商业非人像图，当前为独立 Beta 功能</span>
+          <span className="font-mono text-xs uppercase tracking-[0.22em] text-[#9ab7ff]">安全增强</span>
+          <span className="mt-2 block text-xl font-semibold text-white">1080P安全增强</span>
+          <span className="mt-2 block text-sm leading-6 text-white/58">适用于当前已验证范围内的中文商业非人像图</span>
         </button>
       </div>
-      <footer className="relative z-10 w-full truncate px-3 text-center font-mono text-[10px] tracking-[0.2em] text-white/24">{PAGE_FOOTER}</footer>
+      <footer className="relative z-10 w-full truncate px-3 text-center font-mono text-[11px] tracking-[0.16em] text-white/40">{PAGE_FOOTER}</footer>
     </section>
   );
 }

@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import json
 import platform
 import subprocess
 import sys
 from pathlib import Path
 
 
-APP_VERSION = "VisualMasterPro V0.3"
+PRODUCT_VERSION_PATH = Path(__file__).resolve().parents[1] / "product_version.json"
+
+
+def load_product_version() -> dict[str, str]:
+    payload = json.loads(PRODUCT_VERSION_PATH.read_text(encoding="utf-8"))
+    version = str(payload.get("version") or "").strip()
+    display_version = str(payload.get("display_version") or "").strip()
+    release_name = str(payload.get("release_name") or "").strip()
+    if not version or display_version != f"V{version}" or not release_name:
+        raise RuntimeError("product_version.json is invalid or internally inconsistent")
+    return {"version": version, "display_version": display_version, "release_name": release_name}
+
+
+PRODUCT_VERSION_INFO = load_product_version()
+PRODUCT_VERSION = PRODUCT_VERSION_INFO["version"]
+APP_VERSION = PRODUCT_VERSION_INFO["display_version"]
 
 
 def is_pyinstaller() -> bool:

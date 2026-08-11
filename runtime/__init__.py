@@ -1,3 +1,3 @@
-from .system_info import APP_VERSION
+from .system_info import APP_VERSION, PRODUCT_VERSION, PRODUCT_VERSION_INFO
 
-__all__ = ["APP_VERSION"]
+__all__ = ["APP_VERSION", "PRODUCT_VERSION", "PRODUCT_VERSION_INFO"]

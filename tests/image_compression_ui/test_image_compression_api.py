@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 from unittest.mock import patch
@@ -44,6 +45,7 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.saved_output_root = self.root / "saved-output"
         self.current_task_output_root = self.root / "current-task-output"
         self.output_settings = {"saved_default_root": str(self.saved_output_root)}
+        self.runtime_events = []
 
         def output_settings_provider():
             return {
@@ -70,6 +72,7 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
             output_settings_provider=output_settings_provider,
             output_default_saver=save_default_output_root,
             output_dir_validator=validate_output_root,
+            runtime_event_logger=lambda event, **fields: self.runtime_events.append({"event": event, **fields}),
         )
         self.client = TestClient(app)
 
@@ -110,11 +113,12 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         response = self.client.post("/api/image-compression/run", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()["data"]
-        self.assertEqual(set(data), {"result", "ui"})
+        self.assertEqual(set(data), {"task", "result", "ui"})
         self.assertEqual(tuple(data["result"]), RESULT_FIELD_NAMES)
         self.assertEqual(len(data["result"]), 50)
         task = self.state["task_registry"][data["result"]["task_id"]]
         self.assertEqual(data["result"], task["result"].to_dict())
+        self.assertEqual(data["task"]["task_id"], data["result"]["task_id"])
         return data
 
     def generate_feedback(self, result):
@@ -349,6 +353,11 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertEqual(after["delivery_gate_status"], "DELIVERY_READY")
         for key in ("technical_status", "source_sha256", "output_sha256", "output_size_bytes", "output_dimensions"):
             self.assertEqual(after[key], before[key])
+        review_events = [item for item in self.runtime_events if item["event"] == "QUALITY_REVIEW_UPDATED"]
+        self.assertEqual(len(review_events), 1)
+        self.assertEqual(review_events[0]["task_id"], before["task_id"])
+        self.assertEqual(review_events[0]["status"], "PASS")
+        self.assertNotIn("result_id", review_events[0])
 
     def test_19_review_pass_with_notes_requires_and_returns_note(self):
         intake, _ = self.intake("notes.jpg", "JPEG")
@@ -1106,6 +1115,78 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertIn("未执行任何在线上传", evidence)
         with zipfile.ZipFile(package["display_path"]) as archive:
             self.assertFalse(any(name.lower().endswith((".png", ".jpg", ".jpeg")) for name in archive.namelist()))
+
+    def test_76_task_lifecycle_success_uses_one_real_task_and_verified_output(self):
+        intake, source_bytes = self.intake("lifecycle-success.png", size=(120, 80), alpha=True)
+        cached_source = Path(self.state["token_registry"][intake["source_token"]]["path"])
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+
+        data = self.execute(intake, "RESIZE_REDUCTION", {"scale_ratio": 0.5})
+        task = data["task"]
+        output_path = Path(task["output_path"])
+
+        self.assertEqual(task["operation_mode"], "RESIZE_REDUCTION")
+        self.assertEqual(task["feature_key"], "image_compression")
+        self.assertTrue(task["result_id"].startswith("compression_result_"))
+        self.assertNotEqual(task["task_id"], task["result_id"])
+        self.assertEqual(task["result_file"], task["output_path"])
+        self.assertEqual(task["source_path"], str(cached_source))
+        self.assertEqual(task["source_path"], data["result"]["source_path"])
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["progress"], 100)
+        self.assertIsNone(task["failure_reason"])
+        self.assertTrue(task["created_at"])
+        self.assertTrue(task["completed_at"])
+        self.assertGreaterEqual(datetime.fromisoformat(task["completed_at"]), datetime.fromisoformat(task["created_at"]))
+        self.assertEqual(
+            [(item["task_id"], item["status"], item["progress"]) for item in task["lifecycle"]],
+            [
+                (task["task_id"], "pending", 0),
+                (task["task_id"], "processing", 10),
+                (task["task_id"], "completed", 100),
+            ],
+        )
+        self.assertTrue(output_path.is_file())
+        self.assertEqual(task["output_path"], data["result"]["output_path"])
+        self.assertGreater(output_path.stat().st_size, 0)
+        with Image.open(output_path) as output:
+            output.load()
+            self.assertEqual(output.format, "PNG")
+            self.assertEqual(output.size, (60, 40))
+        self.assertEqual(hashlib.sha256(cached_source.read_bytes()).hexdigest(), source_sha256)
+
+    def test_77_task_lifecycle_failure_preserves_original_and_has_no_fake_output(self):
+        source_bytes = self.image_bytes("PNG", (120, 80), alpha=True)
+        original_path = self.root / "lifecycle-failure-original.png"
+        original_path.write_bytes(source_bytes)
+        original_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        intake = self.intake_bytes(source_bytes, "lifecycle-failure.png")
+        cached_source = Path(self.state["token_registry"][intake["source_token"]]["path"])
+        cached_source.write_bytes(b"not-a-decodable-image")
+
+        data = self.execute(intake, "RESIZE_REDUCTION", {"scale_ratio": 0.5})
+        task = data["task"]
+
+        self.assertEqual(task["status"], "failed")
+        self.assertNotEqual(task["progress"], 100)
+        self.assertIsNone(task["output_path"])
+        self.assertTrue(task["failure_reason"])
+        self.assertEqual(task["failure_reason"], data["result"]["failure_reason"])
+        self.assertEqual(data["result"]["failure_code"], "SOURCE_SHA_MISMATCH")
+        self.assertTrue(task["completed_at"])
+        self.assertGreaterEqual(datetime.fromisoformat(task["completed_at"]), datetime.fromisoformat(task["created_at"]))
+        self.assertEqual(
+            [(item["task_id"], item["status"], item["progress"]) for item in task["lifecycle"]],
+            [
+                (task["task_id"], "pending", 0),
+                (task["task_id"], "processing", 10),
+                (task["task_id"], "failed", 10),
+            ],
+        )
+        self.assertFalse(data["result"]["output_created"])
+        self.assertIsNone(data["result"]["output_path"])
+        self.assertEqual(hashlib.sha256(original_path.read_bytes()).hexdigest(), original_sha256)
+        self.assertFalse(any(self.root.rglob("*.tmp")))
 
 
 if __name__ == "__main__":

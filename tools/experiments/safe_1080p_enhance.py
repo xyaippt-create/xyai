@@ -203,11 +203,11 @@ def resolve_default_app_data_root() -> dict[str, object]:
 
 
 def default_safe_beta_output_dir() -> Path:
-    return Path(resolve_default_app_data_root()["path"]) / "1080P安全增强输出"
+    return Path(resolve_default_app_data_root()["path"]) / "输出" / "1080P安全增强"
 
 
 def default_safe_beta_diagnostic_dir() -> Path:
-    return Path(resolve_default_app_data_root()["path"]) / "影界测试反馈包"
+    return Path(resolve_default_app_data_root()["path"]) / "诊断" / "反馈包" / "1080P安全增强"
 
 
 DEFAULT_OUTPUT_DIR = default_safe_beta_output_dir()
@@ -5385,9 +5385,9 @@ def app_workdir_diagnostics(diagnostic_dir: Path) -> dict[str, object]:
         "app_data_root_source": str(root_info["source"]),
         "app_data_root_exists": bool(root_info["exists"]),
         "app_data_root_writable": bool(root_info["writable"]),
-        "report_dir": str(root / "报告"),
+        "report_dir": str(root / "诊断" / "报告"),
         "feedback_dir": str(diagnostic_dir),
-        "beta_upload_dir": str(root / "beta_uploads"),
+        "beta_upload_dir": str(root / "输出" / "1080P安全增强" / ".输入缓存"),
     }
 
 

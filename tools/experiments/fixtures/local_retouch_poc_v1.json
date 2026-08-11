@@ -1,0 +1,62 @@
+{
+  "fixture_version": "hdde.local-retouch-poc.v1",
+  "usage_scope": "INTERNAL_POC_ONLY",
+  "source_policy": "INTERNAL_SYNTHETIC_TEST_ASSETS_ONLY",
+  "inpaint_radius": 3.0,
+  "samples": [
+    {
+      "sample_id": "S01_LOW_COMPLEX_HIGHLIGHT",
+      "sample_type": "低复杂高光与平滑明暗",
+      "risk_level": "LOW",
+      "relative_source_path": "tests/results/v046_19_golden_regression/01_original/synthetic_highlight_clip.png",
+      "source_sha256": "9663e8966c7e17e566810008f55292c4c7328032470765e1a2bb16506434651a",
+      "mask": {"type": "rectangle", "x0": 298, "y0": 188, "x1": 342, "y1": 232},
+      "review_focus": ["糊块", "补丁感", "亮度跳变"]
+    },
+    {
+      "sample_id": "S02_GRADIENT",
+      "sample_type": "连续渐变背景",
+      "risk_level": "MEDIUM",
+      "relative_source_path": "tests/results/v046_19_golden_regression/01_original/synthetic_gradient_band.png",
+      "source_sha256": "898e3c4ae64c69709fc8c45f912d5edb76c671cade85c696e0adab1185504ea0",
+      "mask": {"type": "rectangle", "x0": 294, "y0": 154, "x1": 346, "y1": 206},
+      "review_focus": ["渐变断层", "色彩跳变", "补丁边界"]
+    },
+    {
+      "sample_id": "S03_REPEATED_LINES",
+      "sample_type": "重复规则纹理与细线交点",
+      "risk_level": "MEDIUM",
+      "relative_source_path": "tests/results/v046_19_golden_regression/01_original/synthetic_fine_line_table.png",
+      "source_sha256": "df122a7b6741810bb8c7dbb29cd55b6b006a44b6c14c7636aa2db9684716d179",
+      "mask": {"type": "rectangle", "x0": 337, "y0": 217, "x1": 383, "y1": 263},
+      "review_focus": ["重复纹理", "细线断裂", "错误文字修改"]
+    },
+    {
+      "sample_id": "S04_BRAND_COLOR_EDGE",
+      "sample_type": "品牌色块与高反差边缘",
+      "risk_level": "MEDIUM",
+      "relative_source_path": "tests/results/v046_19_golden_regression/01_original/synthetic_brand_color_bars.png",
+      "source_sha256": "877ef6362179a5df79bd1523c413e5e87ccf19b0e5d67355652b1bb7f90bdf5c",
+      "mask": {"type": "rectangle", "x0": 170, "y0": 155, "x1": 210, "y1": 205},
+      "review_focus": ["边缘连续性", "品牌色漂移", "色块污染"]
+    },
+    {
+      "sample_id": "S05_ALPHA_OBJECT_EDGE",
+      "sample_type": "透明边缘与物体轮廓",
+      "risk_level": "HIGH",
+      "relative_source_path": "tests/results/v046_19_golden_regression/01_original/synthetic_alpha_edges.png",
+      "source_sha256": "6f252e94438de00c057c1ac372549bde102da0d0927c9f2a3ab5ef58c6fb001c",
+      "mask": {"type": "rectangle", "x0": 76, "y0": 126, "x1": 108, "y1": 194},
+      "review_focus": ["透明边缘污染", "轮廓断裂", "黑白边"]
+    },
+    {
+      "sample_id": "S06_SYNTHETIC_PERSON_EDGE",
+      "sample_type": "合成人物轮廓与噪声纹理",
+      "risk_level": "HIGH",
+      "relative_source_path": "tests/results/v046_phase5_targeted/00_generated_inputs/synthetic_neutral_yellow_cast_portrait.png",
+      "source_sha256": "263ef3c927514f0f641b6f38eb47dd45cfc2e140033add7bc2cec14e02c5df4f",
+      "mask": {"type": "rectangle", "x0": 228, "y0": 138, "x1": 260, "y1": 185},
+      "review_focus": ["人物轮廓变化", "自然纹理重复", "补丁感"]
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import CompressionPreview from "./CompressionPreview.jsx";
+import { HddePageHeader, HddeStatusPill } from "./HddeUI.jsx";
+import UnifiedFeedback from "./UnifiedFeedback.jsx";
 import {
   buildCompressionRequestPlan,
   convertUploadSizeUnit,
@@ -12,14 +14,11 @@ import {
   buildCompressionRunPayload,
   captureFileFromChangeEvent,
   effectiveOutputRoot,
-  feedbackPackageDownloadHref,
-  feedbackPackageUiState,
   functionOutputDirectory,
   intakeSuccessPatch,
   isTokenSessionError,
   newFileSessionPatch,
   normalizeOutputSettings,
-  attachFeedbackPackage,
   performFileIntake,
   resetImageSessionPatch,
   restoreBuiltInOutput,
@@ -98,9 +97,11 @@ function CodeList({ title, values }) {
   );
 }
 
-export default function CompressionPage() {
+export default function CompressionPage({ initialSourceFile = null, initialSourceRequestId = "", onInitialSourceConsumed }) {
   const inputRef = useRef(null);
+  const controlPanelRef = useRef(null);
   const serverSessionRef = useRef(null);
+  const consumedSourceRequestRef = useRef("");
   const [capabilities, setCapabilities] = useState(null);
   const [mode, setMode] = useState(MODES[0].value);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -124,9 +125,6 @@ export default function CompressionPage() {
   const [sourcePreviewScrollRatio, setSourcePreviewScrollRatio] = useState(0);
   const [longScrollRatio, setLongScrollRatio] = useState(0);
   const [longImageRiskConfirmed, setLongImageRiskConfirmed] = useState(false);
-  const [feedbackPackageBusy, setFeedbackPackageBusy] = useState(false);
-  const [feedbackPackageError, setFeedbackPackageError] = useState("");
-  const [feedbackPackageNotice, setFeedbackPackageNotice] = useState("");
   const [outputSettings, setOutputSettings] = useState(null);
   const [currentTaskOutputRoot, setCurrentTaskOutputRoot] = useState("");
   const [outputSelectionScope, setOutputSelectionScope] = useState("current_task");
@@ -151,9 +149,6 @@ export default function CompressionPage() {
     setSourcePreviewScrollRatio(0);
     setLongScrollRatio(0);
     setLongImageRiskConfirmed(false);
-    setFeedbackPackageBusy(false);
-    setFeedbackPackageError("");
-    setFeedbackPackageNotice("");
     setResizeStrategy("short_side");
     setShortSidePreset("1080");
     setCustomShortSide("");
@@ -196,36 +191,6 @@ export default function CompressionPage() {
     longImageRiskConfirmed,
   }), [customDimension, customRatio, customShortSide, fileInfo, longImageRiskConfirmed, mode, ratioPreset, resizeStrategy, shortSidePreset, uploadLimits]);
   const longFeedback = longImageFeedbackFields(fileInfo, requestPlan);
-  const feedbackPackageState = feedbackPackageUiState(ui?.feedback_package, {
-    generating: feedbackPackageBusy,
-    error: feedbackPackageError,
-  });
-  const feedbackPackage = feedbackPackageState.feedbackPackage;
-  const feedbackPackageHref = feedbackPackageState.showDownload
-    ? feedbackPackageDownloadHref(feedbackPackage, API_BASE)
-    : "";
-
-  useEffect(() => {
-    if (!feedbackPackage?.expires_at || !result?.task_id) return undefined;
-    const expiresAt = Date.parse(feedbackPackage.expires_at);
-    if (!Number.isFinite(expiresAt)) return undefined;
-    const expire = () => {
-      setResultData((current) => {
-        if (current?.result?.task_id !== result.task_id) return current;
-        return { ...current, ui: { ...(current?.ui || {}), feedback_package: null } };
-      });
-      setFeedbackPackageError("测试反馈包下载链接已过期，请重新生成。");
-      setFeedbackPackageNotice("");
-    };
-    const delay = expiresAt - Date.now();
-    if (delay <= 0) {
-      expire();
-      return undefined;
-    }
-    const timer = window.setTimeout(expire, Math.min(delay, 2_147_483_647));
-    return () => window.clearTimeout(timer);
-  }, [feedbackPackage?.expires_at, result?.task_id]);
-
   const updateUploadDimension = (changedField, rawValue) => {
     setUploadLimits((current) => (
       uploadAspectLocked
@@ -233,9 +198,6 @@ export default function CompressionPage() {
         : { ...current, [changedField]: rawValue }
     ));
     setLongImageRiskConfirmed(false);
-    setFeedbackPackageBusy(false);
-    setFeedbackPackageError("");
-    setFeedbackPackageNotice("");
   };
 
   const toggleUploadAspectLock = () => {
@@ -279,9 +241,6 @@ export default function CompressionPage() {
 
   const resetImageSession = (message = "") => {
     applySessionPatch(resetImageSessionPatch(message));
-    setFeedbackPackageBusy(false);
-    setFeedbackPackageError("");
-    setFeedbackPackageNotice("");
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -331,6 +290,14 @@ export default function CompressionPage() {
     }
   };
 
+  useEffect(() => {
+    if (!initialSourceFile || !initialSourceRequestId || consumedSourceRequestRef.current === initialSourceRequestId) return;
+    consumedSourceRequestRef.current = initialSourceRequestId;
+    void intakeFile(initialSourceFile).finally(() => {
+      if (typeof onInitialSourceConsumed === "function") onInitialSourceConsumed(initialSourceRequestId);
+    });
+  }, [initialSourceFile, initialSourceRequestId, onInitialSourceConsumed]);
+
   const handleFileChange = (event) => {
     const file = captureFileFromChangeEvent(event);
     if (file) void intakeFile(file);
@@ -345,9 +312,6 @@ export default function CompressionPage() {
     setBusy(true);
     setError("");
     setResultData(null);
-    setFeedbackPackageBusy(false);
-    setFeedbackPackageError("");
-    setFeedbackPackageNotice("");
     setState("RUNNING");
     try {
       if (!await refreshServerSession()) return;
@@ -479,40 +443,6 @@ export default function CompressionPage() {
     }
   };
 
-  const generateTestFeedbackPackage = async () => {
-    if (!result?.task_id) return;
-    setBusy(true);
-    setFeedbackPackageBusy(true);
-    setFeedbackPackageError("");
-    setFeedbackPackageNotice("");
-    setError("");
-    try {
-      const payload = await requestJson("/api/image-compression/test-feedback-package", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_id: result.task_id }),
-      });
-      setResultData((current) => attachFeedbackPackage(current, payload.data));
-      setFeedbackPackageNotice("测试反馈包已生成，可通过安全链接下载。");
-    } catch (reason) {
-      setFeedbackPackageError(reason.message);
-    } finally {
-      setFeedbackPackageBusy(false);
-      setBusy(false);
-    }
-  };
-
-  const copyFeedbackPackagePath = async () => {
-    if (!feedbackPackage?.display_path) return;
-    try {
-      await navigator.clipboard.writeText(feedbackPackage.display_path);
-      setFeedbackPackageNotice("测试反馈包文件路径已复制。");
-      setFeedbackPackageError("");
-    } catch {
-      setFeedbackPackageError("无法复制测试反馈包文件路径，请手动复制。");
-    }
-  };
-
   const constraintRows = mode === "UPLOAD_ADAPTATION" && result ? [
     ["宽度限制", ui?.applied_limits?.max_width, outputFacts.dimensions?.width, "px"],
     ["高度限制", ui?.applied_limits?.max_height, outputFacts.dimensions?.height, "px"],
@@ -520,11 +450,14 @@ export default function CompressionPage() {
   ].filter(([, limit]) => limit) : [];
 
   return (
-    <section className="hdde-compression-page" aria-label="图片压缩工作台">
-      <div className="hdde-compression-runtimebar">
-        <span className={capabilities ? "is-connected" : ""}><i aria-hidden="true">●</i> {capabilities ? "本地处理服务已连接" : "本地处理服务连接中"}</span>
-        <strong>{statusLabel("state", state)}</strong>
-      </div>
+    <section className="hdde-compression-page hdde-page-frame hdde-page-stack" aria-label="图片压缩工作台">
+      <HddePageHeader
+        eyebrow="本地图片处理"
+        title="图片压缩"
+        description="在不覆盖原图的前提下控制文件体积、尺寸和格式，处理结果另存到正式目录。"
+        meta={<HddeStatusPill tone={state === "failed" ? "danger" : capabilities ? "positive" : "neutral"}>{statusLabel("state", state)}</HddeStatusPill>}
+        actions={<a className="hdde-secondary-action hdde-compression-diagnosis-link" href="/image-diagnosis">不确定如何处理？先进行图片诊断</a>}
+      />
 
       <div className="hdde-compression-workbench">
         <section className="hdde-compression-source-panel" aria-label="图片选择与预览">
@@ -574,7 +507,7 @@ export default function CompressionPage() {
           </div>
         </section>
 
-        <aside className="hdde-compression-control-panel" aria-label="压缩设置">
+        <aside ref={controlPanelRef} className="hdde-compression-control-panel" aria-label="压缩设置">
           <div><span className="hdde-compression-section-label">处理方式</span><div className="hdde-compression-mode-tabs" role="tablist">
             {MODES.map((item) => {
               const unsupportedLossless = Boolean(fileInfo && fileInfo.format !== "PNG" && item.value === "LOSSLESS_COMPRESSION");
@@ -721,7 +654,15 @@ export default function CompressionPage() {
             <div><span className="hdde-compression-section-label">处理结果</span><strong>{resultHeadline}</strong></div>
             <div className="hdde-compression-result-actions">
               <button type="button" className="hdde-secondary-action" data-testid="compression-reprocess" onClick={runCompression} disabled={!fileInfo || !requestPlan.valid || busy}>重新处理</button>
-              {feedbackPackageState.showGenerate ? <button type="button" className="hdde-secondary-action" data-testid="compression-feedback-package" onClick={generateTestFeedbackPackage} disabled={busy || feedbackPackageState.generateDisabled}>{feedbackPackageState.generateLabel}</button> : null}
+              <UnifiedFeedback
+                taskId={result.task_id || ""}
+                sourceFeature="image_compression"
+                stage={result.current_stage || result.status || "result_review"}
+                triggerLabel="反馈问题"
+                triggerClassName="hdde-secondary-action"
+                testId="compression-feedback-package"
+                disabled={busy}
+              />
               <button type="button" className="hdde-secondary-action" onClick={replaceImage} disabled={busy}>更换图片</button>
               <button type="button" className="hdde-link-action" onClick={clearAll} disabled={busy}>清空</button>
             </div>
@@ -751,7 +692,7 @@ export default function CompressionPage() {
             <span>实际尺寸：{ui.actual_target_width || "—"} × {ui.actual_target_height || "—"}</span>
             <span>保持比例：{ui.aspect_ratio_preserved ? "是" : "待确认"} · 裁切：否 · 补边：否 · 放大：否</span>
           </div> : null}
-          {longImage ? <div className="hdde-long-image-result-audit"><strong>长图识别与安全预检</strong><span>默认预览：适合宽度</span><span>预计输出：{ui?.estimated_output_width || longFeedback.estimated_output_width || "—"} × {ui?.estimated_output_height || longFeedback.estimated_output_height || "—"}</span><span>风险级别：{ui?.long_image_risk_level || longFeedback.long_image_risk_level || "—"}</span><span>规则：{ui?.long_image_width_risk_policy_version || longFeedback.long_image_width_risk_policy_version}</span></div> : null}
+          {longImage ? <div className="hdde-long-image-result-audit"><strong>长图输出核对</strong><span>默认预览：适合宽度</span><span>预计输出：{ui?.estimated_output_width || longFeedback.estimated_output_width || "—"} × {ui?.estimated_output_height || longFeedback.estimated_output_height || "—"}</span><span>风险级别：{ui?.long_image_risk_level || longFeedback.long_image_risk_level || "—"}</span><span>规则：{ui?.long_image_width_risk_policy_version || longFeedback.long_image_width_risk_policy_version}</span></div> : null}
 
           {candidateState.hasCandidate && compareMode === "single-toggle" ? (
             <div className="hdde-long-image-compare" data-testid="compression-long-image-compare">
@@ -806,23 +747,7 @@ export default function CompressionPage() {
             {showReviewNote ? <div className="hdde-compression-review-note"><label htmlFor="compression-review-note">复核说明</label><textarea id="compression-review-note" data-testid="compression-review-note" maxLength="500" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="说明可接受的轻微变化或交付注意事项" /><button type="button" className="hdde-primary-action" data-testid="compression-review-notes-confirm" onClick={() => review("PASS_WITH_NOTES")} disabled={busy || !reviewNote.trim()}>确认通过并备注</button></div> : null}
           </div> : null}
 
-          {feedbackPackageState.error ? <div className="hdde-feedback-package-error" role="alert" data-testid="compression-feedback-package-error">{feedbackPackageState.error}</div> : null}
-          {feedbackPackageState.showDownload ? <div className="hdde-feedback-package-result" data-testid="compression-feedback-package-result">
-            <div className="hdde-feedback-package-heading">
-              <div><strong>测试反馈包</strong><span>已生成</span></div>
-              <small>{feedbackPackage.package_name} · {formatBytes(feedbackPackage.package_size_bytes)}</small>
-            </div>
-            <div className="hdde-feedback-package-actions">
-              <a className="hdde-primary-action" data-testid="compression-feedback-package-download" href={feedbackPackageHref} download={feedbackPackage.package_name}>下载测试反馈包</a>
-              <button type="button" className="hdde-secondary-action" data-testid="compression-feedback-package-open-folder" onClick={openOutputFolder} disabled={busy || !feedbackPackage.can_open_folder}>打开所在文件夹</button>
-              <button type="button" className="hdde-secondary-action" data-testid="compression-feedback-package-copy-path" onClick={copyFeedbackPackagePath}>复制文件路径</button>
-            </div>
-            <code title={feedbackPackage.display_path}>{feedbackPackage.display_path}</code>
-            <small>SHA256 {feedbackPackage.package_sha256.slice(0, 16)}… · 链接有效期至 {new Date(feedbackPackage.expires_at).toLocaleString("zh-CN")}</small>
-            {feedbackPackageNotice ? <span className="hdde-feedback-package-notice" role="status">{feedbackPackageNotice}</span> : null}
-          </div> : null}
           <details className="hdde-compression-sha"><summary>查看完整SHA与技术标识</summary><div><span>原图 SHA256</span><code>{result.source_sha256 || "—"}</code>{candidateState.hasCandidate ? <><span>候选 SHA256</span><code>{result.output_sha256 || "—"}</code></> : null}</div></details>
-          <details className="hdde-compression-contract"><summary>查看完整 50 字段结果合同</summary><div>{Object.entries(result).map(([key, value]) => <div key={key}><span>{key}</span><code>{value == null ? "null" : typeof value === "object" ? JSON.stringify(value) : String(value)}</code></div>)}</div></details>
         </> : <div className="hdde-compression-empty-result">处理完成后将在这里显示体积、尺寸、预览与交付状态。</div>}
       </section>
     </section>

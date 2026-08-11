@@ -94,6 +94,24 @@ export function validateQualityReport(report, context = {}) {
   }
 
   const taskResult = isPlainRecord(context.taskResult) ? context.taskResult : {};
+  const isFourK = context.mode === "4k_v1" || report.mode === "4k_v1" || taskResult.mode === "4k_v1";
+  if (isFourK) {
+    const missingFields = [];
+    const taskId = firstMeaningfulText(report.task_id, context.taskId, context.task_id);
+    if (!taskId) missingFields.push("task_identity");
+    if (!isPositiveNumber(taskResult.input_width) || !isPositiveNumber(taskResult.input_height)) missingFields.push("input_facts");
+    if (!isPositiveNumber(taskResult.output_width) || !isPositiveNumber(taskResult.output_height)) missingFields.push("output_facts");
+    if (report.route !== "PILLOW_LANCZOS_SAFE_RESIZE") missingFields.push("route");
+    if (report.quality_capability_boundary !== "HIGH_QUALITY_SIZE_ADAPTATION_ONLY") missingFields.push("quality_capability_boundary");
+    if (!["SIZE_ADAPTATION_COMPLETED", "NO_PROCESSING_NEEDED"].includes(report.quality_conclusion)) missingFields.push("quality_conclusion");
+    if (report.source_hash_unchanged !== true) missingFields.push("source_hash_unchanged");
+    return {
+      valid: missingFields.length === 0,
+      missingFields,
+      reason: missingFields.length ? `4K处理报告合同不完整：${missingFields.join(", ")}` : "真实4K任务报告合同完整。",
+    };
+  }
+
   const missingFields = [];
   const taskId = firstMeaningfulText(report.task_id, report.report_id, context.taskId, context.task_id);
   const inputIdentity = firstMeaningfulText(taskResult.input_filename, taskResult.input_path);

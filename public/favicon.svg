@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="影界 HDDE">
+  <rect width="64" height="64" rx="14" fill="#2D6FE8"/>
+  <path d="M17 18h8v11h14V18h8v28h-8V36H25v10h-8V18Z" fill="#fff"/>
+  <path d="M50 18h-5v28h5c7 0 11-5 11-14S57 18 50 18Zm0 7c2 0 3 2 3 7s-1 7-3 7V25Z" fill="#BFD3FF"/>
+</svg>

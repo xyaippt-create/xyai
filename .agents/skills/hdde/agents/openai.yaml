@@ -1,0 +1,7 @@
+interface:
+  display_name: "HDDE"
+  short_description: "影界 HDDE 单阶段开发执行器"
+  default_prompt: "调用 $hdde，按照已提供的单阶段任务卡完成真实开发、验证与阶段收口。"
+
+policy:
+  allow_implicit_invocation: false

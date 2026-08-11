@@ -49,6 +49,15 @@ FORMAL_NOISE_MARKERS = (
     "vmp_async_test",
 )
 
+
+class OutputFileWriteError(OSError):
+    """A confirmed failure at the final output copy/replace boundary."""
+
+    hdde_failed_stage = "output_file_write"
+    hdde_phase_event = "OUTPUT_FILE_WRITE_FAILED"
+    hdde_error_category = "ENVIRONMENT_ERROR"
+
+
 DELIVERY_METADATA = {
     "author_name": "雪原Ai·PPT设计",
     "author_wechat": "893812410",
@@ -1426,7 +1435,10 @@ def process_v036_output(
     if final_path.suffix.lower() != final_source.suffix.lower():
         final_path = final_path.with_suffix(final_source.suffix)
         paths["final"] = final_path
-    final_path = safe_copy_final(final_source, final_path)
+    try:
+        final_path = safe_copy_final(final_source, final_path)
+    except OSError as exc:
+        raise OutputFileWriteError(f"成品文件写入或替换失败：{exc}") from exc
     paths["final"] = final_path
     quarantine_formal_output_noise(dirs["formal"], dirs["test_archive"], dirs["work"], protected_paths={final_path})
     delivery_package = write_delivery_metadata(final_path)

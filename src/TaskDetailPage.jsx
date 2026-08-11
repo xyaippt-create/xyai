@@ -1,175 +1,127 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { resolveDeliveryStatus } from "./deliveryStatus.js";
+import { getFileDisplayName } from "./fileDisplayName.js";
+import UnifiedFeedback from "./UnifiedFeedback.jsx";
 
 const API_BASE = "http://localhost:8787";
 const EXPECTED_LOG_TOTAL = 11;
-const PAGE_FOOTER = "影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎";
 
-const styles = {
-  page: { backgroundColor: "#060b0c", fontFamily: "sans-serif" },
-  headerBorder: { borderBottom: "1px solid #14282a" },
-  card: { backgroundColor: "#091113", border: "1px solid #14282a", borderRadius: "8px" },
-  innerCard: { backgroundColor: "#0d181a", border: "1px solid #193336", borderRadius: "4px" },
-  progressBg: { backgroundColor: "#0e1d1f", borderRadius: "9999px" },
-  progressBar: {
-    background: "#3f6f68",
-  },
-  primaryButton: {
-    borderRadius: "4px",
-    border: "1px solid #2d665f",
-    background: "linear-gradient(90deg, #1e4742 0%, #102d2a 100%)",
-    color: "#5bf5dc",
-    boxShadow: "0 0 12px rgba(45,102,95,0.2)",
-  },
-  disabledButton: {
-    borderRadius: "4px",
-    border: "1px solid #193336",
-    backgroundColor: "#0b1517",
-    color: "#526164",
-  },
-  secondaryButton: { border: "1px solid #193336", color: "#8a999c", borderRadius: "4px" },
-  logBox: { backgroundColor: "#040708", border: "1px solid #0d1a1b", borderRadius: "4px" },
-};
-
-const deliveryStatusMeta = {
-  PASS: { label: "可交付", color: "#8be6b1", border: "#315342", desc: "后台交付门通过，可进入正常 1080P 查看。" },
-  PASS_WITH_LIMITATION: { label: "建议人工复核", color: "#f0c36f", border: "#66532d", desc: "后台已完成输出，但存在质量门、体积或平滑区域限制，需人工查看。" },
-  FAIL: { label: "不建议交付", color: "#ff8a8a", border: "#5a2525", desc: "后台交付门阻断，不建议作为正式成品使用。" },
-};
-
-const timelines = [
-  ["IMAGE INGEST", "图像读取", "读取前端上传图片，解析基础尺寸与任务上下文。"],
-  ["VISUAL ANALYSIS", "视觉诊断", "识别文字区域、边缘结构、高光反射与压缩损伤。"],
-  ["RESTORATION CORE", "核心修复", "执行压缩修复、结构补偿、文字清晰化与噪声控制。"],
-  ["FIDELITY LOCK", "忠实校准", "锁定原图色彩，避免过锐、改色与画风重塑。"],
-  ["QUALITY EXPORT", "质量输出", "生成 1080P 稳定交付结果，写入质量报告字段。"],
+const standardTimelines = [
+  ["读取图片", "确认原图可用并读取基础信息。"],
+  ["分析内容", "识别文字、边缘、纹理与压缩特征。"],
+  ["执行处理", "按当前模式完成尺寸与画质处理。"],
+  ["核对结果", "检查结构、颜色和输出文件完整性。"],
+  ["生成成品", "写入结果并准备对比与报告。"],
 ];
 
-function normalizeUrl(endpoint, taskId) {
-  if (endpoint) {
-    if (/^https?:\/\//i.test(endpoint)) return endpoint;
-    return `${API_BASE}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
-  }
-  if (taskId) return `${API_BASE}/api/v1/tasks/${taskId}/stream`;
-  return "";
+const fourKTimelines = [
+  ["读取图片", "确认原图和正式目录可用。"],
+  ["核对策略", "核对4K模式与尺寸处理合同。"],
+  ["尺寸适配", "保持比例，高质量适配至4K长边。"],
+  ["写入成品", "将PNG成品写入正式4K输出目录。"],
+  ["核对结果", "检查文件可读取、尺寸正确且原图未改变。"],
+];
+
+function normalizeUrl(value) {
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value)) return "";
+  return `${API_BASE}${value.startsWith("/") ? value : `/${value}`}`;
 }
 
 function getTaskId(taskConfig) {
+  return taskConfig?.taskId
+    || taskConfig?.task_id
+    || taskConfig?.compareAssets?.taskId
+    || taskConfig?.compareAssets?.task_id
+    || "";
+}
+
+function modeLabel(mode) {
+  if (["fidelity", "texture", "text_safe", "standard"].includes(mode)) return "1080P标准增强";
+  if (mode === "safe_1080p_beta") return "1080P安全增强";
+  if (mode === "4k_v1") return "4K高清画质增强";
+  return mode || "未选择";
+}
+
+function statusLabel(status, isFourK) {
+  if (status === "completed") return isFourK ? "4K适配已完成" : "处理已完成";
+  if (status === "failed" || status === "blocked") return "处理未完成";
+  if (status === "queued" || status === "pending") return "等待处理";
+  return isFourK ? "正在进行4K适配" : "正在处理";
+}
+
+function stageLabel(value, status) {
+  if (status === "completed") return "处理完成";
+  if (status === "failed" || status === "blocked") return "处理未完成";
+  const labels = {
+    pending: "等待处理",
+    contract_validation: "核对处理策略",
+    image_processing: "正在处理图片",
+    output_file_write: "正在写入成品",
+    output_verify: "正在核对结果",
+  };
+  return labels[String(value || "").toLowerCase()] || "";
+}
+
+function formatBytes(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size <= 0) return "";
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(2)} MB`;
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function formatDuration(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration < 0) return "";
+  if (duration < 1000) return `${Math.round(duration)} 毫秒`;
+  return `${(duration / 1000).toFixed(duration >= 10000 ? 0 : 1)} 秒`;
+}
+
+function formatDurationBetween(startValue, endValue) {
+  if (!startValue || !endValue) return "";
+  const start = new Date(startValue).getTime();
+  const end = new Date(endValue).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "";
+  return formatDuration(end - start);
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleString("zh-CN");
+}
+
+function fileNameFromPath(value) {
+  return String(value || "").split(/[\\/]/).pop() || "";
+}
+
+function ProgressTimeline({ items, currentStageIndex, taskStatus }) {
   return (
-    taskConfig?.taskId ||
-    taskConfig?.task_id ||
-    taskConfig?.compareAssets?.taskId ||
-    taskConfig?.compareAssets?.task_id ||
-    ""
-  );
-}
-
-function flagEnabled(value) {
-  return value === true || value === "true" || value === 1 || value === "1";
-}
-
-function flagDisabled(value) {
-  return value === false || value === "false" || value === 0 || value === "0";
-}
-
-function ProgressTimeline({ currentStageIndex, taskStatus }) {
-  return (
-    <div className="flex h-full w-[45%] flex-col p-4" style={styles.card}>
-      <div className="mb-3 flex shrink-0 items-center justify-between">
-        <h3 className="font-mono text-xs uppercase tracking-widest text-slate-400">Progress Timeline</h3>
-        <span
-          className="rounded-full border px-2 py-0.5 font-mono text-[10px] font-bold"
-          style={{
-            color: taskStatus === "failed" ? "#fb7185" : "#2ecc71",
-            backgroundColor: taskStatus === "failed" ? "#2b1018" : "#102a1c",
-            borderColor: taskStatus === "failed" ? "#7f1d1d" : "#1b4c32",
-          }}
-        >
-          {taskStatus === "completed" ? "COMPLETED" : taskStatus === "failed" ? "FAILED" : "STREAMING"}
-        </span>
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col justify-between py-1">
-        {timelines.map(([label, title, desc], index) => {
-          const done = taskStatus === "completed" || index < currentStageIndex;
-          const active = taskStatus !== "completed" && taskStatus !== "failed" && index === currentStageIndex;
-
-          return (
-            <div key={label} className="flex items-start space-x-3">
-              <div className="flex h-full flex-col items-center">
-                <div
-                  className="flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px] font-bold"
-                  style={{
-                    color: done ? "#2ecc71" : active ? "#8effed" : "#526164",
-                    backgroundColor: done ? "#113025" : active ? "#102624" : "#0b1416",
-                    borderColor: done ? "#2ecc71" : active ? "#3cb3a0" : "#26383a",
-                  }}
-                >
-                  {done ? "✓" : index + 1}
-                </div>
-                {index !== timelines.length - 1 && (
-                  <div className="my-1 min-h-[14px] w-px flex-1" style={{ background: done ? "linear-gradient(#2ecc71, #14282a)" : "linear-gradient(#274d52, #14282a)" }} />
-                )}
-              </div>
-              <div className="flex min-h-0 flex-1 items-center justify-between p-2" style={styles.innerCard}>
-                <div className="min-h-0 flex-1 pr-4">
-                  <span className="mb-1 block font-mono text-[9px] uppercase leading-none tracking-wider" style={{ color: "#418c80" }}>
-                    {label}
-                  </span>
-                  <h4 className="text-xs font-medium text-slate-200">{title}</h4>
-                  <p className="mt-0.5 truncate text-[11px] text-slate-500">{desc}</p>
-                </div>
-                <span className="shrink-0 font-mono text-[10px] text-slate-400">{done ? "完成" : active ? "执行中" : "等待"}</span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function RealtimeLogStream({ logs, taskStatus }) {
-  const logEndRef = useRef(null);
-
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [logs]);
-
-  return (
-    <div className="flex h-full w-[55%] flex-col p-4" style={styles.card}>
-      <div className="mb-3 flex shrink-0 items-center justify-between">
-        <h3 className="flex items-center space-x-2 font-mono text-xs uppercase tracking-widest text-slate-400">
-          <span>Realtime SSE Log</span>
-          <span
-            className="h-1.5 w-1.5 animate-pulse rounded-full"
-            style={{
-              backgroundColor: taskStatus === "failed" ? "#f43f5e" : "#2ecc71",
-              boxShadow: taskStatus === "failed" ? "0 0 6px #f43f5e" : "0 0 6px #2ecc71",
-            }}
-          />
-        </h3>
-        <span className="font-mono text-[10px] text-slate-500">RESTORATION.LOG</span>
-      </div>
-
-      <div className="flex min-h-0 w-full flex-1 flex-col space-y-1.5 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed select-text" style={styles.logBox}>
-        {logs.map((log, index) => {
-          const important = index === 0 || index === logs.length - 1 || String(log).includes("任务完成");
-          return (
-            <div key={`${log}-${index}`} className="whitespace-pre-wrap" style={{ color: important ? "#3cb3a0" : "#8a999c", fontWeight: important ? "bold" : "normal" }}>
-              {String(index + 1).padStart(2, "0")} {log}
-            </div>
-          );
-        })}
-        {taskStatus === "processing" && (
-          <div className="animate-pulse whitespace-pre-wrap font-bold text-[#3cb3a0]">
-            {String(logs.length + 1).padStart(2, "0")} 等待修复日志流...
-          </div>
-        )}
-        {taskStatus === "failed" && <div className="whitespace-pre-wrap font-bold text-rose-400">!! SSE 连接中断，请确认本地后端服务 http://localhost:8787 已启动。</div>}
-        <div ref={logEndRef} />
-      </div>
-    </div>
+    <ol className="hdde-detail-timeline" aria-label="任务处理阶段">
+      {items.map(([title, description], index) => {
+        const done = taskStatus === "completed" || index < currentStageIndex;
+        const failed = ["failed", "blocked"].includes(taskStatus) && index === currentStageIndex;
+        const active = !done && !failed && index === currentStageIndex;
+        return (
+          <li
+            key={title}
+            className="hdde-detail-stage"
+            data-state={done ? "done" : active ? "active" : failed ? "failed" : "pending"}
+          >
+            <span className="hdde-detail-stage-index" aria-hidden="true">{done ? "✓" : index + 1}</span>
+            <span className="hdde-detail-stage-copy">
+              <strong>{title}</strong>
+              <small>{description}</small>
+            </span>
+            <span className="hdde-detail-stage-status">
+              {done ? "完成" : active ? "进行中" : failed ? "未完成" : "等待"}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -177,202 +129,263 @@ export default function TaskDetailPage({
   taskConfig,
   onBackToDashboard,
   onViewCompare,
+  onViewReport,
+  onReprocess,
   disableAutoStream = false,
-  logsOverride = null,
   taskStatusOverride = null,
   progressOverride = null,
+  processingStageOverride = "",
 }) {
-  const [logs, setLogs] = useState([]);
-  const [currentStageIndex, setCurrentStageIndex] = useState(0);
-  const [taskStatus, setTaskStatus] = useState("processing");
-  const [progress, setProgress] = useState(0);
-
   const taskId = useMemo(() => getTaskId(taskConfig), [taskConfig]);
-  const streamUrl = useMemo(() => normalizeUrl(taskConfig?.streamEndpoint || taskConfig?.compareAssets?.streamEndpoint, taskId), [taskConfig, taskId]);
   const result = taskConfig?.task_result || taskConfig?.compareAssets?.task_result || {};
-  const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || null;
-  const debugQuality = taskConfig?.debug_quality || result.debug_quality || taskConfig?.compareAssets?.debug_quality || {};
-  const qualityContext = { ...debugQuality, ...result, ...(report || {}) };
-  const rawFinalDeliveryStatus = taskConfig?.final_delivery_status || result.final_delivery_status || debugQuality.final_delivery_status || "";
-  const finalDeliveryReason = taskConfig?.final_delivery_reason || result.final_delivery_reason || debugQuality.final_delivery_reason || "";
-  const finalDeliveryRisk = taskConfig?.final_delivery_risk_level || result.final_delivery_risk_level || debugQuality.final_delivery_risk_level || "";
-  const finalDeliveryUsage = taskConfig?.final_delivery_recommended_usage || result.final_delivery_recommended_usage || debugQuality.final_delivery_recommended_usage || "";
-  const deliveryMetaResolved = resolveDeliveryStatus(debugQuality, result, report || {}, taskConfig || {});
-  const deliveryMeta = {
-    label: deliveryMetaResolved.label,
-    color: deliveryMetaResolved.tone,
-    border: deliveryMetaResolved.border,
-    desc: deliveryMetaResolved.description,
-  };
-  const finalSelectionReason = String(qualityContext.final_selection_reason || "");
-  const compressionCandidateHint =
-    rawFinalDeliveryStatus === "PASS" &&
-    qualityContext.final_quality_source === "main_output" &&
-    finalSelectionReason.includes("optimized_output") &&
-    finalSelectionReason.includes("回退 main_output")
-      ? "压缩优化候选未采用，已使用主输出文件作为最终成品。"
-      : "";
-  const phase5DefaultColorHint =
-    flagEnabled(qualityContext.phase5_color_drift_detected) &&
-    flagDisabled(qualityContext.phase5_color_fallback_triggered) &&
-    flagDisabled(qualityContext.phase5_color_correction_enabled) &&
-    qualityContext.phase5_correction_skip_reason === "disabled_by_user"
-      ? "默认保真色彩稳定已启用；主动色偏修复未开启。"
-      : "";
-  const mode = taskConfig?.mode || taskConfig?.compareAssets?.mode || "fidelity";
-  const format = result.output_format || taskConfig?.output_format || taskConfig?.format || "auto";
-  const target = result.target_resolution || "1080P 稳定交付";
+  const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || {};
+  const debugQuality = taskConfig?.debug_quality || result?.debug_quality || {};
+  const rawMode = taskConfig?.mode || result?.mode || "fidelity";
+  const isFourK = rawMode === "4k_v1";
+  const timelines = isFourK ? fourKTimelines : standardTimelines;
+  const initialStatus = taskStatusOverride || taskConfig?.task_status || taskConfig?.status || "processing";
+  const initialProgress = initialStatus === "completed"
+    ? 100
+    : Number(progressOverride ?? taskConfig?.task_progress ?? taskConfig?.progress ?? 0);
+  const [taskStatus, setTaskStatus] = useState(initialStatus);
+  const [progress, setProgress] = useState(initialProgress);
+  const [currentStageIndex, setCurrentStageIndex] = useState(
+    initialStatus === "completed"
+      ? timelines.length
+      : Math.min(timelines.length - 1, Math.floor((initialProgress / 100) * timelines.length)),
+  );
+  const [operation, setOperation] = useState({ status: "", message: "" });
+
+  const delivery = resolveDeliveryStatus(debugQuality, result, report, taskConfig || {});
+  const outputPath = result?.output_path
+    || taskConfig?.output_path
+    || result?.final_output_path
+    || taskConfig?.final_output_path
+    || "";
+  const outputUrl = normalizeUrl(
+    result?.preview_output_url
+      || taskConfig?.preview_output_url
+      || result?.final_output_url
+      || taskConfig?.final_output_url
+      || taskConfig?.enhancedUrl,
+  );
+  const outputFileName = result?.output_filename || fileNameFromPath(outputPath);
+  const outputDirectory = taskConfig?.output_directory
+    || result?.output_dir
+    || String(outputPath).replace(/[\\/][^\\/]+$/, "");
+  const outputExists = Boolean(
+    result?.final_output_exists
+      ?? taskConfig?.final_output_exists
+      ?? outputUrl
+      ?? outputPath,
+  );
+  const displayName = getFileDisplayName(
+    taskConfig?.fileName
+      || taskConfig?.filename
+      || taskConfig?.original_filename
+      || result?.input_filename
+      || fileNameFromPath(taskConfig?.input_path),
+    "当前图片",
+  );
+  const inputWidth = taskConfig?.input_width || result?.input_width;
+  const inputHeight = taskConfig?.input_height || result?.input_height;
+  const outputWidth = taskConfig?.output_width || result?.output_width || result?.width;
+  const outputHeight = taskConfig?.output_height || result?.output_height || result?.height;
+  const outputFormat = String(result?.output_format || taskConfig?.output_format || "PNG").toUpperCase();
+  const inputSize = formatBytes(taskConfig?.input_size_bytes || result?.input_size_bytes);
+  const outputSize = formatBytes(taskConfig?.output_size_bytes || result?.output_size_bytes || result?.output_size);
+  const duration = formatDuration(taskConfig?.duration_ms ?? result?.duration_ms)
+    || formatDurationBetween(
+      taskConfig?.created_at,
+      taskConfig?.completed_at || taskConfig?.updated_at,
+    );
+  const createdAt = formatDate(taskConfig?.created_at);
+  const completedAt = formatDate(taskConfig?.completed_at || taskConfig?.updated_at);
+  const stageName = processingStageOverride || taskConfig?.processing_stage || taskConfig?.current_stage || "";
+  const stageText = stageLabel(stageName, taskStatus);
+  const canCompare = taskStatus === "completed" && outputExists && Boolean(outputUrl);
+  const canViewReport = Object.keys(report || {}).length > 0;
+  const statusText = statusLabel(taskStatus, isFourK);
 
   useEffect(() => {
-    if (disableAutoStream) {
-      const nextLogs = Array.isArray(logsOverride) ? logsOverride : [];
-      const nextProgress = Number(progressOverride || 0);
-      const nextStatus = taskStatusOverride || (nextProgress >= 100 ? "completed" : "processing");
-      setLogs(nextLogs);
-      setProgress(nextProgress);
-      setTaskStatus(nextStatus);
-      setCurrentStageIndex(nextStatus === "completed" ? timelines.length : Math.min(timelines.length - 1, Math.floor((nextProgress / 100) * timelines.length)));
-      return () => {};
-    }
+    const nextStatus = taskStatusOverride || taskConfig?.task_status || taskConfig?.status || "processing";
+    const nextProgress = nextStatus === "completed"
+      ? 100
+      : Number(progressOverride ?? taskConfig?.task_progress ?? taskConfig?.progress ?? 0);
+    setTaskStatus(nextStatus);
+    setProgress(Math.max(0, Math.min(100, nextProgress)));
+    setCurrentStageIndex(
+      nextStatus === "completed"
+        ? timelines.length
+        : Math.min(timelines.length - 1, Math.floor((nextProgress / 100) * timelines.length)),
+    );
+  }, [progressOverride, taskConfig, taskStatusOverride, timelines.length]);
 
-    setLogs([]);
-    setCurrentStageIndex(0);
-    setTaskStatus("processing");
-    setProgress(0);
-
-    if (!streamUrl) {
-      setLogs(["缺少 streamEndpoint，无法连接后端 SSE 任务流。"]);
-      setTaskStatus("failed");
-      return () => {};
-    }
-
+  useEffect(() => {
+    if (disableAutoStream || ["completed", "failed", "blocked"].includes(taskStatus) || !taskId) return undefined;
+    const endpoint = taskConfig?.streamEndpoint || `/api/v1/tasks/${taskId}/stream`;
+    const streamUrl = normalizeUrl(endpoint);
     const eventSource = new EventSource(streamUrl);
 
-    eventSource.onmessage = (event) => {
-      if (event.data === "[DONE]") {
-        eventSource.close();
-        setCurrentStageIndex(timelines.length);
-        setProgress(100);
-        setTaskStatus("completed");
-      }
+    const finish = () => {
+      setProgress(100);
+      setCurrentStageIndex(timelines.length);
+      setTaskStatus("completed");
+      eventSource.close();
     };
-
+    eventSource.onmessage = (event) => {
+      if (event.data === "[DONE]") finish();
+    };
     eventSource.addEventListener("restoration.log", (event) => {
       try {
         if (event.data === "[DONE]") {
-          eventSource.close();
-          setCurrentStageIndex(timelines.length);
-          setProgress(100);
-          setTaskStatus("completed");
+          finish();
           return;
         }
         const payload = JSON.parse(event.data);
         const index = Number(payload.index || 0);
         const total = Number(payload.total || EXPECTED_LOG_TOTAL);
-        const message = payload.message || "收到空日志包";
-        const nextProgress = total > 0 ? Math.round((index / total) * 100) : 0;
-
-        setLogs((prev) => [...prev, message]);
-        setProgress(Math.min(100, nextProgress));
+        const nextProgress = Number(payload.task_progress ?? (total > 0 ? Math.round((index / total) * 100) : 0));
+        setProgress(Math.max(0, Math.min(100, nextProgress)));
         setCurrentStageIndex(Math.min(timelines.length - 1, Math.floor((nextProgress / 100) * timelines.length)));
-
-        if (payload.done === true || index >= total) {
-          eventSource.close();
-          setCurrentStageIndex(timelines.length);
-          setProgress(100);
-          setTaskStatus("completed");
-        }
+        if (payload.done === true || nextProgress >= 100 || index >= total) finish();
       } catch {
-        setLogs((prev) => [...prev, "SSE 数据解析失败，请检查后端 restoration.log 格式。"]);
         setTaskStatus("failed");
         eventSource.close();
       }
     });
-
     eventSource.onerror = () => {
-      setLogs((prev) => [...prev, "SSE 连接失败，请先启动本地后端服务。"]);
-      setTaskStatus("failed");
       eventSource.close();
     };
-
     return () => eventSource.close();
-  }, [disableAutoStream, logsOverride, progressOverride, streamUrl, taskStatusOverride]);
+  }, [disableAutoStream, taskConfig?.streamEndpoint, taskId, taskStatus, timelines.length]);
+
+  const openOutputFolder = async () => {
+    if (!outputDirectory) return;
+    setOperation({ status: "loading", message: "正在打开输出文件夹…" });
+    try {
+      const response = await fetch(`${API_BASE}/api/output/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json;charset=UTF-8" },
+        body: JSON.stringify({ output_dir: outputDirectory }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload?.success === false) throw new Error(payload?.message || "无法打开输出文件夹。");
+      setOperation({ status: "success", message: payload?.message || "已打开输出文件夹。" });
+    } catch (error) {
+      setOperation({ status: "error", message: error.message || "无法打开输出文件夹。" });
+    }
+  };
+
+  const facts = [
+    ["处理模式", modeLabel(rawMode)],
+    ["当前状态", statusText],
+    ["输入尺寸", inputWidth && inputHeight ? `${inputWidth} × ${inputHeight}` : ""],
+    ["输出尺寸", outputWidth && outputHeight ? `${outputWidth} × ${outputHeight}` : ""],
+    ["输出格式", outputExists ? outputFormat : ""],
+    ["文件体积", inputSize || outputSize ? `${inputSize || "未知"} → ${outputSize || "未知"}` : ""],
+    ["处理用时", duration],
+    ["创建时间", createdAt],
+    ["完成时间", completedAt],
+    ["当前阶段", stageText],
+  ].filter(([, value]) => Boolean(value));
 
   return (
-    <div className="flex h-[100dvh] w-full select-none flex-col overflow-hidden p-6 text-slate-200" style={styles.page}>
-      <div className="mb-4 flex shrink-0 items-start justify-between pb-4" style={styles.headerBorder}>
-        <div>
-          <span className="mb-1 block font-mono text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: "#418c80" }}>
-            V0.4 / 1080P Stable Delivery Pipeline
-          </span>
-          <h1 className="flex items-center space-x-3 text-2xl font-semibold tracking-wide text-slate-100">
-            <span>核心修复任务</span>
-            <span className="px-2 py-0.5 font-mono text-xs font-normal" style={styles.innerCard}>
-              {taskId || "等待 taskId"}
-            </span>
-          </h1>
-          <p className="mt-1 font-mono text-xs text-slate-500">
-            模式: <span className="text-slate-400">{mode}</span> · 目标规格: <span className="text-slate-400">{target}</span> · 格式:{" "}
-            <span className="text-slate-400">{format}</span> · 质量报告: <span className="text-slate-400">{report ? "已绑定" : "等待生成"}</span>
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
-            <span
-              className="rounded border px-3 py-1 font-mono tracking-[0.12em]"
-              style={{ color: deliveryMeta.color, borderColor: deliveryMeta.border, backgroundColor: "#0d181a" }}
-            >
-              {deliveryMeta.label}
-            </span>
-            <span className="text-slate-500">{deliveryMeta.desc}</span>
-            {compressionCandidateHint ? (
-              <span className="rounded-sm border border-[#315342] bg-[#102a1c]/60 px-2 py-0.5 text-[#8be6b1]">
-                技术提示：{compressionCandidateHint}
-              </span>
-            ) : null}
-            {phase5DefaultColorHint ? (
-              <span className="rounded-sm border border-[#315342] bg-[#102a1c]/60 px-2 py-0.5 text-[#8be6b1]">
-                {phase5DefaultColorHint}
-              </span>
-            ) : null}
-            {finalDeliveryReason ? <span className="font-mono text-slate-500">reason: {finalDeliveryReason}</span> : null}
-            {finalDeliveryRisk ? <span className="font-mono text-slate-500">risk: {finalDeliveryRisk}</span> : null}
-            {finalDeliveryUsage ? <span className="font-mono text-slate-500">usage: {finalDeliveryUsage}</span> : null}
-          </div>
+    <section className="hdde-detail-page" data-testid="task-detail-page">
+      <header className="hdde-detail-header">
+        <div className="hdde-detail-heading">
+          <p className="hdde-eyebrow">任务详情</p>
+          <h1>{statusText}</h1>
+          <p title={displayName}>{displayName}</p>
         </div>
-
-        <div className="mt-1 flex space-x-3">
-          <button type="button" onClick={onBackToDashboard} className="px-4 py-1.5 text-xs tracking-wide transition-all duration-300 hover:bg-[#112426] hover:text-slate-200" style={styles.secondaryButton}>
-            返回工作台
+        <div className="hdde-detail-actions">
+          <button type="button" onClick={onBackToDashboard} className="hdde-detail-button hdde-detail-button--secondary">
+            返回处理中心
           </button>
           <button
             type="button"
-            disabled={taskStatus !== "completed"}
+            disabled={!canCompare}
             onClick={onViewCompare}
-            className={`px-5 py-1.5 font-mono text-xs font-bold uppercase tracking-widest transition-all duration-300 ${taskStatus === "completed" ? "hover:brightness-125" : "cursor-not-allowed"}`}
-            style={taskStatus === "completed" ? styles.primaryButton : styles.disabledButton}
+            className="hdde-detail-button hdde-detail-button--primary"
           >
-            查看高清对比
+            查看前后对比
           </button>
         </div>
+      </header>
+
+      <div className="hdde-detail-overview" aria-label="任务概览">
+        {facts.slice(0, 4).map(([label, value]) => (
+          <article key={label}>
+            <span>{label}</span>
+            <strong data-tone={label === "当前状态" ? (taskStatus === "completed" ? "positive" : taskStatus === "failed" ? "negative" : "info") : undefined}>
+              {value}
+            </strong>
+          </article>
+        ))}
       </div>
 
-      <div className="mb-6 w-full shrink-0">
-        <div className="relative h-[3px] w-full overflow-hidden" style={styles.progressBg}>
-          <div className="absolute left-0 top-0 h-full transition-all duration-500" style={{ ...styles.progressBar, width: `${progress}%` }} />
-        </div>
-        <div className="mt-1.5 flex items-center justify-between font-mono text-[10px] text-slate-500">
-          <span>PIPELINE EXECUTION STATE</span>
-          <span className="font-bold" style={{ color: "#3cb3a0" }}>
-            {taskStatus === "completed" ? "100% COMPLETE" : taskStatus === "failed" ? "STREAM FAILED" : `${progress}% STREAMING`}
-          </span>
-        </div>
-      </div>
+      <div className="hdde-detail-grid">
+        <article className="hdde-detail-panel hdde-detail-progress-panel">
+          <div className="hdde-detail-section-heading">
+            <div>
+              <p className="hdde-eyebrow">处理进度</p>
+              <h2>{taskStatus === "completed" ? "全部步骤已完成" : statusText}</h2>
+            </div>
+            <strong>{taskStatus === "completed" ? 100 : progress}%</strong>
+          </div>
+          <div className="hdde-detail-progress" aria-label={`处理进度 ${taskStatus === "completed" ? 100 : progress}%`}>
+            <span style={{ width: `${taskStatus === "completed" ? 100 : progress}%` }} />
+          </div>
+          <ProgressTimeline items={timelines} currentStageIndex={currentStageIndex} taskStatus={taskStatus} />
+        </article>
 
-      <div className="flex min-h-0 w-full flex-1 space-x-6 pb-4">
-        <ProgressTimeline currentStageIndex={currentStageIndex} taskStatus={taskStatus} />
-        <RealtimeLogStream logs={logs} taskStatus={taskStatus} />
-      </div>
+        <aside className="hdde-detail-side">
+          <article className="hdde-detail-panel">
+            <div className="hdde-detail-section-heading">
+              <div>
+                <p className="hdde-eyebrow">结果概览</p>
+                <h2>{isFourK ? (outputExists ? "4K成品已生成" : statusText) : delivery.label}</h2>
+              </div>
+              <span className="hdde-detail-delivery-badge" data-status={delivery.status}>
+                {outputExists ? "结果可用" : "等待结果"}
+              </span>
+            </div>
+            <p className="hdde-detail-description">
+              {isFourK
+                ? "已按4K尺寸适配合同处理；该能力不代表真实细节重建或超分辨率增强。"
+                : delivery.description}
+            </p>
+            <dl className="hdde-detail-output-list">
+              {facts.slice(4).map(([label, value]) => (
+                <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+              ))}
+              <div>
+                <dt>输出位置</dt>
+                <dd>{outputFileName ? `正式输出目录 / ${getFileDisplayName(outputFileName, "成品文件")}` : "尚未生成成品"}</dd>
+              </div>
+            </dl>
+          </article>
 
-      <footer className="mt-auto w-full shrink-0 truncate border-t border-[#0e1d1f] px-3 py-1 text-center font-mono text-[10px] tracking-wider text-slate-600">{PAGE_FOOTER}</footer>
-    </div>
+          <article className="hdde-detail-panel hdde-detail-result-actions">
+            <p className="hdde-eyebrow">任务操作</p>
+            <div className="hdde-detail-result-action-grid">
+              <button type="button" disabled={!outputUrl} onClick={() => window.open(outputUrl, "_blank", "noopener,noreferrer")}>打开成品</button>
+              <button type="button" disabled={!outputDirectory} onClick={openOutputFolder}>打开输出文件夹</button>
+              <button type="button" disabled={!canCompare} onClick={onViewCompare}>查看前后对比</button>
+              <button type="button" disabled={!canViewReport} onClick={onViewReport}>查看处理报告</button>
+              <button type="button" onClick={onReprocess}>重新处理</button>
+              <UnifiedFeedback
+                taskId={taskId}
+                sourceFeature="processing_center"
+                stage={stageText}
+                triggerLabel="反馈问题"
+                testId="task-feedback-trigger"
+              />
+            </div>
+            {operation.message ? <p className="hdde-detail-operation-message" data-tone={operation.status}>{operation.message}</p> : null}
+          </article>
+        </aside>
+      </div>
+    </section>
   );
 }

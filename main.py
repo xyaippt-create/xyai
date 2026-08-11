@@ -1,10 +1,13 @@
 import argparse
 import asyncio
+import copy
 import json
+import logging
 import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -13,11 +16,34 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from runtime import APP_VERSION
+from runtime import APP_VERSION, PRODUCT_VERSION
 from runtime.crash_handler import handle_exception, install_global_exception_hook
 from runtime.error_dialog import show_info_dialog
 from runtime.startup_check import run_startup_check
 from runtime.system_info import is_pyinstaller
+from engine.diagnostics.runtime_logging import (
+    CONFIGURATION_ERROR,
+    ENVIRONMENT_ERROR,
+    PRODUCT_ERROR,
+    USER_ACTION_REQUIRED,
+    begin_runtime,
+    build_exception_diagnostics,
+    configure_runtime_identity,
+    initialize_file_logging,
+    log_runtime_event,
+    related_runtime_events,
+)
+from engine.storage.app_data_migration import execute_migration_cycle, resolve_migrated_formal_output_path
+from engine.image_processing_routing.four_k_v1 import (
+    FOUR_K_V1_MODE,
+    FOUR_K_V1_OUTPUT_DIRECTORY,
+    FOUR_K_V1_OUTPUT_PROFILE,
+    FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY,
+    FOUR_K_V1_ROUTE,
+    build_4k_v1_output_path,
+    inspect_4k_v1_source,
+    process_4k_v1_image,
+)
 
 
 AUTO_MODE = "fidelity"
@@ -25,6 +51,8 @@ SERVER_HOST = "localhost"
 SERVER_PORT = 8787
 SERVER_CORS_ORIGINS = ["*"]
 DEFAULT_TASK_ID = "task_vmp_v04_core"
+ENHANCEMENT_1080P_FEATURE_KEY = "enhancement_1080p"
+ENHANCEMENT_4K_FEATURE_KEY = "enhancement_4k"
 SUPPORTED_MODES = [
     "fidelity",
     "texture",
@@ -46,18 +74,36 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
 APP_DATA_ROOT_NAME = "\u5f71\u754cHDDE"
 LEGACY_WORK_DIR_NAME = "\u5f71\u754c\u6587\u4ef6"
-DEFAULT_INPUT_DIR_NAME = "\u8f93\u5165"
-DEFAULT_OUTPUT_DIR_NAME = "\u8f93\u51fa"
-DEFAULT_REPORT_DIR_NAME = "\u62a5\u544a"
-DEFAULT_FEEDBACK_DIR_NAME = "\u53cd\u9988\u5305"
-DEFAULT_TMP_DIR_NAME = "\u4e34\u65f6"
-DEFAULT_DELIVERY_PACKAGE_DIR_NAME = "\u4ea4\u4ed8\u5305"
-DEFAULT_CONFIG_DIR_NAME = "\u914d\u7f6e"
-DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT = Path("D:/\u5f71\u754c\u6587\u4ef6/\u56fe\u7247\u538b\u7f29\u8f93\u51fa")
-DEFAULT_BETA_UPLOAD_DIR_NAME = "beta_uploads"
-LEGACY_SAFE_BETA_INPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u5165"
-LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = "1080P\u5b89\u5168\u589e\u5f3a\u8f93\u51fa"
-LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME = "\u5f71\u754c\u6d4b\u8bd5\u53cd\u9988\u5305"
+OUTPUT_ROOT_RELATIVE = Path("\u8f93\u51fa")
+DIAGNOSTIC_ROOT_RELATIVE = Path("\u8bca\u65ad")
+DEFAULT_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u6807\u51c6\u589e\u5f3a"
+DEFAULT_INPUT_DIR_NAME = DEFAULT_OUTPUT_DIR_NAME / ".\u8f93\u5165\u7f13\u5b58"
+DEFAULT_REPORT_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u62a5\u544a"
+DEFAULT_FEEDBACK_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u53cd\u9988\u5305"
+DEFAULT_TMP_DIR_NAME = OUTPUT_ROOT_RELATIVE / "\u56fe\u7247\u538b\u7f29" / ".\u8fd0\u884c\u7f13\u5b58"
+DEFAULT_DELIVERY_PACKAGE_DIR_NAME = DEFAULT_FEEDBACK_DIR_NAME
+DEFAULT_CONFIG_DIR_NAME = Path(".")
+DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT = Path("D:/\u5f71\u754c\u6587\u4ef6/\u8f93\u51fa/\u56fe\u7247\u538b\u7f29")
+DEFAULT_BETA_UPLOAD_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u5b89\u5168\u589e\u5f3a" / ".\u8f93\u5165\u7f13\u5b58"
+LEGACY_SAFE_BETA_INPUT_DIR_NAME = DEFAULT_BETA_UPLOAD_DIR_NAME
+LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u5b89\u5168\u589e\u5f3a"
+LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME = DEFAULT_FEEDBACK_DIR_NAME / "1080P\u5b89\u5168\u589e\u5f3a"
+IMAGE_COMPRESSION_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "\u56fe\u7247\u538b\u7f29"
+RUNTIME_LOG_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u65e5\u5fd7"
+REQUIRED_FORMAL_SUBDIRECTORIES = (
+    ("output_root", OUTPUT_ROOT_RELATIVE),
+    ("diagnostic_root", DIAGNOSTIC_ROOT_RELATIVE),
+    ("normal_output_dir", DEFAULT_OUTPUT_DIR_NAME),
+    ("normal_input_dir", DEFAULT_INPUT_DIR_NAME),
+    ("image_compression_output_dir", IMAGE_COMPRESSION_OUTPUT_DIR_NAME),
+    ("tmp_dir", DEFAULT_TMP_DIR_NAME),
+    ("safe_beta_output_dir", LEGACY_SAFE_BETA_OUTPUT_DIR_NAME),
+    ("beta_upload_dir", DEFAULT_BETA_UPLOAD_DIR_NAME),
+    ("report_dir", DEFAULT_REPORT_DIR_NAME),
+    ("feedback_dir", DEFAULT_FEEDBACK_DIR_NAME),
+    ("safe_beta_feedback_dir", LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME),
+    ("runtime_log_dir", RUNTIME_LOG_DIR_NAME),
+)
 BETA_LOG_QUEUE: queue.Queue[str] = queue.Queue(maxsize=256)
 
 
@@ -99,10 +145,56 @@ def _documents_dir() -> Path:
     return Path.home() / "Documents"
 
 
+def _ensure_directory_with_ownership(path: Path, *, parents: bool) -> dict:
+    try:
+        path.mkdir(parents=parents, exist_ok=False)
+    except FileExistsError:
+        if path.is_dir():
+            return {
+                "valid": True,
+                "created_by_this_attempt": False,
+                "failed_stage": "",
+                "failure_reason": "",
+            }
+        return {
+            "valid": False,
+            "created_by_this_attempt": False,
+            "failed_stage": "type_validation",
+            "failure_reason": "路径已被同名文件占用。",
+        }
+    except OSError as exc:
+        return {
+            "valid": False,
+            "created_by_this_attempt": False,
+            "failed_stage": "create",
+            "failure_reason": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "created_by_this_attempt": False,
+            "failed_stage": "create",
+            "failure_reason": str(exc),
+        }
+
+    if not path.is_dir():
+        return {
+            "valid": False,
+            "created_by_this_attempt": True,
+            "failed_stage": "type_validation",
+            "failure_reason": "目录创建后状态无效。",
+        }
+    return {
+        "valid": True,
+        "created_by_this_attempt": True,
+        "failed_stage": "",
+        "failure_reason": "",
+    }
+
+
 def _directory_writable(path: Path) -> tuple[bool, str]:
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".hdde_write_test"
+        probe = path / f".hdde_write_test_{uuid.uuid4().hex}.tmp"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
         return True, ""
@@ -110,58 +202,255 @@ def _directory_writable(path: Path) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _cleanup_newly_created_directories(created_directories: list[Path]) -> list[dict[str, str]]:
+    failures: list[dict[str, str]] = []
+    for directory in reversed(created_directories):
+        try:
+            if not directory.exists():
+                continue
+            if not directory.is_dir():
+                failures.append({"path": str(directory), "reason": "新建路径已不再是目录，未执行清理。"})
+                continue
+            if any(directory.iterdir()):
+                failures.append({"path": str(directory), "reason": "新建目录当前非空，未执行清理。"})
+                continue
+            directory.rmdir()
+        except Exception as exc:
+            failures.append({"path": str(directory), "reason": str(exc)})
+    return failures
+
+
+def _validate_required_formal_directories(base_dir: Path, created_directories: list[Path] | None = None) -> dict:
+    created = list(created_directories or [])
+    base_resolved = base_dir.resolve()
+
+    def blocked(path: Path, stage: str, reason: str) -> dict:
+        cleanup_failures = _cleanup_newly_created_directories(created)
+        return {
+            "directory_ready": False,
+            "error_code": "REQUIRED_DIRECTORY_UNAVAILABLE",
+            "failed_path": str(path),
+            "failed_stage": stage,
+            "failure_reason": reason,
+            "message": f"必需目录不可用：{path}。请检查路径占用、目录权限或磁盘状态。",
+            "created_directories": [str(item) for item in created],
+            "cleanup_failures": cleanup_failures,
+        }
+
+    for _key, directory_name in REQUIRED_FORMAL_SUBDIRECTORIES:
+        directory = base_dir / directory_name
+        try:
+            resolved = directory.resolve()
+        except Exception as exc:
+            return blocked(directory, "path_validation", str(exc))
+        if not directory.is_absolute() or resolved == base_resolved or not _path_is_within(resolved, base_resolved):
+            return blocked(directory, "path_validation", "必需目录路径不在正式根目录内。")
+        creation = _ensure_directory_with_ownership(directory, parents=False)
+        if creation["created_by_this_attempt"]:
+            created.append(directory)
+        if not creation["valid"]:
+            return blocked(directory, creation["failed_stage"], creation["failure_reason"])
+        writable, error = _directory_writable(directory)
+        if not writable:
+            return blocked(directory, "writable_check", error or "必需目录不可写。")
+
+    return {
+        "directory_ready": True,
+        "error_code": "",
+        "failed_path": "",
+        "failed_stage": "",
+        "failure_reason": "",
+        "message": "正式目录及全部必需子目录已就绪。",
+        "created_directories": [str(item) for item in created],
+        "cleanup_failures": [],
+    }
+
+
+def _initial_formal_app_data_root() -> Path:
+    if os.name == "nt" and Path("D:/").exists():
+        return Path("D:/") / LEGACY_WORK_DIR_NAME
+    if os.name == "nt":
+        return _documents_dir() / APP_DATA_ROOT_NAME
+    return Path.home() / APP_DATA_ROOT_NAME
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+    except Exception:
+        return False
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def _formal_root_validation_error(path: Path) -> tuple[str, str]:
+    if not path.is_absolute():
+        return "FORMAL_DIRECTORY_PATH_INVALID", "正式目录必须使用绝对路径。"
+    forbidden_roots = [PROJECT_ROOT, Path.cwd()]
+    for name in ("TEMP", "TMP"):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            forbidden_roots.append(Path(value))
+    if any(_path_is_within(path, root) for root in forbidden_roots):
+        return "FORMAL_DIRECTORY_PATH_FORBIDDEN", "正式目录不能位于项目目录、当前工作目录或系统临时目录中。"
+    return "", ""
+
+
 def resolve_app_data_root(settings: dict | None = None) -> dict:
     settings = settings if isinstance(settings, dict) else _read_settings_file_safely()
-    candidates: list[tuple[str, Path]] = []
     configured = str(settings.get("app_data_root") or "").strip()
     saved = str(settings.get("last_app_data_root") or "").strip()
-    project_tmp_root = PROJECT_ROOT / "tmp" / "runtime_data"
     if configured:
-        candidates.append(("user_config", Path(configured).expanduser()))
-    saved_path = Path(saved).expanduser() if saved and saved != configured else None
-    saved_is_project_tmp = False
-    if saved_path is not None:
-        try:
-            saved_is_project_tmp = project_tmp_root.resolve() in saved_path.resolve().parents or saved_path.resolve() == project_tmp_root.resolve()
-        except Exception:
-            saved_is_project_tmp = False
-    if saved_path is not None and not saved_is_project_tmp:
-        candidates.append(("saved_config", saved_path))
-    if os.name == "nt":
-        candidates.append(("d_drive", Path("D:/") / LEGACY_WORK_DIR_NAME))
+        source = "user_config"
+        candidate = Path(configured).expanduser()
+        first_initialization = False
+    elif saved:
+        source = "saved_config"
+        candidate = Path(saved).expanduser()
+        first_initialization = False
     else:
-        candidates.append(("documents", Path.home() / APP_DATA_ROOT_NAME))
-    candidates.append(("documents", _documents_dir() / APP_DATA_ROOT_NAME))
-    if saved_path is not None and saved_is_project_tmp:
-        candidates.append(("saved_config", saved_path))
-    candidates.append(("project_tmp", PROJECT_ROOT / "tmp" / "runtime_data" / APP_DATA_ROOT_NAME))
+        source = "initial_default"
+        candidate = _initial_formal_app_data_root()
+        first_initialization = True
 
-    failures: list[dict] = []
-    for source, candidate in candidates:
-        writable, error = _directory_writable(candidate)
-        if writable:
+    error_code, validation_error = _formal_root_validation_error(candidate)
+    if error_code:
+        return {
+            "path": candidate,
+            "source": source,
+            "exists": candidate.exists(),
+            "writable": False,
+            "directory_ready": False,
+            "error_code": error_code,
+            "error": validation_error,
+            "message": validation_error,
+            "created": False,
+            "first_initialization": first_initialization,
+            "required_directories_validated": False,
+            "failed_path": str(candidate),
+            "failed_stage": "path_validation",
+            "failure_reason": validation_error,
+            "created_directories": [],
+            "cleanup_failures": [],
+        }
+
+    if not first_initialization and not candidate.exists():
+        failure_reason = "已保存的正式目录不存在。"
+        message = f"{failure_reason}请恢复该目录，或前往系统设置选择新目录。"
+        return {
+            "path": candidate,
+            "source": source,
+            "exists": False,
+            "writable": False,
+            "directory_ready": False,
+            "error_code": "FORMAL_DIRECTORY_NOT_FOUND",
+            "error": message,
+            "message": message,
+            "created": False,
+            "first_initialization": False,
+            "required_directories_validated": False,
+            "failed_path": str(candidate),
+            "failed_stage": "root_exists_check",
+            "failure_reason": failure_reason,
+            "created_directories": [],
+            "cleanup_failures": [],
+        }
+
+    creation = _ensure_directory_with_ownership(candidate, parents=True)
+    root_created = bool(creation["created_by_this_attempt"])
+    if not creation["valid"]:
+        error = creation["failure_reason"]
+        cleanup_failures = _cleanup_newly_created_directories([candidate] if root_created else [])
+        error_code = "FORMAL_DIRECTORY_NOT_WRITABLE" if candidate.exists() else "FORMAL_DIRECTORY_CREATE_FAILED"
+        message = "正式目录不可用，请前往系统设置重新选择目录。"
+        return {
+            "path": candidate,
+            "source": source,
+            "exists": candidate.exists(),
+            "writable": False,
+            "directory_ready": False,
+            "error_code": error_code,
+            "error": f"{message} {error}".strip(),
+            "message": message,
+            "created": False,
+            "first_initialization": first_initialization,
+            "required_directories_validated": False,
+            "failed_path": str(candidate),
+            "failed_stage": creation["failed_stage"],
+            "failure_reason": error,
+            "created_directories": [str(candidate)] if root_created else [],
+            "cleanup_failures": cleanup_failures,
+        }
+
+    writable, error = _directory_writable(candidate)
+    if writable:
+        required = _validate_required_formal_directories(candidate, [candidate] if root_created else [])
+        if not required["directory_ready"]:
             return {
                 "path": candidate,
                 "source": source,
                 "exists": candidate.exists(),
-                "writable": True,
-                "error": "",
-                "fallback_errors": failures,
+                "writable": bool(candidate.exists() and candidate.is_dir()),
+                "directory_ready": False,
+                "error_code": required["error_code"],
+                "error": required["failure_reason"],
+                "message": required["message"],
+                "created": False,
+                "first_initialization": first_initialization,
+                "required_directories_validated": True,
+                "failed_path": required["failed_path"],
+                "failed_stage": required["failed_stage"],
+                "failure_reason": required["failure_reason"],
+                "created_directories": required["created_directories"],
+                "cleanup_failures": required["cleanup_failures"],
             }
-        failures.append({"source": source, "path": str(candidate), "error": error})
-    fallback = PROJECT_ROOT / "tmp" / "runtime_data" / APP_DATA_ROOT_NAME
+        return {
+            "path": candidate,
+            "source": source,
+            "exists": True,
+            "writable": True,
+            "directory_ready": True,
+            "error_code": "",
+            "error": "",
+            "message": required["message"],
+            "created": root_created,
+            "first_initialization": first_initialization,
+            "required_directories_validated": True,
+            "failed_path": "",
+            "failed_stage": "",
+            "failure_reason": "",
+            "created_directories": required["created_directories"],
+            "cleanup_failures": [],
+        }
+
+    cleanup_failures = _cleanup_newly_created_directories([candidate] if root_created else [])
+    error_code = "FORMAL_DIRECTORY_NOT_WRITABLE" if candidate.exists() else "FORMAL_DIRECTORY_CREATE_FAILED"
+    message = "正式目录不可写，请前往系统设置重新选择目录。" if candidate.exists() else "正式目录不存在且无法创建，请前往系统设置重新选择目录。"
     return {
-        "path": fallback,
-        "source": "project_tmp",
-        "exists": fallback.exists(),
+        "path": candidate,
+        "source": source,
+        "exists": candidate.exists(),
         "writable": False,
-        "error": failures[-1]["error"] if failures else "no writable app data root",
-        "fallback_errors": failures,
+        "directory_ready": False,
+        "error_code": error_code,
+        "error": f"{message} {error}".strip(),
+        "message": message,
+        "created": False,
+        "first_initialization": first_initialization,
+        "required_directories_validated": False,
+        "failed_path": str(candidate),
+        "failed_stage": "root_writable_check" if candidate.exists() else "root_create",
+        "failure_reason": error,
+        "created_directories": [str(candidate)] if root_created else [],
+        "cleanup_failures": cleanup_failures,
     }
 
 
 def get_app_data_root() -> Path:
-    return Path(resolve_app_data_root()["path"])
+    root_info = resolve_app_data_root()
+    if not root_info["directory_ready"]:
+        raise RuntimeError(root_info["message"])
+    return Path(root_info["path"])
 
 
 def default_output_dir() -> Path:
@@ -169,11 +458,11 @@ def default_output_dir() -> Path:
 
 
 def default_settings() -> dict:
-    app_data_root = get_app_data_root()
+    initial_root = _initial_formal_app_data_root()
     return {
         "app_data_root": "",
-        "last_app_data_root": str(app_data_root),
-        "default_output_dir": str(default_output_dir()),
+        "last_app_data_root": "",
+        "default_output_dir": str(initial_root / DEFAULT_OUTPUT_DIR_NAME),
         "image_compression_default_output_root": str(DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
         "input_cache_policy": "keep",
         "cleanup_input_cache_days": 0,
@@ -186,36 +475,318 @@ def default_settings() -> dict:
     }
 
 
-def load_settings() -> dict:
-    settings = default_settings()
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _canonical_settings_json(settings: dict) -> str:
+    return json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def write_settings_if_changed(next_settings: dict) -> dict:
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        log_runtime_event(
+            "SETTINGS_WRITE_FAILED",
+            level=logging.ERROR,
+            stage="settings_parent_directory",
+            result="failed",
+            error_category=ENVIRONMENT_ERROR,
+            path=SETTINGS_PATH,
+            reason=str(exc),
+            impact="settings_not_persisted",
+            action="check_settings_directory_permissions",
+        )
+        raise
     if SETTINGS_PATH.exists():
+        try:
+            current_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            current_settings = None
+        if isinstance(current_settings, dict) and _canonical_settings_json(current_settings) == _canonical_settings_json(next_settings):
+            log_runtime_event(
+                "SETTINGS_WRITE_SKIPPED",
+                level=logging.WARNING,
+                stage="settings_write",
+                result="skipped",
+                path=SETTINGS_PATH,
+                reason="settings_unchanged",
+                impact="settings_file_preserved",
+                action="none",
+            )
+            return {
+                "status": "SKIPPED_UNCHANGED",
+                "write_skipped": True,
+                "write_performed": False,
+            }
+    try:
+        SETTINGS_PATH.write_text(json.dumps(next_settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        log_runtime_event(
+            "SETTINGS_WRITE_FAILED",
+            level=logging.ERROR,
+            stage="settings_write",
+            result="failed",
+            error_category=ENVIRONMENT_ERROR,
+            path=SETTINGS_PATH,
+            reason=str(exc),
+            impact="settings_not_persisted",
+            action="check_settings_file_permissions",
+        )
+        raise
+    log_runtime_event(
+        "SETTINGS_WRITE_SUCCEEDED",
+        stage="settings_write",
+        result="success",
+        path=SETTINGS_PATH,
+        impact="settings_persisted",
+        action="none",
+    )
+    return {
+        "status": "WRITE_PERFORMED",
+        "write_skipped": False,
+        "write_performed": True,
+    }
+
+
+def load_settings(load_status: dict | None = None) -> dict:
+    settings = default_settings()
+    settings_exists = SETTINGS_PATH.exists()
+    settings_read_valid = False
+    settings_complete = False
+    settings_read_reason = "settings_file_missing"
+    if settings_exists:
         try:
             loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
+                settings_read_valid = True
+                settings_complete = all(key in loaded for key in settings)
                 settings.update({key: value for key, value in loaded.items() if value is not None})
-        except Exception:
-            pass
-    if any(marker in str(settings.get("default_output_dir", "")) for marker in ("闆", "杈", "澧", "雪原Ai增强引擎")):
-        settings["default_output_dir"] = str(default_output_dir())
+                settings_read_reason = "settings_loaded" if settings_complete else "settings_fields_incomplete"
+            else:
+                settings_read_reason = "settings_root_is_not_an_object"
+        except Exception as exc:
+            settings_read_reason = f"{type(exc).__name__}: {exc}"
+    if settings_read_valid:
+        log_runtime_event(
+            "SETTINGS_READ_SUCCEEDED",
+            stage="settings_read",
+            result="complete" if settings_complete else "incomplete",
+            path=SETTINGS_PATH,
+            reason=settings_read_reason,
+            impact="settings_loaded",
+            action="none" if settings_complete else "complete_settings_configuration",
+        )
+    else:
+        log_runtime_event(
+            "SETTINGS_READ_FAILED",
+            level=logging.ERROR if settings_exists else logging.WARNING,
+            stage="settings_read",
+            result="failed" if settings_exists else "missing",
+            error_category=CONFIGURATION_ERROR,
+            path=SETTINGS_PATH,
+            reason=settings_read_reason,
+            impact="settings_defaults_used_without_overwrite",
+            action="repair_settings_file" if settings_exists else "initialize_settings_after_directory_validation",
+        )
+    had_saved_formal_root = bool(str(settings.get("app_data_root") or "").strip() or str(settings.get("last_app_data_root") or "").strip())
     root_info = resolve_app_data_root(settings)
-    settings["last_app_data_root"] = str(root_info["path"])
-    default_output_text = str(settings.get("default_output_dir") or "").strip()
-    legacy_d_output = default_output_text.replace("\\", "/").startswith("D:/影界文件/")
-    if not default_output_text or (legacy_d_output and root_info["source"] != "d_drive"):
-        settings["default_output_dir"] = str(Path(root_info["path"]) / DEFAULT_OUTPUT_DIR_NAME)
-    SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    first_initialization_can_persist = (
+        not had_saved_formal_root
+        and root_info["directory_ready"]
+        and (not settings_exists or (settings_read_valid and settings_complete))
+    )
+    if first_initialization_can_persist:
+        settings["last_app_data_root"] = str(root_info["path"])
+        write_settings_if_changed(settings)
+    else:
+        if had_saved_formal_root:
+            skip_reason = "formal_root_already_configured"
+        elif not root_info["directory_ready"]:
+            skip_reason = "formal_directory_not_ready"
+        elif settings_exists and not settings_read_valid:
+            skip_reason = "settings_read_failed"
+        elif settings_exists and not settings_complete:
+            skip_reason = "settings_fields_incomplete"
+        else:
+            skip_reason = "settings_persistence_not_required"
+        log_runtime_event(
+            "SETTINGS_WRITE_SKIPPED",
+            level=logging.WARNING,
+            stage="settings_write_decision",
+            result="skipped",
+            path=SETTINGS_PATH,
+            reason=skip_reason,
+            impact="settings_file_preserved",
+            action="none" if had_saved_formal_root else "resolve_settings_or_directory_issue",
+        )
+    if load_status is not None:
+        if settings_read_valid and settings_complete:
+            status = "loaded"
+        elif settings_read_valid:
+            status = "incomplete"
+        elif settings_exists:
+            status = "invalid"
+        else:
+            status = "missing"
+        load_status.clear()
+        load_status.update(
+            {
+                "status": status,
+                "file_path": str(SETTINGS_PATH),
+                "file_exists": settings_exists,
+                "loaded_from_file": settings_read_valid,
+                "complete": settings_complete,
+                "defaults_applied": not settings_complete,
+                "reason": settings_read_reason,
+                "persisted_on_first_initialization": first_initialization_can_persist,
+            }
+        )
     return settings
 
 
-def get_desktop_work_dirs() -> tuple[Path, Path]:
-    desktop = Path.home() / "Desktop"
-    work_dir = desktop / "雪原Ai增强引擎"
-    input_dir = work_dir / "输入图片"
-    output_dir = work_dir / "输出成品"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return input_dir, output_dir
+def read_frontend_build_identity(project_root: Path | None = None, display_version: str = APP_VERSION) -> dict:
+    root = Path(project_root or PROJECT_ROOT)
+    dist_root = root / "dist"
+    index_path = dist_root / "index.html"
+    result = {
+        "status": "unavailable",
+        "build_id": "",
+        "source_path": "",
+        "error_code": "",
+        "reason": "",
+    }
+    if not index_path.is_file():
+        return {
+            **result,
+            "error_code": "BUILD_ARTIFACT_INDEX_MISSING",
+            "reason": "当前前端构建入口不存在。",
+        }
+    try:
+        index_text = index_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return {
+            **result,
+            "source_path": str(index_path),
+            "error_code": "BUILD_ARTIFACT_INDEX_UNREADABLE",
+            "reason": str(exc),
+        }
+    script_match = re.search(r'<script[^>]+src=["\']([^"\']+\.js)["\']', index_text)
+    if not script_match:
+        return {
+            **result,
+            "source_path": str(index_path),
+            "error_code": "BUILD_ARTIFACT_REFERENCE_MISSING",
+            "reason": "当前前端构建入口未引用 JavaScript 产物。",
+        }
+    try:
+        dist_resolved = dist_root.resolve()
+        asset_path = (dist_root / script_match.group(1).lstrip("/")).resolve()
+        asset_path.relative_to(dist_resolved)
+    except (OSError, ValueError) as exc:
+        return {
+            **result,
+            "source_path": str(index_path),
+            "error_code": "BUILD_ARTIFACT_PATH_INVALID",
+            "reason": str(exc),
+        }
+    if not asset_path.is_file():
+        return {
+            **result,
+            "source_path": str(asset_path),
+            "error_code": "BUILD_ARTIFACT_MISSING",
+            "reason": "当前前端 JavaScript 构建产物不存在。",
+        }
+    try:
+        asset_text = asset_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return {
+            **result,
+            "source_path": str(asset_path),
+            "error_code": "BUILD_ARTIFACT_UNREADABLE",
+            "reason": str(exc),
+        }
+    pattern = re.compile(
+        rf"{re.escape(display_version)}\+(?:[0-9a-f]{{7,12}}|nogit)\.(?:clean|dirty|unknown)\.\d{{8}}T\d{{9}}Z"
+    )
+    build_ids = sorted(set(pattern.findall(asset_text)))
+    if len(build_ids) != 1:
+        return {
+            **result,
+            "source_path": str(asset_path),
+            "error_code": "BUILD_ID_MISSING" if not build_ids else "BUILD_ID_AMBIGUOUS",
+            "reason": "当前前端产物未包含唯一 Build ID。",
+        }
+    return {
+        "status": "loaded",
+        "build_id": build_ids[0],
+        "source_path": str(asset_path),
+        "error_code": "",
+        "reason": "",
+    }
+
+
+def read_only_formal_root_status(user_dirs: dict) -> dict:
+    root_text = str(user_dirs.get("app_data_root") or "").strip()
+    root_path = Path(root_text) if root_text else None
+    inspection_error = ""
+    try:
+        root_exists = bool(root_path and root_path.exists() and root_path.is_dir())
+    except OSError as exc:
+        root_exists = False
+        inspection_error = f"{type(exc).__name__}: {exc}"
+    missing_required_directories: list[str] = []
+    if root_path and root_exists:
+        for _, relative_path in REQUIRED_FORMAL_SUBDIRECTORIES:
+            required_path = root_path / relative_path
+            try:
+                required_directory_present = required_path.exists() and required_path.is_dir()
+            except OSError as exc:
+                required_directory_present = False
+                if not inspection_error:
+                    inspection_error = f"{type(exc).__name__}: {exc}"
+            if not required_directory_present:
+                missing_required_directories.append(str(required_path))
+    startup_ready = bool(user_dirs.get("directory_ready"))
+    directory_ready = bool(startup_ready and root_exists and not missing_required_directories)
+    if not startup_ready:
+        error_code = str(user_dirs.get("directory_error_code") or "FORMAL_DIRECTORY_NOT_READY")
+        failed_path = str(user_dirs.get("failed_path") or root_text)
+        failed_stage = str(user_dirs.get("failed_stage") or "startup_validation")
+        reason = str(user_dirs.get("failure_reason") or user_dirs.get("directory_message") or "正式目录未就绪。")
+    elif inspection_error:
+        error_code = "FORMAL_DIRECTORY_READ_FAILED"
+        failed_path = root_text
+        failed_stage = "read_only_presence_check"
+        reason = inspection_error
+    elif not root_exists:
+        error_code = "FORMAL_DIRECTORY_STATE_CHANGED"
+        failed_path = root_text
+        failed_stage = "read_only_presence_check"
+        reason = "启动后正式根目录已不存在或不再是目录。"
+    elif missing_required_directories:
+        error_code = "REQUIRED_DIRECTORY_STATE_CHANGED"
+        failed_path = missing_required_directories[0]
+        failed_stage = "read_only_presence_check"
+        reason = "启动后必需正式子目录缺失或不再是目录。"
+    else:
+        error_code = ""
+        failed_path = ""
+        failed_stage = ""
+        reason = ""
+    return {
+        "status": "ready" if directory_ready else "blocked",
+        "path": root_text,
+        "source": str(user_dirs.get("app_data_root_source") or ""),
+        "directory_ready": directory_ready,
+        "exists": root_exists,
+        "writable_at_startup": bool(user_dirs.get("app_data_root_writable")),
+        "startup_validation_ready": startup_ready,
+        "required_directories_present": not missing_required_directories,
+        "missing_required_directories": missing_required_directories,
+        "error_code": error_code,
+        "failed_path": failed_path,
+        "failed_stage": failed_stage,
+        "reason": reason,
+        "validation_basis": "startup_validation_plus_read_only_presence_check",
+    }
 
 
 def get_desktop_work_dirs() -> tuple[Path, Path]:
@@ -229,8 +800,8 @@ def normalize_user_output_root(output_root: Path) -> Path:
     return root
 
 
-def resolve_hdde_user_dirs() -> dict[str, Path]:
-    root_info = resolve_app_data_root()
+def resolve_hdde_user_dirs(settings: dict | None = None) -> dict:
+    root_info = resolve_app_data_root(settings)
     base_dir = Path(root_info["path"])
     normal_input_dir = base_dir / DEFAULT_INPUT_DIR_NAME
     normal_output_dir = base_dir / DEFAULT_OUTPUT_DIR_NAME
@@ -243,27 +814,39 @@ def resolve_hdde_user_dirs() -> dict[str, Path]:
     safe_beta_input_root = base_dir / LEGACY_SAFE_BETA_INPUT_DIR_NAME
     safe_beta_output_dir = base_dir / LEGACY_SAFE_BETA_OUTPUT_DIR_NAME
     safe_beta_feedback_dir = base_dir / LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME
-    for directory in (
-        base_dir,
-        normal_input_dir,
-        normal_output_dir,
-        report_dir,
-        feedback_dir,
-        tmp_dir,
-        beta_upload_dir,
-        delivery_package_dir,
-        config_dir,
-        safe_beta_input_root,
-        safe_beta_output_dir,
-        safe_beta_feedback_dir,
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
+    image_compression_output_dir = base_dir / IMAGE_COMPRESSION_OUTPUT_DIR_NAME
+    runtime_log_dir = base_dir / RUNTIME_LOG_DIR_NAME
+    if root_info["directory_ready"] and not root_info.get("required_directories_validated"):
+        required = _validate_required_formal_directories(base_dir)
+        if not required["directory_ready"]:
+            root_info = {
+                **root_info,
+                "directory_ready": False,
+                "error_code": required["error_code"],
+                "error": required["failure_reason"],
+                "message": required["message"],
+                "required_directories_validated": True,
+                "failed_path": required["failed_path"],
+                "failed_stage": required["failed_stage"],
+                "failure_reason": required["failure_reason"],
+                "created_directories": required["created_directories"],
+                "cleanup_failures": required["cleanup_failures"],
+            }
     return {
         "base_dir": base_dir,
+        "output_root": base_dir / OUTPUT_ROOT_RELATIVE,
+        "diagnostic_root": base_dir / DIAGNOSTIC_ROOT_RELATIVE,
         "app_data_root": base_dir,
         "app_data_root_source": root_info["source"],
         "app_data_root_exists": bool(root_info["exists"]),
         "app_data_root_writable": bool(root_info["writable"]),
+        "directory_ready": bool(root_info["directory_ready"]),
+        "directory_error_code": str(root_info["error_code"]),
+        "directory_message": str(root_info["message"]),
+        "failed_path": str(root_info.get("failed_path") or ""),
+        "failed_stage": str(root_info.get("failed_stage") or ""),
+        "failure_reason": str(root_info.get("failure_reason") or ""),
+        "cleanup_failures": list(root_info.get("cleanup_failures") or []),
         "normal_input_dir": normal_input_dir,
         "normal_output_dir": normal_output_dir,
         "report_dir": report_dir,
@@ -275,6 +858,8 @@ def resolve_hdde_user_dirs() -> dict[str, Path]:
         "safe_beta_input_root": safe_beta_input_root,
         "safe_beta_output_dir": safe_beta_output_dir,
         "safe_beta_feedback_dir": safe_beta_feedback_dir,
+        "image_compression_output_dir": image_compression_output_dir,
+        "runtime_log_dir": runtime_log_dir,
     }
 
 
@@ -959,7 +1544,25 @@ def build_web_app():
     return app
 
 
-def build_web_app():
+def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PORT):
+    runtime_id = begin_runtime(product_version=APP_VERSION)
+    build_identity = read_frontend_build_identity(PROJECT_ROOT, APP_VERSION)
+    configure_runtime_identity(
+        product_version=APP_VERSION,
+        build_id=build_identity["build_id"] or "unavailable",
+    )
+    application_started_monotonic = time.monotonic()
+    application_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    log_runtime_event(
+        "APPLICATION_STARTING",
+        stage="application_startup",
+        result="starting",
+        product_version=APP_VERSION,
+        build_id=build_identity["build_id"] or "unavailable",
+        runtime_id=runtime_id,
+        impact="backend_initializing",
+        action="resolve_settings_and_formal_directory",
+    )
     try:
         from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
         from fastapi.middleware.cors import CORSMiddleware
@@ -970,29 +1573,103 @@ def build_web_app():
     from backend.v036_output_core import build_output_plan, sha256_file
     from backend.image_compression_api import register_image_compression_routes
     from engine.diagnostics.feedback_bundle import generate_feedback_bundle
+    from engine.diagnostics.feedback_context import (
+        RECENT_FEATURE_COVERAGE,
+        build_feedback_context,
+        feedback_context_preview,
+    )
     from engine.pipeline import process_v046_delivery
 
-    settings_data = load_settings()
-    try:
-        input_dir, default_output_root = get_desktop_work_dirs()
-    except Exception:
-        input_dir = PROJECT_ROOT / "runtime" / "v04_inputs"
-        default_output_root = PROJECT_ROOT / "runtime" / "v04_outputs"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        default_output_root.mkdir(parents=True, exist_ok=True)
-    configured_output = Path(settings_data.get("default_output_dir") or default_output_root)
-    try:
-        output_formal_dir = normalize_user_output_root(configured_output)
-    except Exception:
-        output_formal_dir = normalize_user_output_root(default_output_root)
+    migration_settings_snapshot = _read_settings_file_safely()
+    migration_settings_valid = bool(
+        SETTINGS_PATH.exists()
+        and migration_settings_snapshot
+        and all(key in migration_settings_snapshot for key in default_settings())
+    )
+    settings_load_status: dict = {}
+    settings_data = load_settings(settings_load_status)
+    initial_user_dirs = resolve_hdde_user_dirs(settings_data)
+    migration_result: dict = {"status": "SKIPPED", "second_run": "NOT_RUN"}
+    if migration_settings_valid and initial_user_dirs["directory_ready"]:
+        try:
+            saved_root = Path(str(migration_settings_snapshot.get("last_app_data_root") or "")).expanduser().resolve()
+            active_root = Path(initial_user_dirs["app_data_root"]).resolve()
+        except Exception:
+            saved_root = None
+            active_root = None
+        if saved_root is not None and active_root is not None and saved_root == active_root:
+            migration_result = execute_migration_cycle(
+                active_root,
+                settings_data,
+                settings_path=SETTINGS_PATH,
+                settings_writer=write_settings_if_changed,
+                project_root=PROJECT_ROOT,
+                write_report=True,
+            )
+            if migration_result["status"] == "BLOCKED":
+                first_failure = ((migration_result.get("first") or {}).get("failures") or [{}])[0]
+                initial_user_dirs = {
+                    **initial_user_dirs,
+                    "directory_ready": False,
+                    "directory_error_code": "APP_DATA_MIGRATION_BLOCKED",
+                    "directory_message": "正式目录迁移失败，依赖目录的功能已阻断。",
+                    "failed_path": str(first_failure.get("path") or active_root),
+                    "failed_stage": "app_data_migration",
+                    "failure_reason": str(first_failure.get("reason") or "正式目录迁移未完成。"),
+                }
+            elif migration_result["status"] == "APPLIED":
+                initial_user_dirs = resolve_hdde_user_dirs(settings_data)
+    if initial_user_dirs["directory_ready"]:
+        logging_initialization = initialize_file_logging(initial_user_dirs["app_data_root"])
+        log_runtime_event(
+            "DIRECTORY_VALIDATION_SUCCEEDED",
+            stage="required_directory_validation",
+            result="success",
+            path=initial_user_dirs["app_data_root"],
+            impact="directory_dependent_operations_available",
+            action="none",
+        )
+    else:
+        logging_initialization = {
+            "initialized": False,
+            "degraded": True,
+            "path": None,
+            "reason": "formal_directory_not_ready",
+        }
+        log_runtime_event(
+            "DIRECTORY_VALIDATION_FAILED",
+            level=logging.ERROR,
+            stage=initial_user_dirs.get("failed_stage") or "required_directory_validation",
+            result="failed",
+            error_category=ENVIRONMENT_ERROR,
+            path=initial_user_dirs.get("failed_path") or initial_user_dirs["app_data_root"],
+            reason=initial_user_dirs.get("failure_reason") or initial_user_dirs.get("directory_message"),
+            impact="image_processing_blocked",
+            action="check_directory_permissions_or_select_formal_directory",
+        )
+    input_dir = initial_user_dirs["normal_input_dir"]
+    default_output_root = initial_user_dirs["normal_output_dir"]
+    output_formal_dir = default_output_root
 
     task_registry: dict[str, dict] = {}
     upload_file_index: dict[str, Path] = {}
     output_file_index: dict[str, Path] = {}
     background_tasks: dict[str, asyncio.Task] = {}
+    task_start_times: dict[str, float] = {}
+    task_terminal_events: set[str] = set()
     latest_task_id = {"value": None}
+    feedback_context_snapshots: dict[str, dict] = {}
 
-    app = FastAPI(title="VisualMasterPro / Yingjie V0.4 API", version="V0.4")
+    app = FastAPI(title=f"VisualMasterPro / Yingjie {APP_VERSION} API", version=PRODUCT_VERSION)
+    app.state.runtime_task_start_times = task_start_times
+    app.state.runtime_task_terminal_events = task_terminal_events
+    app.state.app_data_migration_result = migration_result
+    app.state.settings_load_status = settings_load_status
+    app.state.frontend_build_identity = build_identity
+    app.state.runtime_id = runtime_id
+    app.state.application_started_at = application_started_at
+    app.state.feedback_context_snapshots = feedback_context_snapshots
+    app.state.task_registry = task_registry
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -1000,9 +1677,148 @@ def build_web_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    def _finish_image_task(
+        task_id: str,
+        *,
+        event: str,
+        started_at: float | None,
+        stage: str,
+        result: str,
+        route: str,
+        path: str | Path | None,
+        reason: str,
+        impact: str,
+        action: str,
+        error_category: str = "",
+        phase_event: str = "",
+        purpose: str = "1080P_DELIVERY",
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> float | None:
+        if task_id in task_terminal_events:
+            return None
+        timing_anchor = started_at if started_at is not None else task_start_times.get(task_id, time.monotonic())
+        duration_ms = round((time.monotonic() - timing_anchor) * 1000, 3)
+        task_terminal_events.add(task_id)
+        common_fields = {
+            "stage": stage,
+            "result": result,
+            "error_category": error_category,
+            "task_id": task_id,
+            "purpose": purpose,
+            "route": route,
+            "duration_ms": duration_ms,
+            "path": path or "",
+            "reason": reason,
+            "impact": impact,
+            "action": action,
+        }
+        if exception is not None:
+            diagnostics = build_exception_diagnostics(
+                exception,
+                error_category=error_category or PRODUCT_ERROR,
+                error_stage=stage,
+            )
+            common_fields.update(diagnostics)
+            task_record = task_registry.get(task_id)
+            if isinstance(task_record, dict):
+                task_record["error_context"] = dict(diagnostics)
+        try:
+            if phase_event:
+                log_runtime_event(phase_event, level=level, **common_fields)
+            log_runtime_event(event, level=level, **common_fields)
+            task_record = task_registry.get(task_id) or {}
+            log_runtime_event(
+                "PROCESS_SUCCEEDED" if result == "success" else "PROCESS_FAILED",
+                level=level,
+                feature_key=task_record.get("feature_key") or "",
+                result_id=task_record.get("result_id") or "",
+                status="completed" if result == "success" else ("failed" if result == "failed" else result),
+                **common_fields,
+            )
+        finally:
+            task_start_times.pop(task_id, None)
+        return duration_ms
+
+    def finish_task_success(task_id: str, *, started_at: float | None, **fields) -> float | None:
+        return _finish_image_task(
+            task_id,
+            event="IMAGE_TASK_SUCCEEDED",
+            started_at=started_at,
+            **fields,
+        )
+
+    def finish_task_failure(task_id: str, *, started_at: float | None, **fields) -> float | None:
+        return _finish_image_task(
+            task_id,
+            event="IMAGE_TASK_FAILED",
+            started_at=started_at,
+            **fields,
+        )
+
+    def register_unified_image_result(task: dict, final_path: Path) -> str:
+        result_id = str(task.get("result_id") or f"image_result_{uuid.uuid4().hex[:16]}")
+        task_id = str(task.get("task_id") or "")
+        feature_key = str(task.get("feature_key") or "")
+        source_path = Path(task["input_path"]).resolve()
+        resolved_result = final_path.resolve()
+        task_result = task.get("task_result") if isinstance(task.get("task_result"), dict) else {}
+        task_result.update(
+            {
+                "result_id": result_id,
+                "task_id": task_id,
+                "feature_key": feature_key,
+                "source": str(source_path),
+                "source_path": str(source_path),
+                "result_file": str(resolved_result),
+                "output_path": str(resolved_result),
+                "status": "completed",
+            }
+        )
+        task.update(
+            {
+                "result_id": result_id,
+                "source": str(source_path),
+                "source_path": source_path,
+                "result_file": str(resolved_result),
+                "task_result": task_result,
+            }
+        )
+        log_runtime_event(
+            "RESULT_REGISTERED",
+            stage="result_registry",
+            result="success",
+            feature_key=feature_key,
+            task_id=task_id,
+            result_id=result_id,
+            status="completed",
+            impact="formal_result_available",
+        )
+        return result_id
+
     def save_settings(next_settings: dict) -> None:
-        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(json.dumps(next_settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_settings_if_changed(next_settings)
+
+    def current_user_dirs() -> dict:
+        return resolve_hdde_user_dirs(settings_data)
+
+    def require_directory_ready() -> dict:
+        user_dirs = current_user_dirs()
+        if user_dirs["directory_ready"]:
+            return user_dirs
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": user_dirs["directory_error_code"] or "FORMAL_DIRECTORY_NOT_READY",
+                "message": user_dirs["directory_message"] or "正式目录未就绪，请前往系统设置重新选择目录。",
+                "directory_ready": False,
+                "failed_path": user_dirs.get("failed_path") or "",
+                "failed_stage": user_dirs.get("failed_stage") or "",
+                "failure_reason": user_dirs.get("failure_reason") or "",
+                "cleanup_failures": user_dirs.get("cleanup_failures") or [],
+            },
+        )
 
     def normalize_output_dir_text(value: str | None) -> str:
         return str(value or "").strip().strip('"').strip()
@@ -1057,6 +1873,10 @@ def build_web_app():
                 "normalized_path": str(target),
                 "source": source_hint or "invalid",
                 "message": "输出路径已存在，但不是目录。",
+                "error_category": ENVIRONMENT_ERROR,
+                "failed_stage": "output_directory_create",
+                "phase_event": "OUTPUT_DIRECTORY_CREATE_FAILED",
+                "action": "check_output_directory_permissions",
             }
         if not existed:
             if not allow_create:
@@ -1081,6 +1901,10 @@ def build_web_app():
                     "normalized_path": str(target),
                     "source": source_hint or "invalid",
                     "message": f"输出目录不存在且无法创建：{exc}",
+                    "error_category": ENVIRONMENT_ERROR,
+                    "failed_stage": "output_directory_create",
+                    "phase_event": "OUTPUT_DIRECTORY_CREATE_FAILED",
+                    "action": "check_output_directory_permissions",
                 }
         probe = target / f".vmp_write_test_{uuid.uuid4().hex}.tmp"
         try:
@@ -1099,6 +1923,10 @@ def build_web_app():
                 "normalized_path": str(target),
                 "source": source_hint or "invalid",
                 "message": f"输出目录不可写：{exc}",
+                "error_category": ENVIRONMENT_ERROR,
+                "failed_stage": "output_directory_writable_check",
+                "phase_event": "OUTPUT_DIRECTORY_CREATE_FAILED",
+                "action": "check_output_directory_permissions",
             }
         return {
             "valid": True,
@@ -1110,7 +1938,8 @@ def build_web_app():
             "message": "输出目录可用",
         }
 
-    def resolve_output_dir(output_dir_value: str | None) -> tuple[Path, dict]:
+    def resolve_output_dir(output_dir_value: str | None, *, persist_custom_selection: bool = False) -> tuple[Path, dict]:
+        user_dirs = require_directory_ready()
         requested = normalize_output_dir_text(output_dir_value)
         allow_custom = bool(settings_data.get("allow_custom_output_dir", True))
         candidates: list[tuple[str, str]] = []
@@ -1118,13 +1947,8 @@ def build_web_app():
             if not allow_custom:
                 raise HTTPException(status_code=400, detail="当前配置不允许使用自定义输出目录。")
             candidates.append(("request", requested))
-        last_used = normalize_output_dir_text(settings_data.get("last_output_dir"))
-        if not requested and last_used:
-            candidates.append(("last_used", last_used))
-        default_value = normalize_output_dir_text(settings_data.get("default_output_dir"))
-        if default_value:
-            candidates.append(("default", default_value))
-        candidates.append(("runtime_fallback", str(default_output_root)))
+        if not requested:
+            candidates.append(("formal_default", str(user_dirs["normal_output_dir"])))
         errors: list[str] = []
         for source, value in candidates:
             checked = validate_output_dir_value(value, source_hint=source)
@@ -1136,14 +1960,28 @@ def build_web_app():
                     "output_dir_created": bool(checked.get("created")),
                     "output_dir_message": checked.get("message") or "",
                 }
-                if source == "request":
-                    settings_data["last_output_dir"] = str(target)
-                    save_settings(settings_data)
+                if source == "request" and persist_custom_selection:
+                    next_settings = {**settings_data, "last_output_dir": str(target)}
+                    save_settings(next_settings)
+                    settings_data.clear()
+                    settings_data.update(next_settings)
                 return target, meta
             errors.append(f"{source}: {checked['message']}")
             if source == "request":
-                raise HTTPException(status_code=400, detail=checked["message"])
-        raise HTTPException(status_code=400, detail="输出目录不可用：" + "；".join(errors))
+                error = HTTPException(status_code=400, detail=checked["message"])
+                error.hdde_error_category = checked.get("error_category") or USER_ACTION_REQUIRED
+                error.hdde_failed_stage = checked.get("failed_stage") or "output_directory_validation"
+                error.hdde_phase_event = checked.get("phase_event") or ""
+                error.hdde_action = checked.get("action") or "select_valid_output_directory"
+                error.hdde_failed_path = checked.get("normalized_path") or value
+                raise error
+        error = HTTPException(status_code=400, detail="输出目录不可用：" + "；".join(errors))
+        error.hdde_error_category = checked.get("error_category") or USER_ACTION_REQUIRED
+        error.hdde_failed_stage = checked.get("failed_stage") or "output_directory_validation"
+        error.hdde_phase_event = checked.get("phase_event") or ""
+        error.hdde_action = checked.get("action") or "select_valid_output_directory"
+        error.hdde_failed_path = checked.get("normalized_path") or value
+        raise error
 
     def resolve_output_dir_for_open(output_dir_value: str | None) -> dict:
         checked = validate_output_dir_value(output_dir_value, allow_create=False, source_hint="request")
@@ -1156,15 +1994,69 @@ def build_web_app():
         }
 
     def save_compression_default_output_root(value: str) -> None:
-        settings_data["image_compression_default_output_root"] = value
-        save_settings(settings_data)
+        next_settings = {**settings_data, "image_compression_default_output_root": value}
+        save_settings(next_settings)
+        settings_data.clear()
+        settings_data.update(next_settings)
+
+    def feedback_runtime_provider() -> dict:
+        formal_root = read_only_formal_root_status(initial_user_dirs)
+        runtime_ready = bool(settings_load_status["status"] == "loaded" and formal_root["directory_ready"])
+        log_path = Path(initial_user_dirs["runtime_log_dir"]) / "hdde.log"
+        error_code = formal_root["error_code"] or ("SETTINGS_NOT_LOADED" if settings_load_status["status"] != "loaded" else "")
+        return {
+            "app_version": APP_VERSION,
+            "product_version": APP_VERSION,
+            "build_id": build_identity["build_id"] or "unavailable",
+            "runtime_id": runtime_id,
+            "runtime_status": "ready" if runtime_ready else "degraded",
+            "backend_health": "healthy" if runtime_ready else "degraded",
+            "backend_connection_status": "connected",
+            "frontend_connection_status": "not_available",
+            "settings_status": settings_load_status["status"],
+            "formal_root_status": formal_root["status"],
+            "host": runtime_host,
+            "port": runtime_port,
+            "runtime_log_reference": "诊断/日志/hdde.log" if log_path.is_file() else "",
+            "runtime_log_available": log_path.is_file(),
+            "error_type": "CONFIGURATION_ERROR" if error_code else "",
+            "error_code": error_code,
+            "error_stage": formal_root["failed_stage"],
+            "error_summary": (formal_root["reason"] or settings_load_status["reason"]) if error_code else "",
+        }
 
     register_image_compression_routes(
         app,
-        user_dirs_provider=resolve_hdde_user_dirs,
+        user_dirs_provider=require_directory_ready,
         output_settings_provider=compression_output_settings_provider,
+        color_output_settings_provider=lambda: {
+            "built_in_default_root": str(Path(settings_data["app_data_root"]) / "输出"),
+            "saved_default_root": str(Path(settings_data["app_data_root"]) / "输出"),
+        },
         output_default_saver=save_compression_default_output_root,
         output_dir_validator=lambda value: validate_output_dir_value(value, source_hint="image_compression"),
+        shared_task_registry=task_registry,
+        output_center_user_dirs_provider=current_user_dirs,
+        feedback_runtime_provider=feedback_runtime_provider,
+        runtime_event_logger=log_runtime_event,
+    )
+
+    from backend.local_retouch_api import register_local_retouch_routes
+
+    register_local_retouch_routes(
+        app,
+        user_dirs_provider=require_directory_ready,
+        shared_task_registry=task_registry,
+        runtime_event_logger=log_runtime_event,
+    )
+
+    from backend.image_diagnosis_api import register_image_diagnosis_routes
+
+    register_image_diagnosis_routes(
+        app,
+        user_dirs_provider=require_directory_ready,
+        shared_task_registry=task_registry,
+        runtime_event_logger=log_runtime_event,
     )
 
     def update_task_result_output_meta(task_result: dict, task: dict, final_path: Path) -> dict:
@@ -1209,20 +2101,21 @@ def build_web_app():
         return target
 
     def unique_input_path(name: str) -> Path:
-        path = input_dir / name
+        active_input_dir = require_directory_ready()["normal_input_dir"]
+        path = active_input_dir / name
         if not path.exists():
             return path
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        candidate = input_dir / f"{path.stem}_{stamp}{path.suffix}"
+        candidate = active_input_dir / f"{path.stem}_{stamp}{path.suffix}"
         counter = 1
         while candidate.exists():
-            candidate = input_dir / f"{path.stem}_{stamp}_{counter}{path.suffix}"
+            candidate = active_input_dir / f"{path.stem}_{stamp}_{counter}{path.suffix}"
             counter += 1
         return candidate
 
     def safe_mode(value: str | None) -> str:
         mode_value = str(value or "fidelity").strip().lower()
-        return mode_value if mode_value in {"fidelity", "texture", "text_safe"} else "fidelity"
+        return mode_value if mode_value in {"fidelity", "texture", "text_safe", FOUR_K_V1_MODE} else "fidelity"
 
     def empty_task_report() -> dict:
         return {
@@ -1240,13 +2133,20 @@ def build_web_app():
 
     def public_task(task: dict) -> dict:
         result = dict(task)
-        for key in ("input_path", "output_root", "expected_output_path", "output_path"):
+        result.pop("formal_root", None)
+        formal_root = Path(current_user_dirs()["app_data_root"])
+        for key in ("input_path", "source_path", "result_file", "output_root", "expected_output_path", "output_path"):
             if key in result and result[key] is not None:
-                result[key] = str(result[key])
+                result[key] = str(resolve_migrated_formal_output_path(result[key], formal_root))
         result["taskId"] = result.get("task_id")
-        result["status"] = result.get("task_status")
+        result["status"] = result.get("task_status") or result.get("status")
+        result["task_status"] = result["status"]
+        result["task_progress"] = result.get("task_progress", result.get("progress", 0))
         result["streamEndpoint"] = f"/api/v1/tasks/{result.get('task_id')}/stream"
-        result["originalUrl"] = public_file_url("uploads", Path(result.get("input_path", "")).name)
+        result["originalUrl"] = result.get("source_preview_url") or public_file_url(
+            "uploads",
+            Path(result.get("input_path") or result.get("source_path") or "").name,
+        )
         if result.get("task_result"):
             filename = result["task_result"].get("output_filename")
             if filename:
@@ -1257,6 +2157,8 @@ def build_web_app():
             if expected:
                 result["enhancedUrl"] = public_file_url("outputs", Path(expected).name)
                 result["final_output_url"] = result["enhancedUrl"]
+        if result.get("result_id") and result.get("task_id") and result.get("result_file"):
+            result["final_output_url"] = f"/api/v1/tasks/{urllib.parse.quote(str(result['task_id']), safe='')}/result-file"
         result.setdefault("main_output_url", None)
         result.setdefault("optimized_output_url", None)
         result.setdefault("final_output_exists", False)
@@ -1267,21 +2169,14 @@ def build_web_app():
             indexed = upload_file_index.get(Path(filename).name)
             if indexed and indexed.exists():
                 return indexed
-            root = input_dir.resolve()
-            target = (input_dir / filename).resolve()
+            active_input_dir = current_user_dirs()["normal_input_dir"]
+            root = active_input_dir.resolve()
+            target = (active_input_dir / filename).resolve()
         elif kind == "outputs":
             indexed = output_file_index.get(Path(filename).name)
             if indexed and indexed.exists():
                 return indexed
-            candidate_roots = [output_formal_dir]
-            for value in (
-                settings_data.get("last_output_dir"),
-                settings_data.get("default_output_dir"),
-            ):
-                if value:
-                    candidate = Path(value).expanduser()
-                    if candidate not in candidate_roots:
-                        candidate_roots.append(candidate)
+            candidate_roots = [current_user_dirs()["normal_output_dir"]]
             for candidate_root in candidate_roots:
                 root = candidate_root.resolve()
                 target = (candidate_root / filename).resolve()
@@ -1289,17 +2184,17 @@ def build_web_app():
                     if target.exists() and target.is_file():
                         output_file_index[Path(filename).name] = target
                         return target
-            root = output_formal_dir.resolve()
-            target = (output_formal_dir / filename).resolve()
+            active_output_dir = current_user_dirs()["normal_output_dir"]
+            root = active_output_dir.resolve()
+            target = (active_output_dir / filename).resolve()
         elif kind == "safe-beta":
-            user_dirs = resolve_hdde_user_dirs()
+            user_dirs = current_user_dirs()
             candidate_roots = [
                 user_dirs["safe_beta_output_dir"],
                 user_dirs["safe_beta_input_root"],
                 user_dirs["safe_beta_feedback_dir"],
                 user_dirs["feedback_dir"],
                 user_dirs["beta_upload_dir"],
-                PROJECT_ROOT / "tmp",
             ]
             raw_filename = urllib.parse.unquote(filename)
             if re.match(r"^/[a-zA-Z]:[\\/]", raw_filename):
@@ -1343,14 +2238,160 @@ def build_web_app():
         task["execution_started"] = True
         background_tasks[task_id] = asyncio.create_task(run_task_background(task_id))
 
+    def run_4k_v1_pipeline(task: dict) -> dict:
+        task_id = str(task.get("task_id") or "")
+        task["execution_started"] = True
+        task["execution_state"] = "processing"
+        task["task_status"] = "processing"
+        task["status"] = "processing"
+        task["task_progress"] = max(int(task.get("task_progress") or 0), 5)
+        log_runtime_event(
+            "PROCESS_STARTED",
+            stage="engine_adapter",
+            result="started",
+            feature_key=task.get("feature_key") or ENHANCEMENT_4K_FEATURE_KEY,
+            task_id=task_id,
+            status="processing",
+            impact="image_processing_running",
+        )
+
+        def record_stage(stage: str, progress: int, message: str) -> None:
+            task["processing_stage"] = stage
+            task["task_progress"] = max(0, min(100, int(progress)))
+            task.setdefault("stage_events", []).append(
+                {
+                    "processing_stage": stage,
+                    "task_progress": task["task_progress"],
+                    "message": message,
+                }
+            )
+
+        try:
+            result = process_4k_v1_image(
+                task["input_path"],
+                task["formal_root"],
+                output_path=task.get("expected_output_path"),
+                stage_callback=record_stage,
+            )
+            task_result = dict(result.get("task_result") or {})
+            task_report = dict(result.get("task_report") or {})
+            final_path_value = result.get("final_output_path") or ""
+            final_path = Path(final_path_value) if final_path_value else None
+            if final_path:
+                output_file_index[final_path.name] = final_path
+                final_url = public_file_url("outputs", final_path.name)
+                task_result["final_output_url"] = final_url
+                task_result["preview_output_url"] = final_url
+            else:
+                final_url = ""
+
+            task.update(
+                {
+                    "task_status": "completed",
+                    "status": "completed",
+                    "execution_state": "completed",
+                    "task_progress": 100,
+                    "processing_stage": "completed",
+                    "completed_at": datetime.now().isoformat(timespec="seconds"),
+                    "output_path": final_path or "",
+                    "enhancedUrl": final_url,
+                    "final_output_url": final_url,
+                    "preview_output_url": final_url,
+                    "final_output_exists": bool(final_path and final_path.is_file()),
+                    "task_result": task_result,
+                    "task_report": task_report,
+                    "quality_conclusion": result.get("quality_conclusion"),
+                    "source_hash_unchanged": result.get("source_hash_unchanged"),
+                    "error_code": "",
+                    "error_message": "",
+                    "output_directory": str(final_path.parent) if final_path else "",
+                    "final_output_path": str(final_path) if final_path else "",
+                    "final_output_filename": final_path.name if final_path else "",
+                    "input_width": task_result.get("input_width"),
+                    "input_height": task_result.get("input_height"),
+                    "output_width": task_result.get("output_width"),
+                    "output_height": task_result.get("output_height"),
+                    "output_format": task_result.get("output_format") or "PNG",
+                    "resize_policy": task_result.get("resize_policy"),
+                }
+            )
+            if final_path and final_path.is_file():
+                register_unified_image_result(task, final_path)
+            finish_task_success(
+                task_id,
+                started_at=task.get("started_at_monotonic"),
+                stage="output_verify",
+                result="success",
+                route=FOUR_K_V1_ROUTE,
+                path=final_path or task.get("input_path"),
+                reason=result.get("quality_conclusion") or "SIZE_ADAPTATION_COMPLETED",
+                impact="output_available" if final_path else "no_processing_needed",
+                action="none",
+                purpose="4K_SIZE_ADAPTATION",
+            )
+        except Exception as exc:
+            error_code = str(getattr(exc, "code", "4K_PROCESSING_FAILED"))
+            failed_stage = str(getattr(exc, "stage", getattr(exc, "hdde_failed_stage", "image_processing")))
+            record_stage(failed_stage, 100, f"4K高清画质增强未完成：{exc}")
+            finish_task_failure(
+                task_id,
+                started_at=task.get("started_at_monotonic"),
+                level=logging.ERROR,
+                stage=failed_stage,
+                result="failed",
+                error_category=ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR,
+                route=FOUR_K_V1_ROUTE,
+                path=task.get("expected_output_path") or task.get("input_path"),
+                reason=str(exc),
+                impact="output_unavailable",
+                action="check_formal_directory_and_retry",
+                purpose="4K_SIZE_ADAPTATION",
+                exception=exc,
+            )
+            task.update(
+                {
+                    "task_status": "failed",
+                    "status": "failed",
+                    "execution_state": "failed",
+                    "task_progress": 100,
+                    "processing_stage": failed_stage,
+                    "error_code": error_code,
+                    "error_message": str(exc),
+                    "task_error": str(exc),
+                    "quality_conclusion": "FAILED",
+                    "task_report": {
+                        "mode": FOUR_K_V1_MODE,
+                        "route": FOUR_K_V1_ROUTE,
+                        "quality_capability_boundary": FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY,
+                        "quality_conclusion": "FAILED",
+                        "warnings": [str(exc)],
+                    },
+                    "completed_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+        return task
+
     def run_image_pipeline(task: dict) -> dict:
         if task.get("execution_state") in {"processing", "completed", "failed"}:
             return task
+        if task.get("mode") == FOUR_K_V1_MODE:
+            return run_4k_v1_pipeline(task)
         task["execution_started"] = True
         task["execution_state"] = "processing"
         task["task_status"] = "processing"
         task["status"] = "processing"
         task["task_progress"] = max(int(task.get("task_progress") or 0), 10)
+        task_id = str(task.get("task_id") or "")
+        log_runtime_event(
+            "PROCESS_STARTED",
+            stage="engine_adapter",
+            result="started",
+            feature_key=task.get("feature_key") or ENHANCEMENT_1080P_FEATURE_KEY,
+            task_id=task_id,
+            status="processing",
+            impact="image_processing_running",
+        )
+        current_stage = "image_processing"
         try:
             result = process_v046_delivery(
                 {
@@ -1366,6 +2407,10 @@ def build_web_app():
                 }
             )
             final_path = Path(result["final_output_path"])
+            if not final_path.is_file():
+                current_stage = "output_finalize"
+                raise RuntimeError(f"处理管线未生成预期成品文件：{final_path}")
+            current_stage = "output_finalize"
             output_file_index[final_path.name] = final_path
             task_result = update_task_result_output_meta(dict(result.get("task_result") or {}), task, final_path)
             task_report = dict(result.get("task_report") or empty_task_report())
@@ -1417,7 +2462,50 @@ def build_web_app():
                     "debug_quality": result.get("debug_quality"),
                 }
             )
+            register_unified_image_result(task, final_path)
+            finish_task_success(
+                task_id,
+                started_at=task.get("started_at_monotonic"),
+                stage="image_processing",
+                result="success",
+                route=task.get("mode"),
+                path=final_path,
+                reason="processing_completed",
+                impact="output_available",
+                action="none",
+            )
         except Exception as exc:
+            failed_stage = getattr(exc, "hdde_failed_stage", current_stage)
+            error_category = getattr(
+                exc,
+                "hdde_error_category",
+                ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR,
+            )
+            phase_event = (
+                getattr(exc, "hdde_phase_event", "")
+                if failed_stage == "output_file_write"
+                else ""
+            )
+            action = (
+                "check_output_path_permissions_disk_space_or_file_occupancy"
+                if failed_stage == "output_file_write"
+                else ("check_runtime_log_and_retry" if error_category == PRODUCT_ERROR else "check_processing_environment")
+            )
+            finish_task_failure(
+                task_id,
+                started_at=task.get("started_at_monotonic"),
+                phase_event=phase_event,
+                level=logging.ERROR,
+                stage=failed_stage,
+                result="failed",
+                error_category=error_category,
+                route=task.get("mode"),
+                path=task.get("expected_output_path") or task.get("output_root"),
+                reason=str(exc),
+                impact="output_unavailable",
+                action=action,
+                exception=exc,
+            )
             task.update(
                 {
                     "task_status": "failed",
@@ -1438,6 +2526,69 @@ def build_web_app():
         if not task:
             yield format_sse_log(1, 2, f"任务不存在：{task_id}")
             yield format_sse_log(2, 2, "请先上传图片，再打开任务日志。", done=True)
+            yield "data: [DONE]\n\n"
+            return
+
+        if task.get("mode") == FOUR_K_V1_MODE:
+            cursor = 0
+            deadline = time.perf_counter() + 180.0
+            while time.perf_counter() < deadline:
+                events = list(task.get("stage_events") or [])
+                while cursor < len(events):
+                    event = events[cursor]
+                    cursor += 1
+                    yield format_sse_log(
+                        cursor,
+                        max(cursor, len(events), 6),
+                        str(event.get("message") or "4K任务状态已更新"),
+                        extra={
+                            "task_status": task.get("task_status"),
+                            "task_progress": event.get("task_progress"),
+                            "processing_stage": event.get("processing_stage"),
+                            "error_code": task.get("error_code") or "",
+                        },
+                    )
+                if task.get("task_status") in {"completed", "failed"}:
+                    break
+                await asyncio.sleep(0.05)
+
+            if task.get("task_status") not in {"completed", "failed"}:
+                task.update(
+                    {
+                        "task_status": "failed",
+                        "status": "failed",
+                        "execution_state": "failed",
+                        "task_progress": 100,
+                        "processing_stage": "processing_timeout",
+                        "error_code": "PROCESSING_TIMEOUT",
+                        "error_message": "4K任务处理超时，请确认正式目录可用后重试。",
+                        "quality_conclusion": "FAILED",
+                    }
+                )
+
+            final_payload = public_task(task)
+            final_message = (
+                f"4K高清画质增强未完成：{task.get('error_message') or '请重试。'}"
+                if task.get("task_status") == "failed"
+                else (
+                    "原图已达到4K门槛，无需重复放大。"
+                    if task.get("quality_conclusion") == "NO_PROCESSING_NEEDED"
+                    else "4K高清画质增强完成"
+                )
+            )
+            yield format_sse_log(
+                max(1, cursor),
+                max(1, cursor),
+                final_message,
+                done=True,
+                extra={
+                    "task": final_payload,
+                    "task_status": task.get("task_status"),
+                    "task_progress": 100,
+                    "processing_stage": task.get("processing_stage"),
+                    "error_code": task.get("error_code") or "",
+                },
+            )
             yield "data: [DONE]\n\n"
             return
 
@@ -1521,11 +2672,12 @@ def build_web_app():
         yield "data: [DONE]\n\n"
 
     def app_workdir_payload() -> dict:
-        user_dirs = resolve_hdde_user_dirs()
+        user_dirs = current_user_dirs()
+        directory_ready = bool(user_dirs["directory_ready"])
         input_dir_path = user_dirs["normal_input_dir"]
         beta_upload_dir = user_dirs["beta_upload_dir"]
         input_image_count = 0
-        if input_dir_path.exists() and input_dir_path.is_dir():
+        if directory_ready and input_dir_path.exists() and input_dir_path.is_dir():
             input_image_count = sum(
                 1
                 for item in input_dir_path.iterdir()
@@ -1537,24 +2689,39 @@ def build_web_app():
             "app_data_root_source": str(user_dirs["app_data_root_source"]),
             "app_data_root_exists": bool(user_dirs["app_data_root_exists"]),
             "app_data_root_writable": bool(user_dirs["app_data_root_writable"]),
+            "directory_ready": directory_ready,
+            "processing_allowed": directory_ready,
+            "directory_error_code": str(user_dirs["directory_error_code"]),
+            "directory_message": str(user_dirs["directory_message"]),
+            "failed_path": str(user_dirs.get("failed_path") or ""),
+            "failed_stage": str(user_dirs.get("failed_stage") or ""),
+            "failure_reason": str(user_dirs.get("failure_reason") or ""),
+            "cleanup_failures": list(user_dirs.get("cleanup_failures") or []),
             "d_drive_available": bool(d_drive_available),
-            "switched_from_d_drive": bool(os.name == "nt" and not d_drive_available and user_dirs["app_data_root_source"] != "d_drive"),
-            "input_dir": str(user_dirs["normal_input_dir"]),
-            "output_dir": str(user_dirs["normal_output_dir"]),
-            "legacy_output_dir": str(user_dirs["safe_beta_output_dir"]),
-            "beta_output_dir": str(user_dirs["safe_beta_output_dir"]),
-            "report_dir": str(user_dirs["report_dir"]),
-            "feedback_dir": str(user_dirs["feedback_dir"]),
-            "tmp_dir": str(user_dirs["tmp_dir"]),
-            "beta_upload_dir": str(beta_upload_dir),
-            "delivery_package_dir": str(user_dirs["delivery_package_dir"]),
-            "config_dir": str(user_dirs["config_dir"]),
-            "safe_beta_input_root": str(user_dirs["safe_beta_input_root"]),
-            "safe_beta_output_dir": str(user_dirs["safe_beta_output_dir"]),
-            "safe_beta_feedback_dir": str(user_dirs["safe_beta_feedback_dir"]),
-            "input_dir_exists": bool(input_dir_path.exists() and input_dir_path.is_dir()),
+            "switched_from_d_drive": False,
+            "input_dir": str(user_dirs["normal_input_dir"]) if directory_ready else "",
+            "output_dir": str(user_dirs["normal_output_dir"]) if directory_ready else "",
+            "four_k_output_dir": (
+                str((Path(user_dirs["app_data_root"]) / Path(FOUR_K_V1_OUTPUT_DIRECTORY)).resolve())
+                if directory_ready
+                else ""
+            ),
+            "legacy_output_dir": str(user_dirs["safe_beta_output_dir"]) if directory_ready else "",
+            "beta_output_dir": str(user_dirs["safe_beta_output_dir"]) if directory_ready else "",
+            "report_dir": str(user_dirs["report_dir"]) if directory_ready else "",
+            "feedback_dir": str(user_dirs["feedback_dir"]) if directory_ready else "",
+            "tmp_dir": str(user_dirs["tmp_dir"]) if directory_ready else "",
+            "beta_upload_dir": str(beta_upload_dir) if directory_ready else "",
+            "delivery_package_dir": str(user_dirs["delivery_package_dir"]) if directory_ready else "",
+            "config_dir": str(user_dirs["config_dir"]) if directory_ready else "",
+            "safe_beta_input_root": str(user_dirs["safe_beta_input_root"]) if directory_ready else "",
+            "safe_beta_output_dir": str(user_dirs["safe_beta_output_dir"]) if directory_ready else "",
+            "safe_beta_feedback_dir": str(user_dirs["safe_beta_feedback_dir"]) if directory_ready else "",
+            "image_compression_output_dir": str(user_dirs["image_compression_output_dir"]) if directory_ready else "",
+            "runtime_log_dir": str(user_dirs["runtime_log_dir"]) if directory_ready else "",
+            "input_dir_exists": bool(directory_ready and input_dir_path.exists() and input_dir_path.is_dir()),
             "input_image_count": input_image_count,
-            "beta_upload_dir_exists": bool(beta_upload_dir.exists() and beta_upload_dir.is_dir()),
+            "beta_upload_dir_exists": bool(directory_ready and beta_upload_dir.exists() and beta_upload_dir.is_dir()),
         }
         return data
 
@@ -1563,30 +2730,126 @@ def build_web_app():
         data = app_workdir_payload()
         return {
             "code": 200,
-            "status": "success",
+            "status": "success" if data["directory_ready"] else "blocked",
             "success": True,
-            "message": "当前影界工作目录已就绪。",
+            "message": data["directory_message"],
             "data": data,
             **data,
         }
 
+    @app.post("/api/app/workdir/select-popup")
+    async def select_formal_workdir(payload: dict = Body(default_factory=dict)):
+        unknown_fields = sorted(str(key) for key in payload if key not in set())
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"正式目录选择请求包含未知字段：{', '.join(unknown_fields)}。")
+
+        def ask_directory() -> str:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            try:
+                selected = filedialog.askdirectory(title="选择影界正式目录")
+            finally:
+                root.destroy()
+            return selected or ""
+
+        try:
+            selected_path = await asyncio.to_thread(ask_directory)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"打开正式目录选择器失败：{exc}") from exc
+        if not selected_path:
+            return {"code": 200, "status": "cancelled", "success": True, "message": "已取消选择正式目录。", "data": {}}
+
+        checked = resolve_app_data_root({"app_data_root": selected_path, "last_app_data_root": settings_data.get("last_app_data_root", "")})
+        if not checked["directory_ready"]:
+            log_runtime_event(
+                "DIRECTORY_VALIDATION_FAILED",
+                level=logging.ERROR,
+                stage=checked.get("failed_stage") or "formal_directory_selection",
+                result="failed",
+                error_category=ENVIRONMENT_ERROR,
+                path=checked.get("failed_path") or selected_path,
+                reason=checked.get("failure_reason") or checked.get("message"),
+                impact="formal_directory_not_changed",
+                action="select_valid_writable_directory",
+            )
+            raise HTTPException(status_code=400, detail={"code": checked["error_code"], "message": checked["message"]})
+        next_settings = {
+            **settings_data,
+            "app_data_root": str(checked["path"]),
+            "last_app_data_root": str(checked["path"]),
+        }
+        try:
+            save_settings(next_settings)
+        except Exception as exc:
+            log_runtime_event(
+                "SETTINGS_WRITE_FAILED",
+                level=logging.ERROR,
+                stage="formal_directory_selection",
+                result="failed",
+                error_category=ENVIRONMENT_ERROR,
+                path=SETTINGS_PATH,
+                reason=str(exc),
+                impact="formal_directory_not_changed",
+                action="check_settings_file_permissions",
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "SETTINGS_WRITE_FAILED",
+                    "message": f"保存正式目录失败：{exc}",
+                },
+            ) from exc
+        settings_data.clear()
+        settings_data.update(next_settings)
+        initialize_file_logging(Path(checked["path"]))
+        log_runtime_event(
+            "DIRECTORY_VALIDATION_SUCCEEDED",
+            stage="formal_directory_selection",
+            result="success",
+            path=checked["path"],
+            impact="formal_directory_available",
+            action="persist_user_selection",
+        )
+        data = app_workdir_payload()
+        return {"code": 200, "status": "success", "success": True, "message": "正式目录已保存并通过校验。", "data": data, **data}
+
     @app.get("/api/health")
     async def health():
-        workdir = app_workdir_payload()
+        formal_root = read_only_formal_root_status(initial_user_dirs)
+        settings_ready = settings_load_status["status"] == "loaded"
+        healthy = bool(settings_ready and formal_root["directory_ready"])
+        directory_ready = bool(formal_root["directory_ready"])
         return {
             "code": 200,
-            "status": "success",
+            "status": "success" if healthy else "degraded",
             "success": True,
-            "message": "VisualMasterPro / 影界 V0.4 API 已就绪。",
+            "message": (
+                f"VisualMasterPro / 影界 {APP_VERSION} API 已就绪。"
+                if healthy
+                else f"VisualMasterPro / 影界 {APP_VERSION} API 正在运行，但运行配置或正式目录未就绪。"
+            ),
             "data": {
-                "version": "V0.4",
+                "version": APP_VERSION,
                 "host": SERVER_HOST,
                 "port": SERVER_PORT,
-                "default_output_dir": str(output_formal_dir),
-                "app_data_root": workdir["app_data_root"],
-                "app_data_root_source": workdir["app_data_root_source"],
-                "safe_beta_output_dir": workdir["safe_beta_output_dir"],
-                "beta_output_dir": workdir["beta_output_dir"],
+                "healthy": healthy,
+                "health_basis": "startup_validation_plus_read_only_presence_check",
+                "settings_status": settings_load_status["status"],
+                "directory_ready": directory_ready,
+                "directory_error_code": formal_root["error_code"],
+                "directory_writable_at_startup": formal_root["writable_at_startup"],
+                "default_output_dir": str(initial_user_dirs["normal_output_dir"]) if directory_ready else "",
+                "app_data_root": formal_root["path"],
+                "app_data_root_source": formal_root["source"],
+                "safe_beta_output_dir": str(initial_user_dirs["safe_beta_output_dir"]) if directory_ready else "",
+                "beta_output_dir": str(initial_user_dirs["safe_beta_output_dir"]) if directory_ready else "",
                 "target_resolution": "1080P",
                 "uploadEndpoint": "/api/upload",
                 "taskEndpoint": "/api/v1/tasks/{task_id}",
@@ -1594,6 +2857,53 @@ def build_web_app():
                 "modes": ["fidelity", "texture", "text_safe"],
                 "outputFormats": ["png", "jpg"],
             },
+        }
+
+    @app.get("/api/runtime/status")
+    async def runtime_status():
+        formal_root = read_only_formal_root_status(initial_user_dirs)
+        overall_status = (
+            "ready"
+            if build_identity["status"] == "loaded"
+            and settings_load_status["status"] == "loaded"
+            and formal_root["directory_ready"]
+            else "degraded"
+        )
+        data = {
+            "read_only": True,
+            "status": overall_status,
+            "product": {
+                "version": APP_VERSION,
+                "build_id": build_identity["build_id"],
+                "build_status": build_identity["status"],
+                "build_source_path": build_identity["source_path"],
+                "build_error_code": build_identity["error_code"],
+                "build_reason": build_identity["reason"],
+            },
+            "application": {
+                "status": "running",
+                "runtime_id": runtime_id,
+                "started_at": application_started_at,
+                "uptime_seconds": round(max(0.0, time.monotonic() - application_started_monotonic), 3),
+                "process_id": os.getpid(),
+                "host": runtime_host,
+                "port": runtime_port,
+                "python_version": sys.version.split()[0],
+                "platform": sys.platform,
+                "executable_path": sys.executable,
+            },
+            "settings": {
+                **settings_load_status,
+                "read_only": True,
+            },
+            "formal_root": formal_root,
+        }
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "message": "运行环境与正式目录状态读取成功。",
+            "data": data,
         }
 
     @app.post("/api/output/validate")
@@ -1626,8 +2936,10 @@ def build_web_app():
                 "message": checked["message"],
                 "data": checked,
             }
-        settings_data["last_output_dir"] = checked["normalized_path"]
-        save_settings(settings_data)
+        next_settings = {**settings_data, "last_output_dir": checked["normalized_path"]}
+        save_settings(next_settings)
+        settings_data.clear()
+        settings_data.update(next_settings)
         return {
             "code": 200,
             "status": "success",
@@ -1693,8 +3005,10 @@ def build_web_app():
                 "data": checked,
             }
         if persist_last_output_dir:
-            settings_data["last_output_dir"] = checked["normalized_path"]
-            save_settings(settings_data)
+            next_settings = {**settings_data, "last_output_dir": checked["normalized_path"]}
+            save_settings(next_settings)
+            settings_data.clear()
+            settings_data.update(next_settings)
         return {
             "code": 200,
             "status": "success",
@@ -2293,8 +3607,9 @@ def build_web_app():
 
     @app.post("/api/beta/safe-1080p/enhance")
     async def beta_safe_1080p_enhance(request: Request):
+        user_dirs = require_directory_ready()
         payload: dict = {}
-        output_dir_value = str(resolve_hdde_user_dirs()["safe_beta_output_dir"])
+        output_dir_value = str(user_dirs["safe_beta_output_dir"])
         beta_run_id = ""
         try:
             content_type = request.headers.get("content-type", "").lower()
@@ -2537,9 +3852,10 @@ def build_web_app():
 
     @app.post("/api/beta/safe-1080p/output-status")
     async def beta_safe_1080p_output_status(payload: dict = Body(default_factory=dict)):
+        user_dirs = require_directory_ready()
         payload = payload if isinstance(payload, dict) else {}
         beta_run_id = str(payload.get("beta_run_id") or "")
-        output_dir_value = payload.get("output_dir") or str(resolve_hdde_user_dirs()["safe_beta_output_dir"])
+        output_dir_value = payload.get("output_dir") or str(user_dirs["safe_beta_output_dir"])
         output_dir = Path(str(output_dir_value)).expanduser()
         selected_names_raw = payload.get("selected_file_names") or payload.get("files") or []
         if isinstance(selected_names_raw, str):
@@ -2579,6 +3895,7 @@ def build_web_app():
 
     @app.post("/api/beta/safe-1080p/feedback-package")
     async def beta_safe_1080p_feedback_package(payload: dict = Body(default_factory=dict)):
+        require_directory_ready()
         from engine.diagnostics.safe_1080p_feedback_package import generate_safe_1080p_feedback_package
 
         payload = payload if isinstance(payload, dict) else {}
@@ -2616,130 +3933,397 @@ def build_web_app():
     async def upload_file(
         file: UploadFile = File(...),
         mode: str = Form("fidelity"),
-        scale: str = Form("2"),
+        scale: str | None = Form(None),
         output_dir: str | None = Form(None),
         output_profile: str | None = Form(None),
         output_format: str | None = Form(None),
         format: str | None = Form(None),
         color_correction_enabled: bool = Form(False),
     ):
+        user_dirs = require_directory_ready()
         task_id = make_task_id()
+        task_started_at = time.monotonic()
+        task_start_times[task_id] = task_started_at
         mode_value = safe_mode(mode)
-        requested_output_format = parse_output_format(output_format or format or settings_data.get("default_output_format"))
-        output_root, output_dir_meta = resolve_output_dir(output_dir)
-        print(
-            "[VisualMasterPro output_dir] upload",
-            {
-                "task_id": task_id,
-                "requested_output_dir": output_dir,
-                "resolved_output_dir": str(output_root),
-                "output_dir_source": output_dir_meta.get("output_dir_source"),
-                "used_custom_output_dir": output_dir_meta.get("used_custom_output_dir"),
-            },
-        )
+        current_stage = "image_task_intake"
+        current_path: str | Path = file.filename or ""
+        current_impact = "image_task_not_created"
+        current_action = "check_runtime_log_and_retry"
 
-        receive_start = time.perf_counter()
-        raw = await file.read()
-        receive_file_time = round(time.perf_counter() - receive_start, 6)
-        if not raw:
-            raise HTTPException(status_code=400, detail="上传图片为空。")
+        def annotate_http_failure(
+            error: HTTPException,
+            *,
+            stage: str,
+            error_category: str,
+            path: str | Path,
+            impact: str,
+            action: str,
+            phase_event: str = "",
+        ) -> HTTPException:
+            error.hdde_failed_stage = getattr(error, "hdde_failed_stage", stage)
+            error.hdde_error_category = getattr(error, "hdde_error_category", error_category)
+            error.hdde_failed_path = getattr(error, "hdde_failed_path", path)
+            error.hdde_impact = getattr(error, "hdde_impact", impact)
+            error.hdde_action = getattr(error, "hdde_action", action)
+            error.hdde_phase_event = getattr(error, "hdde_phase_event", phase_event)
+            return error
 
-        upload_name = safe_upload_name(file.filename)
-        saved_path = unique_input_path(upload_name)
-        save_start = time.perf_counter()
         try:
-            saved_path.write_bytes(raw)
-        except Exception as exc:
-            fallback_input_dir = PROJECT_ROOT / "runtime" / "v04_inputs"
-            fallback_input_dir.mkdir(parents=True, exist_ok=True)
-            saved_path = fallback_input_dir / f"{task_id}_original_{upload_name}"
+            log_runtime_event(
+                "IMAGE_TASK_STARTED",
+                stage=current_stage,
+                result="started",
+                task_id=task_id,
+                purpose="4K_SIZE_ADAPTATION" if mode_value == FOUR_K_V1_MODE else "1080P_DELIVERY",
+                route=mode_value,
+                path=current_path,
+                impact="image_task_initializing",
+                action="validate_input_and_output_plan",
+            )
+
+            current_stage = "output_format_validation"
+            if mode_value == FOUR_K_V1_MODE:
+                if output_dir or scale is not None:
+                    raise annotate_http_failure(
+                        HTTPException(status_code=400, detail="4K任务不接受自定义输出目录或缩放参数。"),
+                        stage="contract_validation",
+                        error_category=USER_ACTION_REQUIRED,
+                        path=output_dir or "",
+                        impact=current_impact,
+                        action="use_frozen_4k_request_contract",
+                    )
+                if str(output_profile or "").strip().lower() != FOUR_K_V1_OUTPUT_PROFILE:
+                    raise annotate_http_failure(
+                        HTTPException(status_code=400, detail="4K任务必须使用 delivery_4k_v1 输出合同。"),
+                        stage="contract_validation",
+                        error_category=USER_ACTION_REQUIRED,
+                        path="",
+                        impact=current_impact,
+                        action="use_frozen_4k_request_contract",
+                    )
+                if str(output_format or format or "").strip().lower().lstrip(".") != "png":
+                    raise annotate_http_failure(
+                        HTTPException(status_code=400, detail="4K V1仅支持PNG成品。"),
+                        stage="contract_validation",
+                        error_category=USER_ACTION_REQUIRED,
+                        path="",
+                        impact=current_impact,
+                        action="use_frozen_4k_request_contract",
+                    )
+                requested_output_format = "png"
+                output_root = (Path(user_dirs["app_data_root"]) / Path(FOUR_K_V1_OUTPUT_DIRECTORY)).resolve()
+                output_dir_meta = {
+                    "output_dir_source": "formal_4k_contract",
+                    "used_custom_output_dir": False,
+                    "output_dir_created": False,
+                    "output_dir_message": "使用正式目录下的4K高清增强输出目录。",
+                }
+            else:
+                requested_output_format = parse_output_format(output_format or format or settings_data.get("default_output_format"))
+                current_stage = "output_directory_validation"
+                current_path = output_dir or ""
+                current_action = "select_valid_output_directory"
+                try:
+                    output_root, output_dir_meta = resolve_output_dir(output_dir, persist_custom_selection=False)
+                except HTTPException as exc:
+                    annotate_http_failure(
+                        exc,
+                        stage=current_stage,
+                        error_category=USER_ACTION_REQUIRED,
+                        path=current_path,
+                        impact=current_impact,
+                        action=current_action,
+                    )
+                    raise
+
+            current_stage = "output_directory_ready"
+            current_path = output_root
+            current_impact = "image_task_not_created"
+            current_action = "check_runtime_log_and_retry"
+            print(
+                "[VisualMasterPro output_dir] upload",
+                {
+                    "task_id": task_id,
+                    "requested_output_dir": output_dir,
+                    "resolved_output_dir": str(output_root),
+                    "output_dir_source": output_dir_meta.get("output_dir_source"),
+                    "used_custom_output_dir": output_dir_meta.get("used_custom_output_dir"),
+                },
+            )
+
+            current_stage = "input_read"
+            current_path = file.filename or ""
+            current_impact = "image_processing_not_started"
+            current_action = "check_input_file_access"
+            receive_start = time.perf_counter()
+            try:
+                raw = await file.read()
+            except Exception as exc:
+                error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
+                error = HTTPException(status_code=500, detail=f"上传图片读取失败：{exc}")
+                annotate_http_failure(
+                    error,
+                    stage=current_stage,
+                    error_category=error_category,
+                    path=current_path,
+                    impact=current_impact,
+                    action=current_action if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
+                )
+                raise error from exc
+            receive_file_time = round(time.perf_counter() - receive_start, 6)
+            if not raw:
+                current_stage = "input_validation"
+                current_impact = "image_task_not_created"
+                current_action = "select_non_empty_supported_image"
+                error = HTTPException(status_code=400, detail="上传图片为空。")
+                annotate_http_failure(
+                    error,
+                    stage=current_stage,
+                    error_category=USER_ACTION_REQUIRED,
+                    path=current_path,
+                    impact=current_impact,
+                    action=current_action,
+                )
+                raise error
+
+            current_stage = "input_path_planning"
+            upload_name = safe_upload_name(file.filename)
+            saved_path = unique_input_path(upload_name)
+            current_path = saved_path
+
+            current_stage = "input_file_write"
+            current_action = "check_formal_input_directory_permissions"
+            save_start = time.perf_counter()
             try:
                 saved_path.write_bytes(raw)
-            except Exception as fallback_exc:
-                raise HTTPException(status_code=500, detail=f"输入文件写入失败：{exc}；备用缓存也失败：{fallback_exc}") from fallback_exc
-        save_input_time = round(time.perf_counter() - save_start, 6)
+            except Exception as exc:
+                error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
+                error = HTTPException(status_code=500, detail=f"正式输入目录写入失败：{exc}")
+                annotate_http_failure(
+                    error,
+                    stage=current_stage,
+                    error_category=error_category,
+                    path=current_path,
+                    impact=current_impact,
+                    action=current_action if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
+                )
+                raise error from exc
+            save_input_time = round(time.perf_counter() - save_start, 6)
 
-        try:
-            output_plan = build_output_plan(
-                saved_path,
-                output_root,
-                "delivery_1080p",
-                requested_output_format,
-                False,
-                mode=mode_value,
+            current_stage = "route_planning"
+            current_action = "select_supported_decodable_image"
+            try:
+                if mode_value == FOUR_K_V1_MODE:
+                    output_plan = inspect_4k_v1_source(saved_path)
+                    output_plan["paths"] = {
+                        "final": build_4k_v1_output_path(saved_path, user_dirs["app_data_root"])
+                    }
+                    output_plan["image_type"] = "alpha" if output_plan.get("has_alpha") else "opaque"
+                else:
+                    output_plan = build_output_plan(
+                        saved_path,
+                        output_root,
+                        "delivery_1080p",
+                        requested_output_format,
+                        False,
+                        mode=mode_value,
+                    )
+            except HTTPException as exc:
+                error_category = (
+                    getattr(exc, "hdde_error_category", "")
+                    or (USER_ACTION_REQUIRED if 400 <= exc.status_code < 500 else PRODUCT_ERROR)
+                )
+                annotate_http_failure(
+                    exc,
+                    stage=current_stage,
+                    error_category=error_category,
+                    path=current_path,
+                    impact=current_impact,
+                    action=current_action,
+                )
+                raise
+            except Exception as exc:
+                error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
+                error = HTTPException(status_code=400, detail=f"图片解码或输出规划失败：{exc}")
+                annotate_http_failure(
+                    error,
+                    stage=current_stage,
+                    error_category=error_category,
+                    path=current_path,
+                    impact=current_impact,
+                    action="check_file_access_and_retry" if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
+                )
+                raise error from exc
+
+            log_runtime_event(
+                "IMAGE_ROUTE_SELECTED",
+                stage="route_planning",
+                result="selected",
+                task_id=task_id,
+                purpose="4K_SIZE_ADAPTATION" if mode_value == FOUR_K_V1_MODE else "1080P_DELIVERY",
+                route=FOUR_K_V1_ROUTE if mode_value == FOUR_K_V1_MODE else mode_value,
+                path=saved_path,
+                impact="image_processing_route_fixed",
+                action="execute_image_pipeline",
             )
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"图片解码或输出规划失败：{exc}") from exc
 
-        expected_output_path = output_plan["paths"]["final"]
-        input_size_bytes = saved_path.stat().st_size
-        input_hash = sha256_file(saved_path)
-        created_at = datetime.now().isoformat(timespec="seconds")
-        task = {
-            "task_id": task_id,
-            "taskId": task_id,
-            "task_status": "pending",
-            "status": "pending",
-            "task_progress": 0,
-            "mode": mode_value,
-            "target_resolution": "1080P",
-            "output_profile": output_profile or "delivery_1080p",
-            "image_type": output_plan.get("image_type") or "unknown",
-            "degradation_type": "unknown",
-            "task_result": None,
-            "task_report": empty_task_report(),
-            "error_message": "",
-            "created_at": created_at,
-            "completed_at": None,
-            "fileName": saved_path.name,
-            "input_dir": str(saved_path.parent),
-            "input_filename": saved_path.name,
-            "original_filename": upload_name,
-            "input_path": saved_path,
-            "output_root": output_root,
-            "output_dir": str(output_root),
-            "output_directory": str(output_root),
-            "output_directory_source": output_dir_meta.get("output_dir_source") or "default",
-            "output_dir_meta": output_dir_meta,
-            "expected_output_path": expected_output_path,
-            "output_format": requested_output_format,
-            "color_stability_enabled": True,
-            "color_correction_enabled": bool(color_correction_enabled),
-            "input_size_bytes": input_size_bytes,
-            "input_hash": input_hash,
-            "input_width": output_plan.get("input_width"),
-            "input_height": output_plan.get("input_height"),
-            "output_width": output_plan.get("output_width"),
-            "output_height": output_plan.get("output_height"),
-            "resize_policy": output_plan.get("resize_policy"),
-            "was_upscaled": output_plan.get("was_upscaled"),
-            "was_downscaled": output_plan.get("was_downscaled"),
-            "scale": parse_scale_value(scale),
-            "debug_timing": {
-                "receive_file_time": receive_file_time,
-                "save_input_time": save_input_time,
-            },
-        }
-        task_registry[task_id] = task
-        task_registry[DEFAULT_TASK_ID] = task
-        latest_task_id["value"] = task_id
-        upload_file_index[saved_path.name] = saved_path
-        output_file_index[expected_output_path.name] = expected_output_path
-        ensure_task_started(task)
+            current_stage = "task_registration"
+            current_action = "check_input_file_access"
+            try:
+                expected_output_path = output_plan["paths"]["final"]
+                input_size_bytes = saved_path.stat().st_size
+                input_hash = sha256_file(saved_path)
+            except Exception as exc:
+                error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
+                error = HTTPException(status_code=500, detail=f"图片任务登记失败：{exc}")
+                annotate_http_failure(
+                    error,
+                    stage=current_stage,
+                    error_category=error_category,
+                    path=current_path,
+                    impact=current_impact,
+                    action=current_action if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
+                )
+                raise error from exc
 
-        data = public_task(task)
-        return {
-            "code": 200,
-            "status": "success",
-            "success": True,
-            "message": "图片上传完成，已登记为 V0.4 后台处理任务。",
-            "filename": saved_path.name,
-            "url": data["originalUrl"],
-            "task_id": task_id,
-            "taskId": task_id,
-            "streamEndpoint": data["streamEndpoint"],
-            "data": data,
-        }
+            created_at = datetime.now().isoformat(timespec="seconds")
+            task = {
+                "task_id": task_id,
+                "taskId": task_id,
+                "feature_key": ENHANCEMENT_4K_FEATURE_KEY if mode_value == FOUR_K_V1_MODE else ENHANCEMENT_1080P_FEATURE_KEY,
+                "result_id": "",
+                "task_status": "pending",
+                "status": "pending",
+                "task_progress": 0,
+                "mode": mode_value,
+                "route": FOUR_K_V1_ROUTE if mode_value == FOUR_K_V1_MODE else mode_value,
+                "target_resolution": "4K" if mode_value == FOUR_K_V1_MODE else "1080P",
+                "output_profile": FOUR_K_V1_OUTPUT_PROFILE if mode_value == FOUR_K_V1_MODE else output_profile or "delivery_1080p",
+                "quality_capability_boundary": FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY if mode_value == FOUR_K_V1_MODE else "",
+                "processing_stage": "pending",
+                "processing_disposition": output_plan.get("processing_disposition") if mode_value == FOUR_K_V1_MODE else "",
+                "quality_conclusion": output_plan.get("quality_conclusion") if mode_value == FOUR_K_V1_MODE else "",
+                "error_code": "",
+                "stage_events": [],
+                "image_type": output_plan.get("image_type") or "unknown",
+                "degradation_type": "unknown",
+                "task_result": None,
+                "task_report": empty_task_report(),
+                "error_message": "",
+                "created_at": created_at,
+                "completed_at": None,
+                "fileName": saved_path.name,
+                "input_dir": str(saved_path.parent),
+                "input_filename": saved_path.name,
+                "original_filename": upload_name,
+                "input_path": saved_path,
+                "source": str(saved_path),
+                "source_path": saved_path,
+                "result_file": "",
+                "formal_root": user_dirs["app_data_root"] if mode_value == FOUR_K_V1_MODE else "",
+                "output_root": output_root,
+                "output_dir": str(output_root),
+                "output_directory": str(output_root),
+                "output_directory_source": output_dir_meta.get("output_dir_source") or "default",
+                "output_dir_meta": output_dir_meta,
+                "expected_output_path": expected_output_path,
+                "output_format": requested_output_format,
+                "color_stability_enabled": True,
+                "color_correction_enabled": bool(color_correction_enabled),
+                "input_size_bytes": input_size_bytes,
+                "input_hash": input_hash,
+                "input_width": output_plan.get("input_width"),
+                "input_height": output_plan.get("input_height"),
+                "output_width": output_plan.get("output_width"),
+                "output_height": output_plan.get("output_height"),
+                "resize_policy": output_plan.get("resize_policy"),
+                "was_upscaled": output_plan.get("was_upscaled"),
+                "was_downscaled": output_plan.get("was_downscaled"),
+                "scale": None if mode_value == FOUR_K_V1_MODE else parse_scale_value(scale),
+                "started_at_monotonic": task_started_at,
+                "debug_timing": {
+                    "receive_file_time": receive_file_time,
+                    "save_input_time": save_input_time,
+                },
+            }
+            task_registry[task_id] = task
+            task_registry[DEFAULT_TASK_ID] = task
+            latest_task_id["value"] = task_id
+            upload_file_index[saved_path.name] = saved_path
+            output_file_index[expected_output_path.name] = expected_output_path
+            log_runtime_event(
+                "TASK_CREATED",
+                stage="task_registration",
+                result="success",
+                feature_key=task["feature_key"],
+                task_id=task_id,
+                status="pending",
+                impact="unified_task_available",
+            )
+            ensure_task_started(task)
+
+            data = public_task(task)
+            return {
+                "code": 200,
+                "status": "success",
+                "success": True,
+                "message": (
+                    "图片上传完成，已开始4K高清画质增强。"
+                    if mode_value == FOUR_K_V1_MODE
+                    else f"图片上传完成，已登记为 {APP_VERSION} 后台处理任务。"
+                ),
+                "filename": saved_path.name,
+                "url": data["originalUrl"],
+                "task_id": task_id,
+                "taskId": task_id,
+                "streamEndpoint": data["streamEndpoint"],
+                "data": data,
+            }
+        except HTTPException as exc:
+            if task_id not in task_terminal_events:
+                error_category = getattr(
+                    exc,
+                    "hdde_error_category",
+                    USER_ACTION_REQUIRED if 400 <= exc.status_code < 500 else PRODUCT_ERROR,
+                )
+                finish_task_failure(
+                    task_id,
+                    started_at=task_started_at,
+                    phase_event=getattr(exc, "hdde_phase_event", ""),
+                    level=logging.ERROR if error_category in {ENVIRONMENT_ERROR, PRODUCT_ERROR, CONFIGURATION_ERROR} else logging.WARNING,
+                    stage=getattr(exc, "hdde_failed_stage", current_stage),
+                    result="blocked" if 400 <= exc.status_code < 500 else "failed",
+                    error_category=error_category,
+                    route=mode_value,
+                    path=getattr(exc, "hdde_failed_path", current_path),
+                    reason=str(exc.detail),
+                    impact=getattr(exc, "hdde_impact", current_impact),
+                    action=getattr(exc, "hdde_action", current_action),
+                    exception=exc
+                    if error_category in {ENVIRONMENT_ERROR, PRODUCT_ERROR, CONFIGURATION_ERROR}
+                    else None,
+                )
+            raise
+        except BaseException as exc:
+            if task_id not in task_terminal_events:
+                error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
+                finish_task_failure(
+                    task_id,
+                    started_at=task_started_at,
+                    level=logging.ERROR,
+                    stage=current_stage,
+                    result="failed",
+                    error_category=error_category,
+                    route=mode_value,
+                    path=current_path,
+                    reason=str(exc),
+                    impact=current_impact,
+                    action=current_action if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
+                    exception=exc,
+                )
+            raise
+        finally:
+            task_start_times.pop(task_id, None)
 
     @app.get("/api/stream")
     async def stream_latest(delay: float = 0.25):
@@ -2761,14 +4345,178 @@ def build_web_app():
     async def serve_file(kind: str, filename: str):
         return FileResponse(resolve_public_file(kind, filename))
 
-    @app.post("/api/v1/tasks/{task_id}/feedback-bundle")
-    async def feedback_bundle(task_id: str):
-        real_task_id = latest_task_id["value"] if task_id == DEFAULT_TASK_ID else task_id
-        task = task_registry.get(real_task_id or "")
-        if not task:
+    def capture_feedback_snapshot(task_id: str, source_feature: str, stage_hint: str = "") -> dict:
+        feature = str(source_feature or "runtime_failure").strip()
+        if feature not in RECENT_FEATURE_COVERAGE:
+            raise HTTPException(status_code=400, detail="问题反馈功能来源无效。")
+        normalized_task_id = str(task_id or "").strip()
+        task = task_registry.get(normalized_task_id) if normalized_task_id else None
+        if normalized_task_id and not task:
             raise HTTPException(status_code=404, detail="任务不存在。")
-        bundle = generate_feedback_bundle(real_task_id or task_id, task)
-        task.update(bundle)
+        captured_at = datetime.now().isoformat(timespec="milliseconds")
+        frozen_task = copy.deepcopy(task) if task else {}
+        frozen_task["source_feature"] = feature
+        if not task and stage_hint:
+            frozen_task["processing_stage"] = str(stage_hint)[:120]
+        runtime_context = feedback_runtime_provider()
+        frozen_task["runtime_context"] = runtime_context
+        if task:
+            error_context = task.get("error_context") if isinstance(task.get("error_context"), dict) else {}
+            frozen_task["related_events"] = related_runtime_events(
+                task_id=normalized_task_id,
+                batch_id=str(task.get("batch_id") or ""),
+                error_id=str(error_context.get("error_id") or ""),
+            )
+        else:
+            frozen_task["related_events"] = []
+        context = build_feedback_context(
+            frozen_task,
+            source_feature=feature,
+            runtime=runtime_context,
+            captured_at=captured_at,
+        )
+        snapshot_id = f"FCS-{uuid.uuid4().hex}"
+        if len(feedback_context_snapshots) >= 64:
+            feedback_context_snapshots.pop(next(iter(feedback_context_snapshots)), None)
+        snapshot = {
+            "snapshot_id": snapshot_id,
+            "captured_at": captured_at,
+            "task_id": normalized_task_id or None,
+            "source_feature": feature,
+            "task": frozen_task,
+            "context": context,
+        }
+        feedback_context_snapshots[snapshot_id] = snapshot
+        return snapshot
+
+    def safe_attachment_manifest(value) -> list[dict]:
+        if value in (None, ""):
+            return []
+        if not isinstance(value, list) or len(value) > 10:
+            raise HTTPException(status_code=400, detail="反馈附件清单无效。")
+        manifest: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict) or set(item) - {"extension", "size_bytes", "selected_by_user"}:
+                raise HTTPException(status_code=400, detail="反馈附件清单包含不允许的字段。")
+            extension = str(item.get("extension") or "").lower()[:16]
+            if extension and not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
+                raise HTTPException(status_code=400, detail="反馈附件扩展名无效。")
+            try:
+                size_bytes = max(0, int(item.get("size_bytes") or 0))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="反馈附件体积无效。") from exc
+            manifest.append({
+                "extension": extension,
+                "size_bytes": size_bytes,
+                "selected_by_user": bool(item.get("selected_by_user")),
+            })
+        return manifest
+
+    def generate_snapshot_feedback_bundle(snapshot: dict, description: str, attachments: list[dict]) -> dict:
+        user_dirs = current_user_dirs()
+        if not user_dirs["directory_ready"]:
+            raise HTTPException(status_code=409, detail=user_dirs["directory_message"])
+        frozen_task = copy.deepcopy(snapshot["task"])
+        frozen_task.update({
+            "formal_root": user_dirs["app_data_root"],
+            "formal_directory_available": user_dirs["directory_ready"],
+            "app_version": APP_VERSION,
+            "user_description": description,
+        })
+        context = copy.deepcopy(snapshot["context"])
+        context["user_description"] = description
+        artifact_identity = str(snapshot.get("task_id") or f"runtime_{runtime_id}")
+        bundle = generate_feedback_bundle(
+            artifact_identity,
+            frozen_task,
+            output_dir=Path(user_dirs["feedback_dir"]),
+            context_snapshot=context,
+            attachment_manifest=attachments,
+        )
+        bundle_status = str(bundle.get("feedback_bundle_status") or "FAIL")
+        log_runtime_event(
+            "FEEDBACK_REPORT_GENERATED" if bundle_status == "PASS" else "FEEDBACK_REPORT_GENERATION_FAILED",
+            level=logging.INFO if bundle_status == "PASS" else logging.ERROR,
+            stage="feedback_bundle_generation",
+            result="success" if bundle_status == "PASS" else "failed",
+            error_category="" if bundle_status == "PASS" else ENVIRONMENT_ERROR,
+            feature=snapshot["source_feature"],
+            task_id=str(snapshot.get("task_id") or ""),
+            status=str(frozen_task.get("task_status") or frozen_task.get("status") or ""),
+            error_stage="" if bundle_status == "PASS" else "feedback_bundle_generation",
+            path=Path(str(bundle.get("feedback_bundle_path") or "")).name,
+            runtime_log_reference="诊断/日志/hdde.log",
+            reason=str(bundle.get("feedback_bundle_error") or ""),
+            impact="feedback_bundle_available" if bundle_status == "PASS" else "feedback_bundle_unavailable",
+            action="user_review_and_decide_whether_to_send" if bundle_status == "PASS" else "check_runtime_log_and_feedback_directory",
+        )
+        return bundle
+
+    @app.post("/api/v1/feedback/context-snapshot")
+    async def unified_feedback_context_snapshot(payload: dict = Body(default_factory=dict)):
+        allowed_fields = {"task_id", "source_feature", "stage"}
+        unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"问题反馈上下文包含未知字段：{', '.join(unknown_fields)}。")
+        snapshot = capture_feedback_snapshot(
+            str(payload.get("task_id") or ""),
+            str(payload.get("source_feature") or "runtime_failure"),
+            str(payload.get("stage") or ""),
+        )
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {
+                "snapshot_id": snapshot["snapshot_id"],
+                "context_captured_at": snapshot["captured_at"],
+                "context": snapshot["context"],
+                "context_preview": feedback_context_preview(snapshot["context"]),
+            },
+        }
+
+    @app.post("/api/v1/feedback/bundle")
+    async def unified_feedback_bundle(payload: dict = Body(default_factory=dict)):
+        allowed_fields = {"snapshot_id", "description", "attachment_manifest"}
+        unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"问题反馈请求包含未知字段：{', '.join(unknown_fields)}。")
+        snapshot_id = str(payload.get("snapshot_id") or "").strip()
+        snapshot = feedback_context_snapshots.get(snapshot_id)
+        if not snapshot:
+            raise HTTPException(status_code=404, detail="问题反馈上下文快照不存在或已失效，请重新打开反馈窗口。")
+        description = str(payload.get("description") or "").strip()
+        if not description:
+            raise HTTPException(status_code=400, detail="请描述你做了什么、发生了什么以及预期结果。")
+        if len(description) > 1000:
+            raise HTTPException(status_code=400, detail="问题描述不得超过1000个字符。")
+        bundle = generate_snapshot_feedback_bundle(
+            snapshot,
+            description,
+            safe_attachment_manifest(payload.get("attachment_manifest")),
+        )
+        return {
+            "code": 200 if bundle["feedback_bundle_status"] == "PASS" else 500,
+            "status": "success" if bundle["feedback_bundle_status"] == "PASS" else "error",
+            "success": bundle["feedback_bundle_status"] == "PASS",
+            "data": bundle,
+        }
+
+    @app.post("/api/v1/tasks/{task_id}/feedback-bundle")
+    async def feedback_bundle(task_id: str, payload: dict = Body(default_factory=dict)):
+        allowed_fields = {"source_feature", "description"}
+        unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"问题反馈请求包含未知字段：{', '.join(unknown_fields)}。")
+        real_task_id = latest_task_id["value"] if task_id == DEFAULT_TASK_ID else task_id
+        snapshot = capture_feedback_snapshot(
+            str(real_task_id or ""),
+            str(payload.get("source_feature") or "processing_center"),
+        )
+        bundle = generate_snapshot_feedback_bundle(snapshot, str(payload.get("description") or "").strip(), [])
+        task = task_registry.get(str(real_task_id or ""))
+        if task:
+            task.update(bundle)
         return {
             "code": 200 if bundle["feedback_bundle_status"] == "PASS" else 500,
             "status": "success" if bundle["feedback_bundle_status"] == "PASS" else "error",
@@ -2778,7 +4526,27 @@ def build_web_app():
 
     @app.get("/api/v1/tasks/{task_id}/feedback-bundle")
     async def feedback_bundle_get(task_id: str):
-        return await feedback_bundle(task_id)
+        return await feedback_bundle(task_id, {})
+
+    @app.get("/api/v1/tasks")
+    async def task_list():
+        unique_tasks: dict[str, dict] = {}
+        for task in task_registry.values():
+            task_identifier = str(task.get("task_id") or "").strip()
+            if task_identifier:
+                unique_tasks[task_identifier] = task
+        ordered_tasks = sorted(
+            unique_tasks.values(),
+            key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""),
+            reverse=True,
+        )
+        tasks = [public_task(task) for task in ordered_tasks]
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {"tasks": tasks, "count": len(tasks)},
+        }
 
     @app.get("/api/v1/tasks/{task_id}")
     async def task_status(task_id: str):
@@ -2788,6 +4556,33 @@ def build_web_app():
             raise HTTPException(status_code=404, detail="任务不存在。")
         return {"code": 200, "status": "success", "success": True, "data": public_task(task)}
 
+    @app.get("/api/v1/tasks/{task_id}/result-file")
+    async def task_result_file(task_id: str):
+        task = task_registry.get(str(task_id or ""))
+        raw_path = task.get("result_file") or task.get("output_path") if task else ""
+        if not task or not task.get("result_id") or not raw_path:
+            raise HTTPException(status_code=404, detail="当前任务没有可打开的正式结果。")
+        result_path = resolve_migrated_formal_output_path(str(raw_path), current_user_dirs()["app_data_root"])
+        formal_output_root = (Path(current_user_dirs()["app_data_root"]).resolve() / OUTPUT_ROOT_RELATIVE).resolve()
+        if formal_output_root not in result_path.parents or not result_path.is_file():
+            raise HTTPException(status_code=404, detail="正式结果文件不存在或不在正式输出目录中。")
+        return FileResponse(result_path, headers={"Cache-Control": "private, no-store"})
+
+    log_runtime_event(
+        "APPLICATION_STARTUP_COMPLETED",
+        stage="application_startup",
+        result="success" if initial_user_dirs["directory_ready"] else "degraded",
+        product_version=APP_VERSION,
+        build_id=build_identity["build_id"] or "unavailable",
+        runtime_id=runtime_id,
+        backend_ready=True,
+        directory_ready=initial_user_dirs["directory_ready"],
+        file_logging=bool(logging_initialization.get("initialized")),
+        logging_ready=bool(logging_initialization.get("initialized")),
+        path=logging_initialization.get("path") or "",
+        impact="backend_ready" if initial_user_dirs["directory_ready"] else "directory_dependent_operations_blocked",
+        action="none" if initial_user_dirs["directory_ready"] else "select_valid_formal_directory",
+    )
     return app
 
 
@@ -2798,20 +4593,37 @@ def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT, debug: bool = F
     print(f"监听地址：http://{host}:{port}")
     print("上传接口：POST /api/upload")
     print(f"SSE接口：GET /api/v1/tasks/{DEFAULT_TASK_ID}/stream")
-    uvicorn.run(build_web_app(), host=host, port=port, log_level="debug" if debug else "info")
+    try:
+        app = build_web_app(runtime_host=host, runtime_port=port)
+        uvicorn.run(app, host=host, port=port, log_level="debug" if debug else "info")
+    except Exception as exc:
+        dependency_failure = isinstance(exc, ImportError) or isinstance(exc.__cause__, ImportError)
+        log_runtime_event(
+            "APPLICATION_STARTUP_FAILED",
+            level=logging.ERROR,
+            stage="dependency_import" if dependency_failure else "web_server_startup",
+            result="failed",
+            error_category=CONFIGURATION_ERROR if dependency_failure else PRODUCT_ERROR,
+            reason=str(exc),
+            impact="backend_not_available",
+            action="install_required_dependencies" if dependency_failure else "check_runtime_log_and_server_configuration",
+            product_version=APP_VERSION,
+            exception=exc,
+        )
+        raise
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="VisualMasterPro",
-        description="VisualMasterPro V0.4 1080P 稳定交付系统。",
+        description=f"VisualMasterPro {APP_VERSION} 1080P 稳定交付系统。",
     )
     parser.add_argument("input_path", nargs="?", help="兼容旧命令的输入图片或文件夹。")
     parser.add_argument("output_dir", nargs="?", help="兼容旧命令的输出文件夹。")
     parser.add_argument("--input", dest="input_option", help="输入图片或图片文件夹。")
     parser.add_argument("--output", dest="output_option", help="输出文件夹。")
-    parser.add_argument("--gui", action="store_true", help="启动 VisualMasterPro V0.4 图形化界面。")
+    parser.add_argument("--gui", action="store_true", help=f"启动 VisualMasterPro {APP_VERSION} 图形化界面。")
     parser.add_argument("--server", action="store_true", help="启动 Web API 服务，监听 http://localhost:8787。")
     parser.add_argument("--host", default=SERVER_HOST, help="Web API 监听主机，默认 localhost。")
     parser.add_argument("--port", type=int, default=SERVER_PORT, help="Web API 监听端口，默认 8787。")
@@ -2838,7 +4650,16 @@ def resolve_paths(args):
 def run(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv and not is_pyinstaller():
-        return run_server()
+        from runtime.formal_launcher import PROJECT_PYTHON, main as run_formal_launcher
+
+        if Path(sys.executable).resolve() == PROJECT_PYTHON.resolve():
+            return run_formal_launcher([])
+        if not PROJECT_PYTHON.is_file():
+            raise RuntimeError(f"项目运行环境不存在：{PROJECT_PYTHON}")
+        return subprocess.call(
+            [str(PROJECT_PYTHON), "-m", "runtime.formal_launcher"],
+            cwd=str(PROJECT_ROOT),
+        )
 
     if is_pyinstaller() and not argv:
         from gui.app import run_gui
@@ -2847,6 +4668,17 @@ def run(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.server:
+        from runtime.formal_launcher import PROJECT_PYTHON
+
+        if Path(sys.executable).resolve() != PROJECT_PYTHON.resolve():
+            if not PROJECT_PYTHON.is_file():
+                raise RuntimeError(f"项目运行环境不存在：{PROJECT_PYTHON}")
+            return subprocess.call(
+                [str(PROJECT_PYTHON), str(PROJECT_ROOT / "main.py"), *argv],
+                cwd=str(PROJECT_ROOT),
+            )
 
     if args.gui:
         from gui.app import run_gui

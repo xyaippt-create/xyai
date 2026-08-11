@@ -10,13 +10,17 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import math
 import mimetypes
 import os
 import platform
+import queue
+import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 import zipfile
@@ -24,6 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
+
+from engine.diagnostics.feedback_context import build_feedback_context, feedback_context_preview
+from engine.diagnostics.runtime_logging import build_exception_diagnostics, related_runtime_events
+from engine.storage.app_data_migration import resolve_migrated_formal_output_path
 
 
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg"}
@@ -41,6 +49,11 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
+SMART_DELIVERY_MAX_ITEMS = 100
+SMART_DELIVERY_MAX_FILENAME_CHARS = 180
+SMART_DELIVERY_PLAN_TTL_SECONDS = 30 * 60
+SMART_DELIVERY_TEMPLATE_TOKENS = {"prefix", "base", "suffix", "date", "seq"}
+COLOR_CORRECTION_FEATURE_KEY = "color_correction"
 
 
 def _positive_dimension(value: Any) -> bool:
@@ -296,6 +309,26 @@ def _format_bytes(value: int | None) -> str:
     return f"{int(value or 0)} B"
 
 
+def _is_non_product_output_name(filename: str) -> bool:
+    """Exclude explicit development/test artifacts without guessing from timestamps or extensions."""
+
+    normalized = str(filename or "").lower()
+    exact_markers = (
+        "playwright",
+        "processing-center",
+        "front_upload_test",
+        "review_package",
+        "evidence_",
+        "audit_",
+    )
+    return (
+        any(marker in normalized for marker in exact_markers)
+        or re.match(r"^\d{2}-(?:processing|task|compare|report)-", normalized) is not None
+        or re.match(r"^s\d{2}__", normalized) is not None
+        or normalized.startswith("sample_")
+    )
+
+
 def register_image_compression_routes(
     app,
     *,
@@ -303,12 +336,17 @@ def register_image_compression_routes(
     now_provider: Callable[[], float] = time.time,
     folder_opener: Callable[[str], None] | None = None,
     output_settings_provider: Callable[[], Mapping[str, Any]] | None = None,
+    color_output_settings_provider: Callable[[], Mapping[str, Any]] | None = None,
     output_default_saver: Callable[[str], None] | None = None,
     output_dir_validator: Callable[[str], Mapping[str, Any]] | None = None,
+    shared_task_registry: Mapping[str, Mapping[str, Any]] | None = None,
+    output_center_user_dirs_provider: Callable[[], dict[str, Path]] | None = None,
+    feedback_runtime_provider: Callable[[], Mapping[str, Any]] | None = None,
+    runtime_event_logger: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Register the local Stage 4 API on the already-created FastAPI app."""
 
-    from fastapi import Body, File, HTTPException, UploadFile
+    from fastapi import Body, File, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, Response
 
     from engine.image_compression.common import apply_delivery_gate, read_image_info
@@ -323,11 +361,29 @@ def register_image_compression_routes(
         TechnicalStatus,
         VisualReviewStatus,
     )
+    from engine.color_correction import COLOR_CORRECTION_ENGINE_VERSION, process_single_image
+    from PIL import Image
 
     token_registry: dict[str, dict[str, Any]] = {}
     expired_feedback_tokens: set[str] = set()
     task_registry: dict[str, dict[str, Any]] = {}
+    color_batch_registry: dict[str, dict[str, Any]] = {}
+    color_batch_queue: queue.Queue[str] = queue.Queue()
+    color_batch_worker_lock = threading.Lock()
+    color_batch_worker_state: dict[str, threading.Thread | None] = {"thread": None}
     server_session_id = uuid.uuid4().hex
+    output_center_index: dict[str, dict[str, Any]] = {}
+    smart_delivery_plan_registry: dict[str, dict[str, Any]] = {}
+    smart_delivery_run_registry: dict[str, dict[str, Any]] = {}
+
+    def emit_runtime_event(event: str, **fields: Any) -> None:
+        if runtime_event_logger is None:
+            return
+        try:
+            runtime_event_logger(event, **fields)
+        except Exception:
+            # Diagnostic logging must never alter the product path.
+            return
 
     def prune_tokens() -> None:
         now = now_provider()
@@ -376,6 +432,640 @@ def register_image_compression_routes(
                 detail={"code": "TOKEN_NOT_FOUND_OR_EXPIRED", "message": "图片会话已失效，请重新选择图片。"},
             )
         return item
+
+    def output_center_sources() -> list[dict[str, Any]]:
+        """Return the finite set of formal directories owned by real product contracts."""
+
+        user_dirs = (output_center_user_dirs_provider or user_dirs_provider)()
+        app_root = Path(
+            user_dirs.get("app_data_root")
+            or Path(user_dirs.get("normal_output_dir") or ".").resolve().parent
+        ).resolve()
+        output_root = app_root / "输出"
+        compression_root = Path(user_dirs.get("image_compression_output_dir") or (output_root / "图片压缩")).resolve()
+        return [
+            {
+                "category": "1080p",
+                "label": "1080P高清处理",
+                "paths": [
+                    Path(user_dirs.get("normal_output_dir") or (output_root / "1080P标准增强")).resolve(),
+                    Path(user_dirs.get("safe_beta_output_dir") or (output_root / "1080P安全增强")).resolve(),
+                ],
+            },
+            {
+                "category": "4k",
+                "label": "4K高清增强",
+                "paths": [output_root / "4K高清增强"],
+            },
+            {
+                "category": "compression",
+                "label": "图片压缩",
+                "paths": [compression_root / directory for directory in FUNCTION_DIRECTORY_BY_MODE.values()],
+            },
+            {
+                "category": "color_correction",
+                "label": "颜色校正",
+                "paths": [output_root / "颜色校正"],
+            },
+            {
+                "category": "local_retouch",
+                "label": "标记修整",
+                "paths": [output_root / "标记修整"],
+            },
+        ]
+
+    def output_center_active_records(formal_root: Path) -> dict[Path, Mapping[str, Any]]:
+        records: dict[Path, Mapping[str, Any]] = {}
+        registries = [task_registry]
+        if shared_task_registry is not None:
+            registries.append(shared_task_registry)
+        for registry in registries:
+            for record in registry.values():
+                if not isinstance(record, Mapping):
+                    continue
+                result = record.get("result")
+                if hasattr(result, "to_dict"):
+                    result = result.to_dict()
+                if not isinstance(result, Mapping):
+                    result = {}
+                raw_path = (
+                    record.get("output_path")
+                    or record.get("result_file")
+                    or result.get("output_path")
+                    or result.get("final_output_path")
+                    or result.get("result_file")
+                )
+                if not raw_path:
+                    continue
+                try:
+                    path = resolve_migrated_formal_output_path(str(raw_path), formal_root)
+                except (OSError, ValueError):
+                    continue
+                records[path] = record
+        return records
+
+    def find_managed_color_source(output_path: Path, user_dirs: Mapping[str, Any]) -> Path | None:
+        match = re.fullmatch(r"(.+)_影界自动校正_\d{8}_\d{6}(?:_\d+)?", output_path.stem)
+        if not match:
+            return None
+        compression_root = Path(
+            user_dirs.get("image_compression_output_dir")
+            or (Path(user_dirs.get("app_data_root") or output_path.parents[2]) / "输出" / "图片压缩")
+        ).resolve()
+        intake_root = compression_root / ".运行缓存" / "image-compression-intake"
+        if not intake_root.is_dir():
+            return None
+        expected_name = f"{match.group(1)}{output_path.suffix}"
+        matches: list[Path] = []
+        try:
+            intake_directories = [item for item in intake_root.iterdir() if item.is_dir() and item.name.startswith("intake_")]
+        except OSError:
+            return None
+        for directory in intake_directories:
+            candidate = directory / expected_name
+            if candidate.is_file():
+                matches.append(candidate.resolve())
+                if len(matches) > 1:
+                    return None
+        return matches[0] if len(matches) == 1 else None
+
+    def output_center_record_meta(record: Mapping[str, Any] | None, formal_root: Path) -> dict[str, Any]:
+        if not record:
+            return {}
+        result = record.get("result")
+        if hasattr(result, "to_dict"):
+            result = result.to_dict()
+        if not isinstance(result, Mapping):
+            result = {}
+        source_path = (
+            record.get("source")
+            or record.get("source_path")
+            or record.get("input_path")
+            or result.get("source")
+            or result.get("source_path")
+            or result.get("input_path")
+        )
+        result_path = (
+            record.get("result_file")
+            or record.get("output_path")
+            or result.get("result_file")
+            or result.get("output_path")
+            or result.get("final_output_path")
+        )
+        task_id = str(record.get("task_id") or result.get("task_id") or "")
+        result_id = str(record.get("result_id") or result.get("result_id") or "")
+        feature_key = str(record.get("feature_key") or result.get("feature_key") or "")
+        batch_id = str(record.get("batch_id") or result.get("batch_id") or "")
+        task_family = str(record.get("task_family") or "")
+        source = None
+        if source_path:
+            try:
+                candidate = resolve_migrated_formal_output_path(str(source_path), formal_root)
+                if candidate.is_file():
+                    source = candidate
+            except (OSError, ValueError):
+                source = None
+        result_file = None
+        if result_path:
+            try:
+                candidate = resolve_migrated_formal_output_path(str(result_path), formal_root)
+                if candidate.is_file():
+                    result_file = candidate
+            except (OSError, ValueError):
+                result_file = None
+        compare_url = ""
+        if source and task_id and task_family == "color_correction":
+            query = f"task_id={quote(task_id, safe='')}&from=outputs"
+            if batch_id:
+                query += f"&batch={quote(batch_id, safe='')}"
+            compare_url = f"/color-correction/result?{query}"
+        return {
+            "source_path": source,
+            "task_id": task_id,
+            "result_id": result_id,
+            "feature_key": feature_key,
+            "result_file": result_file,
+            "batch_id": batch_id,
+            "compare_url": compare_url,
+            "review_status": str(record.get("review_status") or ""),
+            "status": str(record.get("status") or result.get("status") or ""),
+        }
+
+    def read_output_center_image_info(path: Path) -> dict[str, Any]:
+        with Image.open(path) as opened:
+            opened.load()
+            image_format = "JPEG" if opened.format == "JPG" else str(opened.format or "").upper()
+            if image_format not in {"PNG", "JPEG"}:
+                raise ValueError("unsupported output format")
+            return {"width": opened.width, "height": opened.height, "format": image_format}
+
+    def build_output_center_snapshot() -> dict[str, Any]:
+        user_dirs = (output_center_user_dirs_provider or user_dirs_provider)()
+        formal_root = Path(user_dirs.get("app_data_root") or ".").resolve()
+        active_records = output_center_active_records(formal_root)
+        output_center_index.clear()
+        items: list[dict[str, Any]] = []
+        skipped_unavailable = 0
+        seen_paths: set[Path] = set()
+        for source in output_center_sources():
+            for raw_directory in source["paths"]:
+                directory = Path(raw_directory).resolve()
+                if not directory.is_dir():
+                    continue
+                try:
+                    candidates = list(directory.iterdir())
+                except OSError:
+                    skipped_unavailable += 1
+                    continue
+                for path in candidates:
+                    if (
+                        not path.is_file()
+                        or path.suffix.lower() not in ALLOWED_EXTENSIONS
+                        or _is_non_product_output_name(path.name)
+                    ):
+                        continue
+                    try:
+                        resolved = path.resolve()
+                        if resolved in seen_paths or resolved.stat().st_size <= 0:
+                            continue
+                        info = read_output_center_image_info(resolved)
+                        stat = resolved.stat()
+                    except Exception:
+                        skipped_unavailable += 1
+                        continue
+                    seen_paths.add(resolved)
+                    record_meta = output_center_record_meta(active_records.get(resolved), formal_root)
+                    source_path = record_meta.get("source_path")
+                    compare_url = str(record_meta.get("compare_url") or "")
+                    mapping_source = "task_registry" if source_path else ""
+                    if source["category"] == "color_correction" and source_path is None:
+                        source_path = find_managed_color_source(resolved, user_dirs)
+                        if source_path is not None:
+                            mapping_source = "unique_managed_intake_match"
+                    item_id = hashlib.sha256(f"{source['category']}|{resolved}".encode("utf-8")).hexdigest()[:24]
+                    unified_result = bool(
+                        record_meta.get("result_id")
+                        and record_meta.get("task_id")
+                        and record_meta.get("feature_key")
+                        and source_path
+                        and record_meta.get("result_file") == resolved
+                    )
+                    output_center_index[item_id] = {
+                        "output_path": resolved,
+                        "source_path": source_path,
+                        "category": source["category"],
+                        "result_id": record_meta.get("result_id") or "",
+                        "task_id": record_meta.get("task_id") or "",
+                        "feature_key": record_meta.get("feature_key") or "",
+                        "unified_result": unified_result,
+                    }
+                    items.append({
+                        "id": item_id,
+                        "file_name": resolved.name,
+                        "processing_type": source["category"],
+                        "processing_label": source["label"],
+                        "result_id": record_meta.get("result_id") or "",
+                        "task_id": record_meta.get("task_id") or "",
+                        "feature_key": record_meta.get("feature_key") or "",
+                        "unified_result": unified_result,
+                        "delivery_eligible": (
+                            unified_result
+                            or source["category"] != "local_retouch"
+                            or bool(record_meta.get("result_id") and mapping_source == "task_registry")
+                        ),
+                        "status": record_meta.get("status") or "completed",
+                        "width": int(info["width"]),
+                        "height": int(info["height"]),
+                        "format": str(info.get("format") or resolved.suffix.lstrip(".")).upper(),
+                        "size_bytes": int(stat.st_size),
+                        "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                        "preview_url": f"/api/output-center/items/{item_id}/preview",
+                        "source_preview_url": f"/api/output-center/items/{item_id}/source-preview" if source_path else "",
+                        "compare_available": bool(source_path),
+                        "compare_url": compare_url or (f"/outputs/compare?item={item_id}" if source_path else ""),
+                        "mapping_source": mapping_source,
+                        "review_status": record_meta.get("review_status") or "",
+                        "available": True,
+                    })
+        items.sort(key=lambda item: item["created_at"], reverse=True)
+        categories = [
+            {"key": source["category"], "label": source["label"], "count": sum(1 for item in items if item["processing_type"] == source["category"])}
+            for source in output_center_sources()
+        ]
+        categories = [item for item in categories if item["count"] > 0]
+        return {
+            "items": items,
+            "categories": [{"key": "all", "label": "全部", "count": len(items)}, *categories],
+            "count": len(items),
+            "skipped_unavailable_count": skipped_unavailable,
+            "scan_scope": "formal_contract_directories_only",
+            "recursive_scan": False,
+        }
+
+    def smart_delivery_root() -> Path:
+        user_dirs = (output_center_user_dirs_provider or user_dirs_provider)()
+        app_root = Path(
+            user_dirs.get("app_data_root")
+            or Path(user_dirs.get("normal_output_dir") or ".").resolve().parent
+        ).resolve()
+        output_root = (app_root / "输出").resolve()
+        delivery_root = (output_root / "智能交付").resolve()
+        if delivery_root.parent != output_root:
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "SMART_DELIVERY_ROOT_INVALID", "message": "智能交付目录安全校验失败。"},
+            )
+        return delivery_root
+
+    def prune_smart_delivery_plans() -> None:
+        now = now_provider()
+        expired = [
+            plan_id
+            for plan_id, plan in smart_delivery_plan_registry.items()
+            if float(plan.get("expires_at") or 0) <= now
+        ]
+        for plan_id in expired:
+            smart_delivery_plan_registry.pop(plan_id, None)
+        while len(smart_delivery_plan_registry) > 32:
+            oldest = min(
+                smart_delivery_plan_registry,
+                key=lambda key: float(smart_delivery_plan_registry[key].get("created_at_epoch") or 0),
+            )
+            smart_delivery_plan_registry.pop(oldest, None)
+
+    def normalize_smart_delivery_rules(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+        source = raw if isinstance(raw, Mapping) else {}
+
+        def text_value(name: str, default: str = "") -> str:
+            value = str(source.get(name, default) or "").strip()
+            return value[:512]
+
+        try:
+            sequence_start = int(source.get("sequence_start", 1))
+            sequence_padding = int(source.get("sequence_padding", 2))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_RULE_INVALID", "message": "连续编号必须使用有效数字。"},
+            ) from exc
+        if sequence_start < 0 or sequence_start > 999999:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_RULE_INVALID", "message": "连续编号起始值超出允许范围。"},
+            )
+        if sequence_padding < 1 or sequence_padding > 6:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_RULE_INVALID", "message": "连续编号位数必须为1到6。"},
+            )
+        base_mode = text_value("base_mode", "original")
+        if base_mode not in {"original", "custom"}:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_RULE_INVALID", "message": "基础名称模式无效。"},
+            )
+        return {
+            "base_mode": base_mode,
+            "base_name": text_value("base_name"),
+            "prefix": text_value("prefix"),
+            "suffix": text_value("suffix"),
+            "find_text": text_value("find_text"),
+            "replace_text": text_value("replace_text"),
+            "sequence_enabled": source.get("sequence_enabled") is not False,
+            "sequence_start": sequence_start,
+            "sequence_padding": sequence_padding,
+            "date_enabled": source.get("date_enabled") is not False,
+            "template": text_value("template", "{prefix}{base}{suffix}_{date}_{seq}"),
+        }
+
+    def smart_delivery_name_issues(stem: str, suffix: str) -> list[tuple[str, str]]:
+        issues: list[tuple[str, str]] = []
+        if not stem:
+            issues.append(("EMPTY_FILE_NAME", "最终交付文件名不能为空。"))
+        if re.search(r'[<>:"/\\|?*\x00-\x1f]', stem):
+            issues.append(("WINDOWS_INVALID_CHARACTER", "文件名包含Windows不允许的字符。"))
+        if stem.endswith((" ", ".")):
+            issues.append(("WINDOWS_INVALID_ENDING", "文件名不得以空格或句点结尾。"))
+        if stem.upper() in WINDOWS_RESERVED_NAMES:
+            issues.append(("WINDOWS_RESERVED_NAME", "文件名属于Windows保留名称。"))
+        if len(f"{stem}{suffix}") > SMART_DELIVERY_MAX_FILENAME_CHARS:
+            issues.append(("FILE_NAME_TOO_LONG", f"文件名不得超过{SMART_DELIVERY_MAX_FILENAME_CHARS}个字符。"))
+        if suffix.lower() not in ALLOWED_EXTENSIONS:
+            issues.append(("EXTENSION_INVALID", "源成品扩展名不属于当前支持的图片格式。"))
+        return issues
+
+    def build_smart_delivery_plan(
+        raw_item_ids: Any,
+        raw_result_ids: Any,
+        raw_rules: Mapping[str, Any] | None,
+        *,
+        store: bool,
+    ) -> dict[str, Any]:
+        item_mode = isinstance(raw_item_ids, list)
+        result_mode = isinstance(raw_result_ids, list)
+        if item_mode == result_mode:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_SELECTION_INVALID", "message": "请选择正式输出中心成品。"},
+            )
+        selection_values = raw_item_ids if item_mode else raw_result_ids
+        selection_ids = [str(value or "").strip() for value in selection_values]
+        if not selection_ids or any(not value for value in selection_ids):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_SELECTION_EMPTY", "message": "至少选择一份真实成品。"},
+            )
+        if len(selection_ids) > SMART_DELIVERY_MAX_ITEMS:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_SELECTION_TOO_LARGE", "message": "单次交付最多选择100份成品。"},
+            )
+
+        rules = normalize_smart_delivery_rules(raw_rules)
+        snapshot = build_output_center_snapshot()
+        snapshot_by_id = {item["id"]: item for item in snapshot["items"]}
+        snapshot_by_result_id = {
+            item["result_id"]: item
+            for item in snapshot["items"]
+            if item.get("unified_result") and item.get("result_id")
+        }
+        if result_mode:
+            selected_items = []
+            for result_id in selection_ids:
+                public_item = snapshot_by_result_id.get(result_id)
+                if public_item is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "UNIFIED_RESULT_NOT_FOUND", "message": "正式结果不存在或不满足统一结果合同。"},
+                    )
+                selected_items.append(public_item)
+            item_ids = [item["id"] for item in selected_items]
+            result_ids = selection_ids
+            selection_mode = "result_ids"
+        else:
+            item_ids = selection_ids
+            result_ids = []
+            selection_mode = "item_ids"
+        delivery_root = smart_delivery_root()
+        issues: list[dict[str, Any]] = []
+        entries: list[dict[str, Any]] = []
+        seen_item_ids: set[str] = set()
+        seen_names: dict[str, str] = {}
+
+        unknown_tokens = {
+            token
+            for token in re.findall(r"\{([^{}]+)\}", rules["template"])
+            if token not in SMART_DELIVERY_TEMPLATE_TOKENS
+        }
+        template_remainder = re.sub(r"\{(?:prefix|base|suffix|date|seq)\}", "", rules["template"])
+        if unknown_tokens or "{" in template_remainder or "}" in template_remainder:
+            issues.append({
+                "code": "TEMPLATE_INVALID",
+                "item_id": "",
+                "file_name": "",
+                "message": "组合模板只能使用 {prefix}、{base}、{suffix}、{date}、{seq}。",
+            })
+        if not rules["template"]:
+            issues.append({
+                "code": "TEMPLATE_EMPTY",
+                "item_id": "",
+                "file_name": "",
+                "message": "组合模板不能为空。",
+            })
+        if rules["base_mode"] == "custom" and not rules["base_name"]:
+            issues.append({
+                "code": "CUSTOM_BASE_EMPTY",
+                "item_id": "",
+                "file_name": "",
+                "message": "使用自定义基础名称时，名称不能为空。",
+            })
+
+        date_text = datetime.fromtimestamp(now_provider()).strftime("%Y%m%d") if rules["date_enabled"] else ""
+        for index, item_id in enumerate(item_ids):
+            if item_id in seen_item_ids:
+                issues.append({
+                    "code": "DUPLICATE_SELECTION",
+                    "item_id": item_id,
+                    "file_name": "",
+                    "message": "同一份源成品不能重复加入交付清单。",
+                })
+                continue
+            seen_item_ids.add(item_id)
+            public_item = snapshot_by_id.get(item_id)
+            if public_item is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": "OUTPUT_ITEM_NOT_FOUND", "message": "所选成品已不存在，请返回输出中心重新选择。"},
+                )
+            source_result_id = str(public_item.get("result_id") or "")
+            source_task_id = str(public_item.get("task_id") or "")
+            source_feature_key = str(public_item.get("feature_key") or "")
+            source_processing_type = str(public_item.get("processing_type") or "")
+            source_mapping = str(public_item.get("mapping_source") or "")
+            if source_processing_type == "local_retouch" and (
+                not source_result_id
+                or source_mapping != "task_registry"
+                or (result_mode and not public_item.get("unified_result"))
+            ):
+                issues.append({
+                    "code": "UNIFIED_RESULT_REQUIRED",
+                    "item_id": item_id,
+                    "file_name": str(public_item.get("file_name") or ""),
+                    "message": "标记修整成品缺少完整的统一正式结果引用，不能进入智能交付。",
+                })
+            indexed = require_output_center_item(item_id)
+            source_path = Path(indexed["output_path"]).resolve()
+            source_stat = source_path.stat()
+            base = source_path.stem if rules["base_mode"] == "original" else rules["base_name"]
+            if rules["find_text"]:
+                base = base.replace(rules["find_text"], rules["replace_text"])
+            sequence_text = ""
+            if rules["sequence_enabled"]:
+                sequence_text = str(rules["sequence_start"] + index).zfill(rules["sequence_padding"])
+            values = {
+                "prefix": rules["prefix"],
+                "base": base,
+                "suffix": rules["suffix"],
+                "date": date_text,
+                "seq": sequence_text,
+            }
+            stem = rules["template"]
+            for token, value in values.items():
+                stem = stem.replace(f"{{{token}}}", value)
+            destination_name = f"{stem}{source_path.suffix}"
+            for code, message in smart_delivery_name_issues(stem, source_path.suffix):
+                issues.append({"code": code, "item_id": item_id, "file_name": destination_name, "message": message})
+            name_key = destination_name.casefold()
+            if name_key in seen_names:
+                issues.append({
+                    "code": "DUPLICATE_FINAL_NAME",
+                    "item_id": item_id,
+                    "file_name": destination_name,
+                    "message": "批次内存在重复的最终交付文件名。",
+                })
+            else:
+                seen_names[name_key] = item_id
+            destination_path = (delivery_root / destination_name).resolve()
+            if destination_path.parent != delivery_root:
+                issues.append({
+                    "code": "DELIVERY_PATH_ESCAPE",
+                    "item_id": item_id,
+                    "file_name": destination_name,
+                    "message": "最终交付文件名超出安全目录边界。",
+                })
+            elif destination_path.exists():
+                issues.append({
+                    "code": "TARGET_ALREADY_EXISTS",
+                    "item_id": item_id,
+                    "file_name": destination_name,
+                    "message": "正式交付目录中已存在同名文件，不会覆盖。",
+                })
+            entries.append({
+                "item_id": item_id,
+                "source_result_id": source_result_id,
+                "source_task_id": source_task_id,
+                "source_feature_key": source_feature_key,
+                "source_processing_type": source_processing_type,
+                "source_file_name": source_path.name,
+                "delivery_file_name": destination_name,
+                "processing_label": public_item["processing_label"],
+                "preview_url": public_item["preview_url"],
+                "_source_path": source_path,
+                "_destination_path": destination_path,
+                "_source_size": int(source_stat.st_size),
+                "_source_mtime_ns": int(source_stat.st_mtime_ns),
+            })
+
+        signature_payload = {
+            "selection_mode": selection_mode,
+            "item_ids": item_ids,
+            "result_ids": result_ids,
+            "rules": rules,
+            "entries": [
+                {
+                    "item_id": entry["item_id"],
+                    "source_result_id": entry["source_result_id"],
+                    "source_task_id": entry["source_task_id"],
+                    "source_feature_key": entry["source_feature_key"],
+                    "source_processing_type": entry["source_processing_type"],
+                    "delivery_file_name": entry["delivery_file_name"],
+                    "source_size": entry["_source_size"],
+                    "source_mtime_ns": entry["_source_mtime_ns"],
+                }
+                for entry in entries
+            ],
+        }
+        signature = hashlib.sha256(
+            json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        created_epoch = now_provider()
+        plan = {
+            "plan_id": uuid.uuid4().hex,
+            "selection_mode": selection_mode,
+            "item_ids": item_ids,
+            "result_ids": result_ids,
+            "rules": rules,
+            "entries": entries,
+            "issues": issues,
+            "ready": not issues and len(entries) == len(item_ids),
+            "signature": signature,
+            "created_at_epoch": created_epoch,
+            "expires_at": created_epoch + SMART_DELIVERY_PLAN_TTL_SECONDS,
+            "delivery_location_label": "正式目录 / 输出 / 智能交付",
+        }
+        if store:
+            prune_smart_delivery_plans()
+            smart_delivery_plan_registry[plan["plan_id"]] = plan
+        return plan
+
+    def public_smart_delivery_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "plan_id": plan["plan_id"],
+            "ready": bool(plan["ready"]),
+            "item_count": len(plan["entries"]),
+            "delivery_location_label": plan["delivery_location_label"],
+            "issues": list(plan["issues"]),
+            "items": [
+                {
+                    "item_id": entry["item_id"],
+                    "source_result_id": entry["source_result_id"],
+                    "result_id": entry["source_result_id"],
+                    "task_id": entry["source_task_id"],
+                    "feature_key": entry["source_feature_key"],
+                    "source_processing_type": entry["source_processing_type"],
+                    "source_file_name": entry["source_file_name"],
+                    "delivery_file_name": entry["delivery_file_name"],
+                    "processing_label": entry["processing_label"],
+                    "preview_url": entry["preview_url"],
+                }
+                for entry in plan["entries"]
+            ],
+        }
+
+    def copy_delivery_item(source_path: Path, destination_path: Path) -> dict[str, Any]:
+        source_hash_before = _sha256_file(source_path)
+        try:
+            with source_path.open("rb") as source_file, destination_path.open("xb") as destination_file:
+                shutil.copyfileobj(source_file, destination_file, length=1024 * 1024)
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
+            delivery_hash = _sha256_file(destination_path)
+            source_hash_after = _sha256_file(source_path)
+            if source_hash_before != source_hash_after or delivery_hash != source_hash_before:
+                raise OSError("交付副本完整性验证失败。")
+            return {
+                "source_sha256": source_hash_after,
+                "delivery_sha256": delivery_hash,
+                "source_unchanged": True,
+                "size_bytes": destination_path.stat().st_size,
+            }
+        except Exception:
+            try:
+                if destination_path.exists():
+                    destination_path.unlink()
+            except OSError:
+                pass
+            raise
 
     def feedback_package_url(token: str) -> str:
         return f"/api/image-compression/feedback-package/{token}"
@@ -501,10 +1191,23 @@ def register_image_compression_routes(
 
     def output_settings() -> dict[str, str]:
         configured = dict(output_settings_provider() or {}) if output_settings_provider else {}
-        fallback = Path(user_dirs_provider()["normal_output_dir"]).resolve() / "图片压缩输出"
+        user_dirs = user_dirs_provider()
+        fallback = Path(
+            user_dirs.get("image_compression_output_dir")
+            or (Path(user_dirs["normal_output_dir"]).resolve().parent / "图片压缩")
+        ).resolve()
         built_in = str(configured.get("built_in_default_root") or fallback)
         saved = str(configured.get("saved_default_root") or built_in)
         return {"built_in_default_root": built_in, "saved_default_root": saved}
+
+    def color_output_settings() -> dict[str, str]:
+        if color_output_settings_provider is not None:
+            configured = dict(color_output_settings_provider() or {})
+            built_in = str(configured.get("built_in_default_root") or "")
+            saved = str(configured.get("saved_default_root") or built_in)
+            if built_in and saved:
+                return {"built_in_default_root": built_in, "saved_default_root": saved}
+        return output_settings()
 
     def validate_output_root(value: str, *, source: str) -> dict[str, Any]:
         raw = str(value or "").strip().strip('"').strip()
@@ -544,11 +1247,43 @@ def register_image_compression_routes(
                 raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": f"固定功能目录不可用：{directory_name}。"})
         return {**checked, "valid": True, "writable": True, "normalized_path": str(target), "source": source}
 
+    def validate_color_output_root(value: str, *, source: str) -> dict[str, Any]:
+        raw = str(value or "").strip().strip('"').strip()
+        if not raw or "\x00" in raw or ".." in raw.replace("\\", "/").split("/"):
+            raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出目录为空或包含非法路径片段。"})
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出目录必须为绝对路径。"})
+        checked = dict(output_dir_validator(raw) or {}) if output_dir_validator else {}
+        if output_dir_validator:
+            if not checked.get("valid"):
+                raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": str(checked.get("message") or "颜色校正输出目录不可用。")})
+            target = Path(str(checked.get("normalized_path") or raw)).resolve()
+        else:
+            target = candidate.resolve()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                probe = target / f".hdde_color_write_test_{uuid.uuid4().hex}.tmp"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": f"颜色校正输出目录不可写：{exc}"}) from exc
+            checked = {"valid": True, "writable": True, "normalized_path": str(target)}
+        if not target.exists() or not target.is_dir():
+            raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出路径不是可用目录。"})
+        return {**checked, "valid": True, "writable": True, "normalized_path": str(target), "source": source}
+
     def effective_output_root(payload: Mapping[str, Any]) -> dict[str, Any]:
         current = str(payload.get("current_task_output_root") or "").strip()
         settings = output_settings()
         selected = current or settings["saved_default_root"]
         return validate_output_root(selected, source="current_task" if current else "saved_default")
+
+    def effective_color_output_root(payload: Mapping[str, Any]) -> dict[str, Any]:
+        current = str(payload.get("current_task_output_root") or "").strip()
+        settings = color_output_settings()
+        selected = current or settings["saved_default_root"]
+        return validate_color_output_root(selected, source="current_task" if current else "saved_default")
 
     def function_output_dir(mode: str, root: Path) -> Path:
         root = root.resolve()
@@ -596,6 +1331,511 @@ def register_image_compression_routes(
     def preview_url(token: str | None) -> str | None:
         return f"/api/image-compression/preview/{token}" if token else None
 
+    def lifecycle_timestamp() -> str:
+        return datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat()
+
+    def file_size_bucket(value: Any) -> str:
+        try:
+            size = int(value)
+        except (TypeError, ValueError):
+            return ""
+        if size < 1024 * 1024:
+            return "<1MB"
+        if size < 5 * 1024 * 1024:
+            return "1-5MB"
+        if size < 20 * 1024 * 1024:
+            return "5-20MB"
+        if size < 50 * 1024 * 1024:
+            return "20-50MB"
+        return ">=50MB"
+
+    def safe_input_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
+        width = source.get("width")
+        height = source.get("height")
+        channels = source.get("channels")
+        return {
+            "format": str(source.get("format") or "")[:16],
+            "width": width if isinstance(width, int) and not isinstance(width, bool) and width > 0 else None,
+            "height": height if isinstance(height, int) and not isinstance(height, bool) and height > 0 else None,
+            "color_mode": str(source.get("color_mode") or "")[:24],
+            "channels": channels if isinstance(channels, int) and not isinstance(channels, bool) and channels > 0 else None,
+            "alpha": bool(source.get("has_alpha")),
+            "orientation": source.get("exif_orientation") if isinstance(source.get("exif_orientation"), int) else None,
+            "file_size_bucket": file_size_bucket(source.get("size_bytes")),
+        }
+
+    def frozen_color_task_context(
+        task_id: str,
+        source: Mapping[str, Any],
+        *,
+        batch_id: str | None,
+    ) -> dict[str, Any]:
+        source_hash = str(source.get("sha256") or "")
+        source_extension = ".png" if str(source.get("format") or "").upper() == "PNG" else ".jpg"
+        source_hash_short = source_hash[:12] if source_hash else ""
+        return {
+            "task_id": task_id,
+            "feature_key": COLOR_CORRECTION_FEATURE_KEY,
+            "purpose": "COLOR_FIDELITY_CORRECTION",
+            "batch_id": batch_id,
+            "route_family": "color_correction",
+            "source_reference": f"file_{source_hash_short}" if source_hash_short else "file_unavailable",
+            "source_extension": source_extension,
+            "source_hash_short": source_hash_short,
+            "safe_input_metadata": safe_input_metadata(source),
+        }
+
+    def color_task_event_fields(record: Mapping[str, Any]) -> dict[str, Any]:
+        context = record.get("task_context") if isinstance(record.get("task_context"), Mapping) else {}
+        metadata = context.get("safe_input_metadata") if isinstance(context.get("safe_input_metadata"), Mapping) else {}
+        feature_key = record.get("feature_key") or context.get("feature_key") or COLOR_CORRECTION_FEATURE_KEY
+        return {
+            "feature_key": feature_key,
+            "feature": feature_key,
+            "operation": record.get("operation_mode") or "AUTO_COLOR_CORRECTION",
+            "task_id": context.get("task_id") or record.get("task_id"),
+            "result_id": record.get("result_id") or "",
+            "delivery_id": record.get("delivery_id") or "",
+            "batch_id": context.get("batch_id") or "",
+            "purpose": context.get("purpose") or "",
+            "route_family": context.get("route_family") or "",
+            "source_reference": context.get("source_reference") or "",
+            "source_extension": context.get("source_extension") or "",
+            "source_hash_short": context.get("source_hash_short") or "",
+            "batch_index": record.get("batch_index"),
+            **dict(metadata),
+        }
+
+    def transition_task(record: dict[str, Any], status: str, progress: int, *, failure_reason: str | None = None) -> None:
+        allowed = {
+            None: {"pending"},
+            "pending": {"processing"},
+            "processing": {"completed", "failed"},
+        }
+        current = record.get("status")
+        if status not in allowed.get(current, set()):
+            raise RuntimeError(f"Invalid compression task transition: {current!r} -> {status!r}")
+        if status == "pending" and progress != 0:
+            raise RuntimeError("Pending compression tasks must start at progress 0.")
+        if status == "processing" and not 0 < progress < 100:
+            raise RuntimeError("Processing compression tasks must have progress between 0 and 100.")
+        if status == "completed" and progress != 100:
+            raise RuntimeError("Completed compression tasks must end at progress 100.")
+        if status == "failed" and progress >= 100:
+            raise RuntimeError("Failed compression tasks cannot report progress 100.")
+
+        recorded_at = lifecycle_timestamp()
+        record["status"] = status
+        record["progress"] = progress
+        record["failure_reason"] = failure_reason if status == "failed" else None
+        record["completed_at"] = recorded_at if status in {"completed", "failed"} else None
+        record.setdefault("lifecycle", []).append({
+            "task_id": record["task_id"],
+            "status": status,
+            "progress": progress,
+            "recorded_at": recorded_at,
+        })
+
+    def public_task(record: Mapping[str, Any]) -> dict[str, Any]:
+        output_path = record.get("output_path")
+        return {
+            "task_id": record["task_id"],
+            "feature_key": record.get("feature_key") or "",
+            "result_id": record.get("result_id") or "",
+            "delivery_id": record.get("delivery_id") or "",
+            "task_family": record.get("task_family") or "",
+            "result_file": str(record.get("result_file") or ""),
+            "operation_mode": record["operation_mode"],
+            "source_path": str(record["source_path"]),
+            "status": record["status"],
+            "progress": record["progress"],
+            "output_path": str(output_path) if output_path else None,
+            "failure_reason": record.get("failure_reason"),
+            "created_at": record["created_at"],
+            "completed_at": record.get("completed_at"),
+            "lifecycle": [dict(item) for item in record.get("lifecycle", [])],
+            "batch_id": record.get("batch_id"),
+            "batch_index": record.get("batch_index"),
+        }
+
+    def color_output_dir(root: Path) -> Path:
+        root = root.resolve()
+        target = (root / "颜色校正").resolve()
+        if root not in target.parents:
+            raise HTTPException(status_code=500, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出目录安全校验失败。"})
+        target.mkdir(parents=True, exist_ok=True)
+        if not target.is_dir():
+            raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出目录不可用。"})
+        return target
+
+    def color_output_name(filename: str, now_value: float) -> str:
+        source_name = Path(_safe_name(filename))
+        suffix = source_name.suffix.lower()
+        suffix = ".png" if suffix == ".png" else ".jpg"
+        stem = source_name.stem[:80].strip(" ._") or "图片"
+        stamp = datetime.fromtimestamp(now_value).strftime("%Y%m%d_%H%M%S")
+        return f"{stem}_影界自动校正_{stamp}{suffix}"
+
+    def unique_output_path(directory: Path, filename: str) -> Path:
+        candidate = directory / filename
+        index = 1
+        while candidate.exists():
+            candidate = directory / f"{Path(filename).stem}_{index}{Path(filename).suffix}"
+            index += 1
+        return candidate
+
+    def color_result_review_status(record: Mapping[str, Any]) -> str:
+        output_path = Path(record["output_path"]) if record.get("output_path") else None
+        if record.get("status") != "completed" or not output_path or not output_path.is_file():
+            return "not_available"
+        status = str(record.get("result_review_status") or "pending")
+        return status if status in {"pending", "confirmed"} else "pending"
+
+    def public_color_result(record: Mapping[str, Any]) -> dict[str, Any]:
+        result = dict(record.get("result") or {})
+        output_path = Path(record["output_path"]) if record.get("output_path") else None
+        source_preview = preview_url(record.get("source_preview_token"))
+        output_preview = preview_url(record.get("output_preview_token")) if output_path and output_path.is_file() else None
+        return {
+            "task": public_task(record),
+            "result": result or None,
+            "review": {
+                "status": color_result_review_status(record),
+                "reviewed_at": record.get("result_reviewed_at"),
+                "meaning": "用户已查看并接受当前结果，不代表自动视觉评分或质量通过。",
+            },
+            "ui": {
+                "source_display_name": Path(record["source_path"]).name,
+                "output_display_name": output_path.name if output_path else None,
+                "source_preview_url": source_preview,
+                "output_preview_url": output_preview,
+                "output_path": str(output_path) if output_path else None,
+                "output_directory": str(record["output_dir"]),
+                "effective_output_root": str(record["effective_output_root"]),
+                "output_root_source": record.get("output_root_source") or "saved_default",
+                "can_open_output": bool(output_path and output_path.is_file()),
+                "can_open_folder": bool(output_path and output_path.is_file()),
+                "feedback_report": record.get("feedback_report"),
+                "display_task_number": record.get("display_task_number"),
+                "batch_id": record.get("batch_id"),
+            },
+        }
+
+    def create_color_task_record(
+        source: Mapping[str, Any],
+        output_root: Mapping[str, Any],
+        *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
+    ) -> dict[str, Any]:
+        effective_root = Path(str(output_root["normalized_path"])).resolve()
+        output_dir = color_output_dir(effective_root)
+        task_created_at = now_provider()
+        task_id = f"color_{uuid.uuid4().hex[:16]}"
+        output_path = unique_output_path(
+            output_dir,
+            color_output_name(str(source.get("filename") or "图片.png"), task_created_at),
+        )
+        record = {
+            "task_id": task_id,
+            "feature_key": COLOR_CORRECTION_FEATURE_KEY,
+            "task_family": "color_correction",
+            "batch_id": batch_id,
+            "batch_index": batch_index,
+            "display_task_number": datetime.fromtimestamp(task_created_at).strftime("CC-%Y%m%d-%H%M%S"),
+            "operation_mode": "AUTO_COLOR_CORRECTION",
+            "created_at": datetime.fromtimestamp(task_created_at, tz=timezone.utc).isoformat(),
+            "completed_at": None,
+            "status": None,
+            "progress": 0,
+            "failure_reason": None,
+            "lifecycle": [],
+            "source_path": Path(str(source["path"])).resolve(),
+            "output_path": None,
+            "planned_output_path": output_path,
+            "output_dir": output_dir,
+            "effective_output_root": effective_root,
+            "output_root_source": output_root["source"],
+            "source_preview_token": preview_token_for(Path(str(source["path"])), role="source_preview"),
+            "output_preview_token": None,
+            "source_metadata": dict(source),
+            "result": None,
+            "result_id": "",
+            "result_file": "",
+            "feedback_report": None,
+            "feedback_report_token": None,
+            "result_review_status": "not_available",
+            "result_reviewed_at": None,
+        }
+        record["task_context"] = frozen_color_task_context(task_id, source, batch_id=batch_id)
+        record["error_context"] = {}
+        record["related_events"] = []
+        task_registry[task_id] = record
+        if shared_task_registry is not None:
+            shared_task_registry[task_id] = record
+        transition_task(record, "pending", 0)
+        emit_runtime_event(
+            "TASK_CREATED",
+            stage="task_registration",
+            result="success",
+            impact="unified_task_available",
+            **color_task_event_fields(record),
+        )
+        return record
+
+    def execute_color_task(record: dict[str, Any]) -> None:
+        output_path = Path(record["planned_output_path"])
+        try:
+            emit_runtime_event(
+                "PROCESS_STARTED",
+                stage="engine_adapter",
+                result="started",
+                status="processing",
+                impact="color_correction_running",
+                **color_task_event_fields(record),
+            )
+            emit_runtime_event(
+                "COLOR_CORRECTION_TASK_STARTED",
+                stage="color_correction_execution",
+                result="started",
+                status="processing",
+                impact="color_correction_running",
+                action="process_and_verify_output",
+                **color_task_event_fields(record),
+            )
+            transition_task(record, "processing", 12)
+            source_path = Path(record["source_path"]).resolve()
+            source_sha_before = _sha256_file(source_path)
+            result = process_single_image(source_path, output_path)
+            if _sha256_file(source_path) != source_sha_before or result.source_sha256 != source_sha_before:
+                raise RuntimeError("原图完整性校验失败，任务已阻断。")
+            if result.output_sha256 == source_sha_before:
+                raise RuntimeError("颜色校正输出验证失败：未检测到真实像素处理。")
+            if not output_path.is_file() or output_path.stat().st_size <= 0:
+                raise RuntimeError("颜色校正输出验证失败：输出文件不存在或为空。")
+            verified = read_image_info(output_path)
+            expected_suffix = ".png" if result.output_format == "PNG" else ".jpg"
+            if (
+                verified["format"] != result.output_format
+                or verified["dimensions"] != {"width": result.width, "height": result.height}
+                or verified["sha256"] != result.output_sha256
+                or output_path.suffix.lower() != expected_suffix
+            ):
+                raise RuntimeError("颜色校正输出验证失败：格式、尺寸或文件摘要不一致。")
+            result_data = result.to_dict()
+            result_id = f"color_result_{uuid.uuid4().hex[:16]}"
+            result_data.update({
+                "result_id": result_id,
+                "task_id": record["task_id"],
+                "feature_key": record["feature_key"],
+                "source": str(record["source_path"]),
+                "source_path": str(record["source_path"]),
+                "result_file": str(output_path),
+                "output_path": str(output_path),
+            })
+            result_data["improvements"] = [
+                *result_data.get("improvements", []),
+                "原图哈希保持不变，未覆盖或修改原图",
+                "输出已完成存在、解码、尺寸、格式与摘要验证",
+            ]
+            record.update({
+                "result": result_data,
+                "task_result": result_data,
+                "result_id": result_id,
+                "result_file": str(output_path),
+                "output_path": output_path,
+                "output_preview_token": preview_token_for(output_path, role="output_preview"),
+                "result_review_status": "pending",
+                "result_reviewed_at": None,
+            })
+            transition_task(record, "completed", 100)
+            emit_runtime_event(
+                "PROCESS_SUCCEEDED",
+                stage="output_verification",
+                result="success",
+                impact="verified_output_available",
+                **color_task_event_fields(record),
+            )
+            emit_runtime_event(
+                "RESULT_REGISTERED",
+                stage="result_registry",
+                result="success",
+                impact="formal_result_available",
+                **color_task_event_fields(record),
+            )
+            emit_runtime_event(
+                "COLOR_CORRECTION_TASK_SUCCEEDED",
+                stage="output_verification",
+                result="success",
+                status="completed",
+                impact="verified_output_available",
+                action="review_or_deliver_output",
+                **color_task_event_fields(record),
+            )
+        except Exception as exc:
+            failed_stage = str(getattr(exc, "stage", "color_correction_execution"))
+            error_category = "ENVIRONMENT_ERROR" if isinstance(exc, OSError) else "PRODUCT_ERROR"
+            diagnostics = build_exception_diagnostics(
+                exc,
+                error_category=error_category,
+                error_stage=failed_stage,
+            )
+            record["error_context"] = dict(diagnostics)
+            emit_runtime_event(
+                "COLOR_CORRECTION_TASK_FAILED",
+                level=logging.ERROR,
+                stage=failed_stage,
+                result="failed",
+                status="failed",
+                impact="color_correction_output_unavailable",
+                action="check_runtime_log_and_source_file",
+                **color_task_event_fields(record),
+                **diagnostics,
+            )
+            emit_runtime_event(
+                "PROCESS_FAILED",
+                level=logging.ERROR,
+                stage=failed_stage,
+                result="failed",
+                status="failed",
+                impact="formal_result_unavailable",
+                **color_task_event_fields(record),
+                **diagnostics,
+            )
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
+            record["output_path"] = None
+            record["result"] = None
+            record["output_preview_token"] = None
+            if record.get("status") == "processing":
+                transition_task(record, "failed", record["progress"], failure_reason=str(exc) or exc.__class__.__name__)
+
+    def refresh_color_batch(batch: dict[str, Any]) -> None:
+        items = [task_registry[task_id] for task_id in batch["task_ids"]]
+        completed_count = sum(item.get("status") == "completed" for item in items)
+        failed_count = sum(item.get("status") == "failed" for item in items)
+        finished_count = completed_count + failed_count
+        batch["completed_count"] = completed_count
+        batch["failed_count"] = failed_count
+        batch["progress"] = round((finished_count / max(1, batch["total_count"])) * 100)
+        batch["current_task_id"] = next((item["task_id"] for item in items if item.get("status") == "processing"), None)
+
+    def public_color_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
+        records = [task_registry[task_id] for task_id in batch["task_ids"]]
+        items = [public_color_result(record) for record in records]
+        confirmed_count = sum(color_result_review_status(record) == "confirmed" for record in records)
+        pending_review_count = sum(color_result_review_status(record) == "pending" for record in records)
+        return {
+            "batch_id": batch["batch_id"],
+            "status": batch["status"],
+            "progress": batch["progress"],
+            "total_count": batch["total_count"],
+            "completed_count": batch["completed_count"],
+            "failed_count": batch["failed_count"],
+            "confirmed_count": confirmed_count,
+            "pending_review_count": pending_review_count,
+            "created_at": batch["created_at"],
+            "completed_at": batch.get("completed_at"),
+            "current_task_id": batch.get("current_task_id"),
+            "output_directory": str(batch["output_dir"]),
+            "items": items,
+        }
+
+    def process_color_batch(batch_id: str) -> None:
+        batch = color_batch_registry.get(batch_id)
+        if not batch:
+            return
+        batch["status"] = "processing"
+        batch["started_at"] = lifecycle_timestamp()
+        emit_runtime_event(
+            "COLOR_BATCH_STARTED",
+            stage="batch_execution",
+            result="started",
+            feature_key=COLOR_CORRECTION_FEATURE_KEY,
+            feature=COLOR_CORRECTION_FEATURE_KEY,
+            operation="AUTO_COLOR_CORRECTION",
+            batch_id=batch_id,
+            status="processing",
+            total_count=batch["total_count"],
+            impact="batch_processing_running",
+            action="process_queue_sequentially",
+        )
+        for task_id in batch["task_ids"]:
+            record = task_registry.get(task_id)
+            if not record or record.get("status") != "pending":
+                continue
+            batch["current_task_id"] = task_id
+            execute_color_task(record)
+            refresh_color_batch(batch)
+        refresh_color_batch(batch)
+        batch["status"] = "completed" if batch["completed_count"] > 0 else "failed"
+        batch["progress"] = 100
+        batch["current_task_id"] = None
+        batch["completed_at"] = lifecycle_timestamp()
+        emit_runtime_event(
+            "COLOR_BATCH_COMPLETED",
+            level=logging.INFO if batch["completed_count"] else logging.ERROR,
+            stage="batch_completion",
+            result="success" if batch["completed_count"] else "failed",
+            error_category="" if batch["completed_count"] else "PRODUCT_ERROR",
+            feature_key=COLOR_CORRECTION_FEATURE_KEY,
+            feature=COLOR_CORRECTION_FEATURE_KEY,
+            operation="AUTO_COLOR_CORRECTION",
+            batch_id=batch_id,
+            status=batch["status"],
+            total_count=batch["total_count"],
+            completed_count=batch["completed_count"],
+            failed_count=batch["failed_count"],
+            impact="batch_results_available" if batch["completed_count"] else "batch_output_unavailable",
+            action="review_completed_items" if batch["completed_count"] else "check_task_failures_in_runtime_log",
+        )
+
+    def color_batch_worker_loop() -> None:
+        while True:
+            batch_id = color_batch_queue.get()
+            try:
+                process_color_batch(batch_id)
+            except Exception as exc:
+                batch = color_batch_registry.get(batch_id) or {}
+                diagnostics = build_exception_diagnostics(
+                    exc,
+                    error_category="ENVIRONMENT_ERROR" if isinstance(exc, OSError) else "PRODUCT_ERROR",
+                    error_stage="batch_worker",
+                )
+                emit_runtime_event(
+                    "COLOR_BATCH_FAILED",
+                    level=logging.ERROR,
+                    stage="batch_worker",
+                    result="failed",
+                    feature_key=COLOR_CORRECTION_FEATURE_KEY,
+                    feature=COLOR_CORRECTION_FEATURE_KEY,
+                    operation="AUTO_COLOR_CORRECTION",
+                    batch_id=batch_id,
+                    status=str(batch.get("status") or "failed"),
+                    total_count=batch.get("total_count"),
+                    completed_count=batch.get("completed_count"),
+                    failed_count=batch.get("failed_count"),
+                    impact="batch_worker_stopped",
+                    action="check_runtime_log_and_restart_backend",
+                    **diagnostics,
+                )
+                raise
+            finally:
+                color_batch_queue.task_done()
+
+    def ensure_color_batch_worker() -> None:
+        with color_batch_worker_lock:
+            worker = color_batch_worker_state.get("thread")
+            if worker and worker.is_alive():
+                return
+            worker = threading.Thread(
+                target=color_batch_worker_loop,
+                name="hdde-color-batch-worker",
+                daemon=True,
+            )
+            color_batch_worker_state["thread"] = worker
+            worker.start()
+
     def public_result(record: dict[str, Any]) -> dict[str, Any]:
         result = record["result"]
         raw = result.to_dict()
@@ -635,6 +1875,7 @@ def register_image_compression_routes(
             **resize_validation,
         }
         return {
+            "task": public_task(record),
             "result": raw,
             "ui": ui,
         }
@@ -1010,6 +2251,9 @@ def register_image_compression_routes(
     def error_result(message: str, *, code: str = "IMAGE_COMPRESSION_API_ERROR") -> dict[str, Any]:
         return {"code": code, "message": message}
 
+    def require_compression_directory() -> dict[str, Path]:
+        return user_dirs_provider()
+
     @app.get("/api/image-compression/capabilities")
     async def image_compression_capabilities():
         return {
@@ -1064,6 +2308,7 @@ def register_image_compression_routes(
 
     @app.get("/api/image-compression/output-settings")
     async def image_compression_output_settings():
+        require_compression_directory()
         settings = output_settings()
         checked = validate_output_root(settings["saved_default_root"], source="saved_default")
         return {
@@ -1084,6 +2329,7 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/output-settings/default")
     async def image_compression_set_default_output(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         if set(payload) != {"output_root"}:
             raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "默认输出目录请求字段不正确。"})
         checked = validate_output_root(str(payload.get("output_root") or ""), source="saved_default")
@@ -1094,6 +2340,7 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/output-settings/restore")
     async def image_compression_restore_default_output(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         if payload:
             raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "恢复默认目录不接受附加字段。"})
         settings = output_settings()
@@ -1105,6 +2352,7 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/intake")
     async def image_compression_intake(file: UploadFile = File(...)):
+        user_dirs = require_compression_directory()
         prune_tokens()
         raw_filename = str(file.filename or "")
         if not raw_filename or raw_filename != Path(raw_filename).name or "/" in raw_filename or "\\" in raw_filename:
@@ -1116,7 +2364,7 @@ def register_image_compression_routes(
         content = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="文件超过本地安全接收上限 50 MB。")
-        intake_root = Path(user_dirs_provider()["tmp_dir"]).resolve() / "image-compression-intake"
+        intake_root = Path(user_dirs["tmp_dir"]).resolve() / "image-compression-intake"
         task_dir = intake_root / f"intake_{uuid.uuid4().hex}"
         task_dir.mkdir(parents=True, exist_ok=True)
         stored = task_dir / filename
@@ -1145,6 +2393,10 @@ def register_image_compression_routes(
             width=oriented_width,
             height=oriented_height,
             exif_orientation=info.get("exif_orientation"),
+            color_mode=info.get("mode"),
+            channels=len(str(info.get("mode") or "")),
+            has_alpha=bool(info.get("alpha_present")),
+            size_bytes=info.get("size_bytes"),
         )
         expires_at = token_registry[source_token]["expires_at"]
         data = {
@@ -1160,6 +2412,32 @@ def register_image_compression_routes(
             "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
         }
         return {"code": 200, "status": "success", "success": True, "data": data}
+
+    @app.post("/api/image-processing/preflight")
+    async def image_processing_preflight(request: Request):
+        require_compression_directory()
+        from engine.image_processing_routing import (
+            PreflightContractError,
+            build_image_profile,
+            route_preflight,
+            validate_preflight_request,
+        )
+
+        try:
+            try:
+                payload = await request.json()
+            except Exception as exc:
+                raise PreflightContractError("INVALID_REQUEST_BODY") from exc
+            normalized = validate_preflight_request(payload)
+            source = require_token(normalized["file_token"], role="source")
+            profile = build_image_profile(
+                Path(source["path"]),
+                width=source.get("width"),
+                height=source.get("height"),
+            )
+            return route_preflight(profile, normalized)
+        except PreflightContractError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail()) from exc
 
     def build_task_request(payload: Mapping[str, Any], source: dict[str, Any], task_id: str, output_dir: Path) -> dict[str, Any]:
         allowed_fields = {
@@ -1373,67 +2651,194 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/run")
     async def image_compression_run(payload: dict = Body(default_factory=dict)):
+        user_dirs = require_compression_directory()
         token = str(payload.get("source_token") or "")
         source = require_token(token, role="source")
         product_preflight(payload, source)
         task_id = f"compression_{uuid.uuid4().hex[:16]}"
         task_created_at = now_provider()
-        preflight_output = Path(user_dirs_provider()["tmp_dir"]).resolve() / "image-compression-preflight"
+        preflight_output = Path(user_dirs["tmp_dir"]).resolve() / "image-compression-preflight"
         request = build_task_request(payload, source, task_id, preflight_output)
         output_root = effective_output_root(payload)
         effective_root = Path(output_root["normalized_path"])
         output_dir = function_output_dir(str(request["operation_mode"]), effective_root)
         request["output_directory"] = str(output_dir)
-        result = await asyncio.to_thread(process_image_compression, request)
-        output_dir, output_path = finalize_readable_output(
-            result,
-            source=source,
-            request=request,
-            task_id=task_id,
-            root=effective_root,
-            function_dir=output_dir,
-            now_value=task_created_at,
-        )
         source_preview = preview_token_for(Path(source["path"]), role="source_preview")
-        output_preview = preview_token_for(output_path, role="output_preview") if output_path and output_path.exists() else None
-        long_image_validation = build_long_image_validation(source, request)
-        resize_validation = build_resize_validation(source, request, result)
         record = {
             "task_id": task_id,
+            "feature_key": "image_compression",
+            "task_family": "image_compression",
+            "operation_mode": str(request["operation_mode"]),
             "created_at": datetime.fromtimestamp(task_created_at, tz=timezone.utc).isoformat(),
+            "completed_at": None,
+            "status": None,
+            "progress": 0,
+            "failure_reason": None,
+            "lifecycle": [],
             "request": request,
-            "result": result,
+            "result": None,
+            "result_id": "",
+            "result_file": "",
+            "task_result": None,
+            "source": str(Path(source["path"]).resolve()),
             "source_path": Path(source["path"]),
-            "output_path": output_path,
+            "output_path": None,
             "output_dir": output_dir,
             "effective_output_root": effective_root,
             "output_root_source": output_root["source"],
             "source_preview_token": source_preview,
-            "output_preview_token": output_preview,
+            "output_preview_token": None,
             "review_note": "",
             "reviewed_at": None,
-            "review_output_sha256_before": result.output_sha256,
+            "review_output_sha256_before": None,
             "review_output_sha256_after": None,
             "source_metadata": dict(source),
-            "long_image_validation": long_image_validation,
-            "resize_validation": resize_validation,
+            "long_image_validation": None,
+            "resize_validation": None,
             "feedback_package": None,
             "feedback_package_token": None,
-            "feedback_artifact_stem": output_path.stem if result.output_created and output_path else Path(
-                readable_output_name(
-                    str(source.get("filename") or "image.png"),
-                    Path(str(source.get("filename") or "image.png")).suffix or ".png",
-                    request,
-                    task_id,
-                    task_created_at,
-                )
-            ).stem,
+            "feedback_artifact_stem": None,
         }
         task_registry[task_id] = record
+        if shared_task_registry is not None:
+            shared_task_registry[task_id] = record
+        transition_task(record, "pending", 0)
+        emit_runtime_event(
+            "TASK_CREATED",
+            stage="task_registration",
+            result="success",
+            feature_key="image_compression",
+            task_id=task_id,
+            status="pending",
+            impact="unified_task_available",
+        )
+        try:
+            transition_task(record, "processing", 10)
+            emit_runtime_event(
+                "PROCESS_STARTED",
+                stage="engine_adapter",
+                result="started",
+                feature_key="image_compression",
+                task_id=task_id,
+                status="processing",
+                impact="image_compression_running",
+            )
+            result = await asyncio.to_thread(process_image_compression, request)
+            output_dir, output_path = finalize_readable_output(
+                result,
+                source=source,
+                request=request,
+                task_id=task_id,
+                root=effective_root,
+                function_dir=output_dir,
+                now_value=task_created_at,
+            )
+            if result.output_created:
+                if output_path is None or not output_path.is_file() or output_path.stat().st_size <= 0:
+                    raise RuntimeError("压缩输出验证失败：输出文件不存在或为空。")
+                verified = read_image_info(output_path)
+                expected_dimensions = result.output_dimensions or {}
+                if (
+                    verified["format"] != result.output_format
+                    or verified["dimensions"] != expected_dimensions
+                ):
+                    raise RuntimeError("压缩输出验证失败：输出格式或尺寸与任务结果不一致。")
+
+            record.update({
+                "result": result,
+                "output_path": output_path,
+                "output_dir": output_dir,
+                "output_preview_token": preview_token_for(output_path, role="output_preview") if output_path and output_path.exists() else None,
+                "review_output_sha256_before": result.output_sha256,
+                "long_image_validation": build_long_image_validation(source, request),
+                "resize_validation": build_resize_validation(source, request, result),
+                "feedback_artifact_stem": output_path.stem if result.output_created and output_path else Path(
+                    readable_output_name(
+                        str(source.get("filename") or "image.png"),
+                        Path(str(source.get("filename") or "image.png")).suffix or ".png",
+                        request,
+                        task_id,
+                        task_created_at,
+                    )
+                ).stem,
+            })
+            if result.output_created and output_path:
+                result_id = f"compression_result_{uuid.uuid4().hex[:16]}"
+                task_result = {
+                    "result_id": result_id,
+                    "task_id": task_id,
+                    "feature_key": "image_compression",
+                    "source": str(record["source_path"]),
+                    "source_path": str(record["source_path"]),
+                    "result_file": str(output_path),
+                    "output_path": str(output_path),
+                    "status": "completed",
+                }
+                record.update({
+                    "result_id": result_id,
+                    "result_file": str(output_path),
+                    "task_result": task_result,
+                })
+            if str(result.technical_status) in {
+                TechnicalStatus.INVALID_REQUEST.value,
+                TechnicalStatus.CANNOT_MEET_SAFELY.value,
+                TechnicalStatus.PROCESSING_FAILED.value,
+            }:
+                transition_task(record, "failed", record["progress"], failure_reason=result.failure_reason or result.failure_code or "图片压缩失败。")
+                emit_runtime_event(
+                    "PROCESS_FAILED",
+                    level=logging.ERROR,
+                    stage="engine_adapter",
+                    result="failed",
+                    feature_key="image_compression",
+                    task_id=task_id,
+                    status="failed",
+                    reason=record.get("failure_reason") or "processing_failed",
+                    impact="formal_result_unavailable",
+                )
+            else:
+                transition_task(record, "completed", 100)
+                emit_runtime_event(
+                    "PROCESS_SUCCEEDED",
+                    stage="output_verification",
+                    result="success",
+                    feature_key="image_compression",
+                    task_id=task_id,
+                    result_id=record.get("result_id") or "",
+                    status="completed",
+                    impact="verified_output_available" if record.get("result_id") else "no_output_required",
+                )
+                if record.get("result_id"):
+                    emit_runtime_event(
+                        "RESULT_REGISTERED",
+                        stage="result_registry",
+                        result="success",
+                        feature_key="image_compression",
+                        task_id=task_id,
+                        result_id=record["result_id"],
+                        status="completed",
+                        impact="formal_result_available",
+                    )
+        except Exception as exc:
+            if record.get("status") == "processing":
+                transition_task(record, "failed", record["progress"], failure_reason=str(exc) or exc.__class__.__name__)
+            emit_runtime_event(
+                "PROCESS_FAILED",
+                level=logging.ERROR,
+                stage="engine_adapter",
+                result="failed",
+                feature_key="image_compression",
+                task_id=task_id,
+                status="failed",
+                reason=str(exc) or exc.__class__.__name__,
+                impact="formal_result_unavailable",
+            )
+            raise
         return {"code": 200, "status": "success", "success": True, "data": public_result(record)}
 
     @app.post("/api/image-compression/test-feedback-package")
     async def image_compression_test_feedback_package(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         if set(payload) != {"task_id"}:
             raise HTTPException(status_code=400, detail={"code": "FEEDBACK_PACKAGE_REQUEST_INVALID", "message": "测试反馈包只接受已登记的 task_id。"})
         task_id = str(payload.get("task_id") or "")
@@ -1584,6 +2989,7 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/review")
     async def image_compression_review(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         unknown_fields = sorted(str(key) for key in payload if key not in {"task_id", "decision", "note"})
         if unknown_fields:
             raise HTTPException(status_code=400, detail=f"人工复核请求包含未知字段：{', '.join(unknown_fields)}。")
@@ -1611,10 +3017,22 @@ def register_image_compression_routes(
         record["review_output_sha256_before"] = record.get("review_output_sha256_before") or result.output_sha256
         apply_delivery_gate(result, evidence_candidate=bool(result.output_created))
         record["review_output_sha256_after"] = result.output_sha256
+        emit_runtime_event(
+            "QUALITY_REVIEW_UPDATED",
+            stage="human_quality_review",
+            result="success",
+            feature="quality_confirm",
+            operation=record.get("operation_mode") or "",
+            task_id=task_id,
+            status=decision,
+            impact="delivery_gate_updated",
+            action="continue_delivery_or_reprocess",
+        )
         return {"code": 200, "status": "success", "success": True, "data": public_result(record)}
 
     @app.post("/api/image-compression/open-output-folder")
     async def image_compression_open_output_folder(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         if set(payload) != {"task_id"}:
             raise HTTPException(status_code=400, detail="只能通过已登记的 task_id 打开输出目录。")
         task_id = str(payload.get("task_id") or "")
@@ -1641,6 +3059,7 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/open-function-folder")
     async def image_compression_open_function_folder(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
         allowed_fields = {"operation_mode", "current_task_output_root"}
         if not set(payload).issubset(allowed_fields) or "operation_mode" not in payload:
             raise HTTPException(status_code=400, detail="打开功能目录请求字段不正确。")
@@ -1661,8 +3080,780 @@ def register_image_compression_routes(
             raise HTTPException(status_code=400, detail="打开输出目录失败。") from exc
         return {"code": 200, "status": "success", "success": True, "data": {"directory_label": target.name}}
 
+    @app.get("/api/color-correction/capabilities")
+    async def color_correction_capabilities():
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {
+                "api_version": "hdde.color-correction-api.v1",
+                "engine_version": COLOR_CORRECTION_ENGINE_VERSION,
+                "server_session_id": server_session_id,
+                "operation_mode": "AUTO_COLOR_CORRECTION",
+                "supported_formats": ["PNG", "JPEG"],
+                "max_upload_bytes": MAX_UPLOAD_BYTES,
+                "content_generation": False,
+                "manual_adjustments": False,
+                "batch_available": True,
+                "max_batch_size": 20,
+                "queue_mode": "local_sequential",
+            },
+        }
+
+    @app.get("/api/color-correction/output-settings")
+    async def color_correction_output_settings():
+        require_compression_directory()
+        settings = color_output_settings()
+        checked = validate_color_output_root(settings["saved_default_root"], source="saved_default")
+        root = Path(checked["normalized_path"]).resolve()
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {
+                **settings,
+                "effective_output_root": str(root),
+                "output_root_writable": bool(checked.get("writable")),
+                "function_output_directory": str(color_output_dir(root)),
+                "folder_selection_endpoint": "/api/output/select-popup",
+            },
+        }
+
+    @app.post("/api/color-correction/run")
+    async def color_correction_run(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        allowed_fields = {"source_token", "current_task_output_root", "client_context"}
+        unknown = sorted(str(key) for key in payload if key not in allowed_fields)
+        if unknown:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_CORRECTION_REQUEST_INVALID", "message": f"颜色校正请求包含未知字段：{', '.join(unknown)}。"})
+        source = require_token(str(payload.get("source_token") or ""), role="source")
+        output_root = effective_color_output_root(payload)
+        record = create_color_task_record(source, output_root)
+        await asyncio.to_thread(execute_color_task, record)
+        return {"code": 200, "status": "success", "success": True, "data": public_color_result(record)}
+
+    @app.post("/api/color-correction/batches", status_code=202)
+    async def color_correction_batch_create(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        allowed_fields = {"source_tokens", "current_task_output_root", "client_context"}
+        unknown = sorted(str(key) for key in payload if key not in allowed_fields)
+        if unknown:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": f"批量颜色校正请求包含未知字段：{', '.join(unknown)}。"})
+        source_tokens = payload.get("source_tokens")
+        if not isinstance(source_tokens, list) or not 2 <= len(source_tokens) <= 20:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": "批量颜色校正每次需要选择2至20张图片。"})
+        normalized_tokens = [str(token or "") for token in source_tokens]
+        if len(set(normalized_tokens)) != len(normalized_tokens):
+            raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": "同一批次不能重复提交同一张图片。"})
+        sources = [require_token(token, role="source") for token in normalized_tokens]
+        output_root = effective_color_output_root(payload)
+        output_dir = color_output_dir(Path(str(output_root["normalized_path"])).resolve())
+        batch_created_at = now_provider()
+        batch_id = f"color_batch_{uuid.uuid4().hex[:16]}"
+        records = [
+            create_color_task_record(source, output_root, batch_id=batch_id, batch_index=index)
+            for index, source in enumerate(sources, start=1)
+        ]
+        batch = {
+            "batch_id": batch_id,
+            "status": "pending",
+            "progress": 0,
+            "total_count": len(records),
+            "completed_count": 0,
+            "failed_count": 0,
+            "created_at": datetime.fromtimestamp(batch_created_at, tz=timezone.utc).isoformat(),
+            "started_at": None,
+            "completed_at": None,
+            "current_task_id": None,
+            "output_dir": output_dir,
+            "task_ids": [record["task_id"] for record in records],
+        }
+        color_batch_registry[batch_id] = batch
+        emit_runtime_event(
+            "COLOR_BATCH_QUEUED",
+            stage="batch_queue",
+            result="queued",
+            feature_key=COLOR_CORRECTION_FEATURE_KEY,
+            feature=COLOR_CORRECTION_FEATURE_KEY,
+            operation="AUTO_COLOR_CORRECTION",
+            batch_id=batch_id,
+            status="pending",
+            total_count=batch["total_count"],
+            impact="batch_waiting_for_local_worker",
+            action="process_queue_sequentially",
+        )
+        ensure_color_batch_worker()
+        color_batch_queue.put(batch_id)
+        return {"code": 202, "status": "accepted", "success": True, "data": public_color_batch(batch)}
+
+    @app.get("/api/color-correction/batches")
+    async def color_correction_batch_list():
+        require_compression_directory()
+        batches = sorted(
+            color_batch_registry.values(),
+            key=lambda item: str(item.get("created_at") or ""),
+            reverse=True,
+        )
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {"batches": [public_color_batch(batch) for batch in batches], "count": len(batches)},
+        }
+
+    @app.get("/api/color-correction/batches/{batch_id}")
+    async def color_correction_batch_status(batch_id: str):
+        require_compression_directory()
+        batch = color_batch_registry.get(str(batch_id or ""))
+        if not batch:
+            raise HTTPException(status_code=404, detail={"code": "COLOR_BATCH_NOT_FOUND", "message": "批量颜色校正任务不存在。"})
+        return {"code": 200, "status": "success", "success": True, "data": public_color_batch(batch)}
+
+    @app.get("/api/color-correction/tasks/{task_id}")
+    async def color_correction_task(task_id: str):
+        require_compression_directory()
+        record = task_registry.get(str(task_id or ""))
+        if not record or record.get("task_family") != "color_correction":
+            raise HTTPException(status_code=404, detail={"code": "COLOR_CORRECTION_TASK_NOT_FOUND", "message": "颜色校正任务不存在。"})
+        return {"code": 200, "status": "success", "success": True, "data": public_color_result(record)}
+
+    @app.post("/api/color-correction/tasks/{task_id}/review")
+    async def color_correction_task_review(task_id: str, payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        if set(payload) != {"status"}:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_REVIEW_REQUEST_INVALID", "message": "人工确认请求只能包含status字段。"})
+        record = task_registry.get(str(task_id or ""))
+        if not record or record.get("task_family") != "color_correction":
+            raise HTTPException(status_code=404, detail={"code": "COLOR_CORRECTION_TASK_NOT_FOUND", "message": "颜色校正任务不存在。"})
+        review_status = str(payload.get("status") or "").strip().lower()
+        if review_status not in {"pending", "confirmed"}:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_REVIEW_STATUS_INVALID", "message": "人工确认状态必须为pending或confirmed。"})
+        output_path = Path(record["output_path"]).resolve() if record.get("output_path") else None
+        result = dict(record.get("result") or {})
+        if record.get("status") != "completed" or not output_path or not output_path.is_file():
+            raise HTTPException(status_code=409, detail={"code": "COLOR_REVIEW_RESULT_UNAVAILABLE", "message": "当前任务没有可供人工确认的真实结果。"})
+        if not result.get("output_sha256") or _sha256_file(output_path) != result["output_sha256"]:
+            raise HTTPException(status_code=409, detail={"code": "COLOR_REVIEW_RESULT_CHANGED", "message": "当前结果文件与任务记录不一致，不能写入人工确认状态。"})
+        record["result_review_status"] = review_status
+        record["result_reviewed_at"] = lifecycle_timestamp() if review_status == "confirmed" else None
+        emit_runtime_event(
+            "QUALITY_REVIEW_UPDATED",
+            stage="human_quality_review",
+            result="success",
+            status=review_status,
+            impact="color_result_review_updated",
+            action="continue_delivery" if review_status == "confirmed" else "review_result",
+            **color_task_event_fields(record),
+        )
+        if review_status == "confirmed":
+            emit_runtime_event(
+                "USER_CONFIRMED",
+                stage="human_quality_review",
+                result="success",
+                impact="color_result_confirmed",
+                **color_task_event_fields(record),
+            )
+        return {"code": 200, "status": "success", "success": True, "data": public_color_result(record)}
+
+    @app.post("/api/color-correction/feedback-report")
+    async def color_correction_feedback_report(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        if not set(payload).issubset({"task_id", "category", "description"}) or "task_id" not in payload:
+            raise HTTPException(status_code=400, detail={"code": "FEEDBACK_REPORT_REQUEST_INVALID", "message": "问题反馈请求字段不正确。"})
+        task_id = str(payload.get("task_id") or "")
+        record = task_registry.get(task_id)
+        if not record or record.get("task_family") != "color_correction":
+            raise HTTPException(status_code=404, detail={"code": "COLOR_CORRECTION_TASK_NOT_FOUND", "message": "颜色校正任务不存在。"})
+        if record.get("status") != "completed" or not record.get("result"):
+            raise HTTPException(status_code=409, detail={"code": "FEEDBACK_REPORT_TASK_INCOMPLETE", "message": "任务完成后才能生成问题反馈报告。"})
+        existing = record.get("feedback_report")
+        if isinstance(existing, Mapping) and Path(str(existing.get("report_path") or "")).is_file():
+            return {"code": 200, "status": "success", "success": True, "data": dict(existing)}
+        description = str(payload.get("description") or "").strip()
+        if len(description) > 1000:
+            raise HTTPException(status_code=400, detail={"code": "FEEDBACK_REPORT_REQUEST_INVALID", "message": "问题描述不得超过1000个字符。"})
+        result = dict(record["result"])
+        output_path = Path(record["output_path"]).resolve()
+        report_path = unique_output_path(Path(record["output_dir"]), f"影界HDDE_问题反馈_{task_id}.json")
+        generated_at = lifecycle_timestamp()
+        runtime_context = dict(feedback_runtime_provider() or {}) if feedback_runtime_provider else {}
+        error_context = record.get("error_context") if isinstance(record.get("error_context"), Mapping) else {}
+        record["related_events"] = related_runtime_events(
+            task_id=task_id,
+            batch_id=str(record.get("batch_id") or ""),
+            error_id=str(error_context.get("error_id") or ""),
+        )
+        feedback_context = build_feedback_context(
+            record,
+            runtime=runtime_context,
+            user_description=description,
+        )
+        report_data = {
+            "report_version": "hdde.color-correction-feedback.v1",
+            "created_at": generated_at,
+            "environment": {
+                **build_feedback_environment(generated_at),
+                "color_correction_engine_version": COLOR_CORRECTION_ENGINE_VERSION,
+            },
+            "task": {
+                "task_id": task_id,
+                "processing_type": record["operation_mode"],
+                "status": record["status"],
+                "created_at": record["created_at"],
+                "completed_at": record.get("completed_at"),
+                "lifecycle": [dict(item) for item in record.get("lifecycle", [])],
+                "failure_code": None,
+                "failure_reason": record.get("failure_reason"),
+            },
+            "files": {
+                "source_reference": feedback_context["references"]["source"],
+                "output_reference": feedback_context["references"]["result"],
+                "output_directory_label": "formal_color_output",
+                "source_sha256": result.get("source_sha256"),
+                "output_sha256": result.get("output_sha256"),
+                "source": {
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "format": result.get("source_format"),
+                    "size_bytes": result.get("source_size_bytes"),
+                },
+                "output": {
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "format": result.get("output_format"),
+                    "size_bytes": result.get("output_size_bytes"),
+                },
+            },
+            "processing": {
+                "engine_version": result.get("engine_version"),
+                "analysis": result.get("analysis"),
+                "before_metrics": result.get("before_metrics"),
+                "after_metrics": result.get("after_metrics"),
+                "detected_issues": result.get("detected_issues"),
+                "applied_actions": result.get("applied_actions"),
+                "parameters": result.get("parameters"),
+                "processing_time_ms": result.get("processing_time_ms"),
+            },
+            "user_feedback": {
+                "category": str(payload.get("category") or "结果不符合预期")[:80],
+                "description": description,
+            },
+            "context": feedback_context,
+            "validation": {
+                "output_exists": output_path.is_file(),
+                "output_size_positive": output_path.is_file() and output_path.stat().st_size > 0,
+                "output_decoded": True,
+                "dimensions_preserved": True,
+                "format_and_extension_consistent": True,
+                "source_unchanged": True,
+                "formal_output_directory_ready": True,
+                "project_tmp_fallback_used": False,
+            },
+            "privacy": {
+                "source_image_included": False,
+                "output_image_included": False,
+                "absolute_paths_included": False,
+                "external_upload_performed": False,
+            },
+        }
+        report_bytes = (json.dumps(report_data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        try:
+            with report_path.open("xb") as handle:
+                handle.write(report_bytes)
+        except FileExistsError as exc:
+            emit_runtime_event(
+                "FEEDBACK_REPORT_GENERATION_FAILED",
+                level=logging.WARNING,
+                stage="feedback_report_write",
+                result="blocked",
+                error_category="USER_ACTION_REQUIRED",
+                status=record.get("status") or "",
+                error_code="FEEDBACK_REPORT_EXISTS",
+                error_stage="feedback_report_write",
+                reason="feedback_report_already_exists",
+                impact="new_feedback_report_not_created",
+                action="use_existing_feedback_report",
+                **color_task_event_fields(record),
+            )
+            raise HTTPException(status_code=409, detail={"code": "FEEDBACK_REPORT_EXISTS", "message": "同名问题反馈报告已存在，未覆盖既有文件。"}) from exc
+        except Exception as exc:
+            diagnostics = build_exception_diagnostics(
+                exc,
+                error_category="ENVIRONMENT_ERROR" if isinstance(exc, OSError) else "PRODUCT_ERROR",
+                error_stage="feedback_report_write",
+            )
+            emit_runtime_event(
+                "FEEDBACK_REPORT_GENERATION_FAILED",
+                level=logging.ERROR,
+                stage="feedback_report_write",
+                result="failed",
+                status=record.get("status") or "",
+                impact="feedback_report_unavailable",
+                action="check_runtime_log_and_output_directory",
+                **color_task_event_fields(record),
+                **diagnostics,
+            )
+            raise
+        try:
+            token = issue_token(
+                report_path,
+                role="color_feedback_report",
+                filename=report_path.name,
+                task_id=task_id,
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+            )
+        except Exception as exc:
+            diagnostics = build_exception_diagnostics(
+                exc,
+                error_category="PRODUCT_ERROR",
+                error_stage="feedback_report_registration",
+            )
+            emit_runtime_event(
+                "FEEDBACK_REPORT_GENERATION_FAILED",
+                level=logging.ERROR,
+                stage="feedback_report_registration",
+                result="failed",
+                status=record.get("status") or "",
+                impact="feedback_report_download_unavailable",
+                action="check_runtime_log_and_report_registry",
+                **color_task_event_fields(record),
+                **diagnostics,
+            )
+            raise
+        feedback = {
+            "task_id": task_id,
+            "report_name": report_path.name,
+            "report_path": str(report_path),
+            "report_size_bytes": len(report_bytes),
+            "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "download_url": f"/api/color-correction/feedback-report/{token}",
+            "source_image_included": False,
+            "output_image_included": False,
+            "absolute_paths_included": False,
+            "external_upload_performed": False,
+            "context_preview": feedback_context_preview(feedback_context),
+        }
+        record["feedback_report"] = feedback
+        record["feedback_report_token"] = token
+        emit_runtime_event(
+            "FEEDBACK_REPORT_GENERATED",
+            stage="feedback_report_generation",
+            result="success",
+            status=record.get("status") or "",
+            runtime_log_reference=str(runtime_context.get("runtime_log_reference") or ""),
+            impact="feedback_report_available",
+            action="user_review_and_decide_whether_to_send",
+            **color_task_event_fields(record),
+        )
+        return {"code": 200, "status": "success", "success": True, "data": feedback}
+
+    def validated_color_target(task_id: str, *, output_file: bool) -> tuple[dict[str, Any], Path]:
+        record = task_registry.get(str(task_id or ""))
+        if not record or record.get("task_family") != "color_correction":
+            raise HTTPException(status_code=404, detail={"code": "COLOR_CORRECTION_TASK_NOT_FOUND", "message": "颜色校正任务不存在。"})
+        target = Path(record["output_path"] if output_file else record["output_dir"]).resolve()
+        root = Path(record["effective_output_root"]).resolve()
+        if root not in target.parents or not target.exists() or (output_file and not target.is_file()) or (not output_file and not target.is_dir()):
+            raise HTTPException(status_code=403, detail={"code": "COLOR_CORRECTION_OUTPUT_INVALID", "message": "颜色校正结果不在受控输出目录内。"})
+        return record, target
+
+    @app.post("/api/color-correction/open-output")
+    async def color_correction_open_output(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        if set(payload) != {"task_id"}:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_CORRECTION_OPEN_INVALID", "message": "只能通过已登记的任务打开结果。"})
+        _, target = validated_color_target(str(payload.get("task_id") or ""), output_file=True)
+        try:
+            if folder_opener is not None:
+                folder_opener(str(target))
+            elif os.name == "nt":
+                os.startfile(str(target))  # noqa: S606 - validated local output file only
+            else:
+                raise OSError("当前系统不支持自动打开本地结果。")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_CORRECTION_OPEN_FAILED", "message": "打开校正结果失败。"}) from exc
+        return {"code": 200, "status": "success", "success": True, "data": {"file_label": target.name}}
+
+    @app.post("/api/color-correction/open-output-folder")
+    async def color_correction_open_output_folder(payload: dict = Body(default_factory=dict)):
+        require_compression_directory()
+        if set(payload) != {"task_id"}:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_CORRECTION_OPEN_INVALID", "message": "只能通过已登记的任务打开输出目录。"})
+        _, target = validated_color_target(str(payload.get("task_id") or ""), output_file=False)
+        try:
+            if folder_opener is not None:
+                folder_opener(str(target))
+            elif os.name == "nt":
+                os.startfile(str(target))  # noqa: S606 - validated local output directory only
+            else:
+                raise OSError("当前系统不支持自动打开本地目录。")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"code": "COLOR_CORRECTION_OPEN_FAILED", "message": "打开输出目录失败。"}) from exc
+        return {"code": 200, "status": "success", "success": True, "data": {"directory_label": target.name}}
+
+    @app.get("/api/color-correction/feedback-report/{token}")
+    async def color_correction_feedback_report_download(token: str):
+        require_compression_directory()
+        item = require_token(token, role="color_feedback_report")
+        path = Path(item["path"]).resolve()
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != str(item.get("sha256") or ""):
+            raise HTTPException(status_code=409, detail={"code": "FEEDBACK_REPORT_SHA_MISMATCH", "message": "问题反馈报告完整性校验失败。"})
+        filename = _safe_name(item.get("filename") or path.name)
+        return Response(
+            content=content,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
+            },
+        )
+
+    def require_output_center_item(item_id: str) -> dict[str, Any]:
+        item_key = str(item_id or "")
+        item = output_center_index.get(item_key)
+        if not item:
+            build_output_center_snapshot()
+            item = output_center_index.get(item_key)
+        if not item:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "OUTPUT_ITEM_NOT_FOUND", "message": "该成品已不存在或不属于当前正式输出。"},
+            )
+        output_path = Path(item["output_path"]).resolve()
+        if not output_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "OUTPUT_ITEM_MISSING", "message": "该成品文件已不存在。"},
+            )
+        return item
+
+    @app.get("/api/output-center/items")
+    async def output_center_items():
+        snapshot = build_output_center_snapshot()
+        return {"code": 200, "status": "success", "success": True, "data": snapshot}
+
+    @app.get("/api/output-center/items/{item_id}/preview")
+    async def output_center_preview(item_id: str):
+        item = require_output_center_item(item_id)
+        path = Path(item["output_path"]).resolve()
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return FileResponse(path, media_type=media_type, filename=_safe_name(path.name))
+
+    @app.get("/api/output-center/items/{item_id}/source-preview")
+    async def output_center_source_preview(item_id: str):
+        item = require_output_center_item(item_id)
+        source_path = item.get("source_path")
+        if not source_path or not Path(source_path).is_file():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "OUTPUT_SOURCE_MAPPING_UNAVAILABLE", "message": "当前成品没有可靠的原图映射。"},
+            )
+        path = Path(source_path).resolve()
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return FileResponse(path, media_type=media_type, filename=_safe_name(path.name))
+
+    def open_output_center_target(item_id: str, *, directory: bool) -> dict[str, Any]:
+        item = require_output_center_item(item_id)
+        output_path = Path(item["output_path"]).resolve()
+        target = output_path.parent if directory else output_path
+        try:
+            if folder_opener is not None:
+                folder_opener(str(target))
+            elif os.name == "nt":
+                os.startfile(str(target))  # noqa: S606 - server-indexed formal output only
+            else:
+                raise OSError("当前系统不支持自动打开本地文件。")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "OUTPUT_ITEM_OPEN_FAILED", "message": "打开成品位置失败，请确认文件仍可访问。"},
+            ) from exc
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {"file_name": output_path.name, "directory_name": output_path.parent.name},
+        }
+
+    @app.post("/api/output-center/items/{item_id}/open")
+    async def output_center_open(item_id: str):
+        return open_output_center_target(item_id, directory=False)
+
+    @app.post("/api/output-center/items/{item_id}/open-folder")
+    async def output_center_open_folder(item_id: str):
+        return open_output_center_target(item_id, directory=True)
+
+    @app.post("/api/smart-delivery/preflight")
+    async def smart_delivery_preflight(payload: dict = Body(default_factory=dict)):
+        plan = build_smart_delivery_plan(
+            payload.get("item_ids"),
+            payload.get("result_ids"),
+            payload.get("rules"),
+            store=True,
+        )
+        return {"code": 200, "status": "success", "success": True, "data": public_smart_delivery_plan(plan)}
+
+    @app.post("/api/smart-delivery/execute")
+    async def smart_delivery_execute(payload: dict = Body(default_factory=dict)):
+        prune_smart_delivery_plans()
+        plan_id = str(payload.get("plan_id") or "")
+        plan = smart_delivery_plan_registry.get(plan_id)
+        if not plan:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "SMART_DELIVERY_PLAN_EXPIRED", "message": "交付预检已失效，请重新检查名称。"},
+            )
+        if payload.get("confirmed") is not True:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_CONFIRMATION_REQUIRED", "message": "生成交付副本前必须完成用户确认。"},
+            )
+        refreshed = build_smart_delivery_plan(
+            plan["item_ids"] if plan["selection_mode"] == "item_ids" else None,
+            plan["result_ids"] if plan["selection_mode"] == "result_ids" else None,
+            plan["rules"],
+            store=False,
+        )
+        if not refreshed["ready"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SMART_DELIVERY_PREFLIGHT_BLOCKED",
+                    "message": "交付条件已变化，请处理阻断项后重新确认。",
+                    "preflight": public_smart_delivery_plan(refreshed),
+                },
+            )
+        if refreshed["signature"] != plan["signature"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SMART_DELIVERY_PREVIEW_CHANGED",
+                    "message": "源成品或名称预览已经变化，请重新确认。",
+                    "preflight": public_smart_delivery_plan(refreshed),
+                },
+            )
+
+        delivery_id = f"delivery_{datetime.fromtimestamp(now_provider()).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        delivery_root = smart_delivery_root()
+        try:
+            delivery_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            emit_runtime_event(
+                "DELIVERY_FAILED",
+                level=logging.ERROR,
+                stage="delivery_directory",
+                result="failed",
+                feature_key="smart_delivery",
+                delivery_id=delivery_id,
+                reason=str(exc) or exc.__class__.__name__,
+                impact="delivery_copy_unavailable",
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_DIRECTORY_UNAVAILABLE", "message": "正式智能交付目录不可用。"},
+            ) from exc
+
+        results: list[dict[str, Any]] = []
+        for entry in refreshed["entries"]:
+            delivery_item_id = uuid.uuid4().hex[:16]
+            result_id = entry["source_result_id"] or delivery_item_id
+            source_path = Path(entry["_source_path"]).resolve()
+            destination_path = Path(entry["_destination_path"]).resolve()
+            emit_runtime_event(
+                "DELIVERY_STARTED",
+                stage="delivery_copy",
+                result="started",
+                feature_key=entry["source_feature_key"] or "smart_delivery",
+                task_id=entry["source_task_id"],
+                result_id=entry["source_result_id"],
+                delivery_id=delivery_id,
+                impact="delivery_copy_running",
+            )
+            try:
+                if source_path.stat().st_size != entry["_source_size"] or source_path.stat().st_mtime_ns != entry["_source_mtime_ns"]:
+                    raise OSError("源成品在确认后发生变化。")
+                copied = copy_delivery_item(source_path, destination_path)
+                results.append({
+                    "result_id": result_id,
+                    "delivery_item_id": delivery_item_id,
+                    "delivery_id": delivery_id,
+                    "item_id": entry["item_id"],
+                    "source_result_id": entry["source_result_id"],
+                    "task_id": entry["source_task_id"],
+                    "feature_key": entry["source_feature_key"],
+                    "source_processing_type": entry["source_processing_type"],
+                    "source_file_name": entry["source_file_name"],
+                    "delivery_file_name": entry["delivery_file_name"],
+                    "status": "completed",
+                    "failure_reason": "",
+                    **copied,
+                    "_destination_path": destination_path,
+                })
+                emit_runtime_event(
+                    "DELIVERY_SUCCEEDED",
+                    stage="delivery_copy",
+                    result="success",
+                    feature_key=entry["source_feature_key"] or "smart_delivery",
+                    task_id=entry["source_task_id"],
+                    result_id=entry["source_result_id"],
+                    delivery_id=delivery_id,
+                    impact="delivery_copy_available",
+                )
+            except Exception as exc:
+                results.append({
+                    "result_id": result_id,
+                    "delivery_item_id": delivery_item_id,
+                    "delivery_id": delivery_id,
+                    "item_id": entry["item_id"],
+                    "source_result_id": entry["source_result_id"],
+                    "task_id": entry["source_task_id"],
+                    "feature_key": entry["source_feature_key"],
+                    "source_processing_type": entry["source_processing_type"],
+                    "source_file_name": entry["source_file_name"],
+                    "delivery_file_name": entry["delivery_file_name"],
+                    "status": "failed",
+                    "failure_reason": str(exc) or "生成交付副本失败。",
+                    "source_sha256": "",
+                    "delivery_sha256": "",
+                    "source_unchanged": False,
+                    "size_bytes": 0,
+                    "_destination_path": None,
+                })
+                emit_runtime_event(
+                    "DELIVERY_FAILED",
+                    level=logging.ERROR,
+                    stage="delivery_copy",
+                    result="failed",
+                    feature_key=entry["source_feature_key"] or "smart_delivery",
+                    task_id=entry["source_task_id"],
+                    result_id=entry["source_result_id"],
+                    delivery_id=delivery_id,
+                    reason=str(exc) or exc.__class__.__name__,
+                    impact="delivery_copy_unavailable",
+                )
+
+        succeeded = sum(1 for result in results if result["status"] == "completed")
+        failed = len(results) - succeeded
+        run = {
+            "delivery_id": delivery_id,
+            "status": "completed" if failed == 0 else ("partial" if succeeded else "failed"),
+            "success_count": succeeded,
+            "failure_count": failed,
+            "delivery_location_label": "正式目录 / 输出 / 智能交付",
+            "delivery_root": delivery_root,
+            "results": results,
+        }
+        smart_delivery_run_registry[delivery_id] = run
+        if shared_task_registry is not None:
+            for result in results:
+                if result.get("status") != "completed":
+                    continue
+                task_record = shared_task_registry.get(str(result.get("task_id") or ""))
+                if not isinstance(task_record, dict):
+                    continue
+                delivery_trace = {
+                    "delivery_id": delivery_id,
+                    "delivery_item_id": result["delivery_item_id"],
+                    "result_id": result.get("source_result_id") or result.get("result_id") or "",
+                    "delivery_file": result.get("delivery_path") or "",
+                    "status": "completed",
+                }
+                task_record["delivery_id"] = delivery_id
+                task_record.setdefault("deliveries", []).append(delivery_trace)
+                task_result = task_record.get("task_result")
+                if isinstance(task_result, dict):
+                    task_result["delivery_id"] = delivery_id
+        public_results = [
+            {key: value for key, value in result.items() if not key.startswith("_")}
+            for result in results
+        ]
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {
+                "delivery_id": delivery_id,
+                "status": run["status"],
+                "success_count": succeeded,
+                "failure_count": failed,
+                "delivery_location_label": run["delivery_location_label"],
+                "results": public_results,
+            },
+        }
+
+    def require_smart_delivery_run(delivery_id: str) -> dict[str, Any]:
+        run = smart_delivery_run_registry.get(str(delivery_id or ""))
+        if not run:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "SMART_DELIVERY_RUN_NOT_FOUND", "message": "当前交付结果已失效。"},
+            )
+        return run
+
+    def open_smart_delivery_target(delivery_id: str, result_id: str = "") -> dict[str, Any]:
+        run = require_smart_delivery_run(delivery_id)
+        target = Path(run["delivery_root"]).resolve()
+        file_name = ""
+        if result_id:
+            result = next(
+                (
+                    item
+                    for item in run["results"]
+                    if item["result_id"] == result_id or item.get("delivery_item_id") == result_id
+                ),
+                None,
+            )
+            if not result or result.get("status") != "completed" or not result.get("_destination_path"):
+                raise HTTPException(
+                    status_code=404,
+                    detail={"code": "SMART_DELIVERY_RESULT_NOT_FOUND", "message": "交付文件不存在或未成功生成。"},
+                )
+            target = Path(result["_destination_path"]).resolve()
+            file_name = target.name
+        delivery_root = smart_delivery_root()
+        if target != delivery_root and target.parent != delivery_root:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "SMART_DELIVERY_TARGET_INVALID", "message": "交付文件不在正式智能交付目录中。"},
+            )
+        if not target.exists():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "SMART_DELIVERY_TARGET_MISSING", "message": "交付文件或目录已不存在。"},
+            )
+        try:
+            if folder_opener is not None:
+                folder_opener(str(target))
+            elif os.name == "nt":
+                os.startfile(str(target))  # noqa: S606 - server-registered formal delivery target only
+            else:
+                raise OSError("当前系统不支持自动打开本地文件。")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "SMART_DELIVERY_OPEN_FAILED", "message": "打开交付结果失败。"},
+            ) from exc
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {"file_name": file_name, "directory_name": delivery_root.name},
+        }
+
+    @app.post("/api/smart-delivery/runs/{delivery_id}/open-folder")
+    async def smart_delivery_open_folder(delivery_id: str):
+        return open_smart_delivery_target(delivery_id)
+
+    @app.post("/api/smart-delivery/runs/{delivery_id}/items/{result_id}/open")
+    async def smart_delivery_open_file(delivery_id: str, result_id: str):
+        return open_smart_delivery_target(delivery_id, result_id)
+
     @app.get("/api/image-compression/preview/{token}")
     async def image_compression_preview(token: str):
+        require_compression_directory()
         item = require_token(token)
         path = Path(item["path"]).resolve()
         if item.get("role") not in {"source_preview", "output_preview"}:
@@ -1672,6 +3863,7 @@ def register_image_compression_routes(
 
     @app.get("/api/image-compression/feedback-package/{token}")
     async def image_compression_feedback_package_download(token: str):
+        require_compression_directory()
         item, path = require_feedback_package_token(token)
         record = task_registry.get(str(item.get("task_id") or ""))
         package = record.get("feedback_package") if record else None
@@ -1715,6 +3907,9 @@ def register_image_compression_routes(
         "token_registry": token_registry,
         "expired_feedback_tokens": expired_feedback_tokens,
         "task_registry": task_registry,
+        "color_batch_registry": color_batch_registry,
+        "color_batch_queue": color_batch_queue,
+        "output_center_index": output_center_index,
         "server_session_id": server_session_id,
     }
     app.state.image_compression_api_state = state

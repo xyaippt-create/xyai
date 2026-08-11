@@ -76,5 +76,6 @@ models/restoration/*.pth
 models/restoration/*.pt
 models/restoration/*.safetensors
 models/restoration/*.ckpt
+models/local_retouch/*.onnx
 *.zip
 测试图/

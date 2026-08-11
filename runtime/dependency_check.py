@@ -18,12 +18,12 @@ REQUIRED_DEPENDENCIES = (
     ("numpy", "numpy", True, "图像矩阵计算组件"),
     ("pathlib", "pathlib", True, "路径处理组件"),
     ("tkinter", "tkinter", False, "图形界面优先组件；缺失时使用 Windows 图形界面回退方案"),
+    ("onnxruntime", "onnxruntime", True, "交付标记与局部修整推理组件"),
 )
 
 OPTIONAL_DEPENDENCIES = (
     ("PIL / Pillow", "PIL", False, "后续图像格式扩展组件"),
     ("torch", "torch", False, "当前版本未启用，仅为后续 AI / GPU 能力预留"),
-    ("onnxruntime", "onnxruntime", False, "当前版本未启用，仅为后续模型推理预留"),
 )
 
 

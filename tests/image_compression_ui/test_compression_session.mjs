@@ -142,7 +142,7 @@ test("12 服务会话变化可原子重置且刷新无矛盾状态", () => {
 });
 
 const outputSettings = normalizeOutputSettings({
-  built_in_default_root: "D:\\影界文件\\图片压缩输出",
+  built_in_default_root: "D:\\影界文件\\输出\\图片压缩",
   saved_default_root: "D:\\长期默认",
   output_root_writable: true,
 });
@@ -155,7 +155,7 @@ test("13 当前任务输出目录覆盖长期默认", () => {
 
 test("14 恢复默认目录同时清除当前覆盖", () => {
   const restored = restoreBuiltInOutput(outputSettings);
-  assert.equal(restored.settings.savedDefaultRoot, "D:\\影界文件\\图片压缩输出");
+  assert.equal(restored.settings.savedDefaultRoot, "D:\\影界文件\\输出\\图片压缩");
   assert.equal(restored.currentTaskOutputRoot, "");
 });
 
@@ -179,8 +179,8 @@ const feedbackPackage = (overrides = {}) => ({
   package_size_bytes: 18432,
   package_sha256: "b".repeat(64),
   download_url: "/api/image-compression/feedback-package/opaque_token_123",
-  display_path: "D:\\影界文件\\图片压缩输出\\尺寸缩小\\中文长图_测试反馈包.zip",
-  function_directory_path: "D:\\影界文件\\图片压缩输出\\尺寸缩小",
+  display_path: "D:\\影界文件\\输出\\图片压缩\\尺寸缩小\\中文长图_测试反馈包.zip",
+  function_directory_path: "D:\\影界文件\\输出\\图片压缩\\尺寸缩小",
   created_at: "2026-07-16T08:00:00+00:00",
   expires_at: "2026-07-16T10:00:00+00:00",
   can_open_folder: true,

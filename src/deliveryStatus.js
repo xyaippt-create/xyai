@@ -52,8 +52,8 @@ export function resolveDeliveryStatus(...sources) {
       status: "FAIL",
       label: "不建议交付",
       badge: "不建议交付",
-      tone: "#ff8a8a",
-      border: "#5a2525",
+      tone: "var(--status-danger)",
+      border: "color-mix(in srgb, var(--status-danger) 40%, var(--border-color))",
       description: "系统检测到交付风险，不建议作为正式成品使用。",
       limited,
     };
@@ -64,8 +64,8 @@ export function resolveDeliveryStatus(...sources) {
       status: LIMITATION_STATUS,
       label: "建议人工复核",
       badge: "1080P 本地预览",
-      tone: "#f0c36f",
-      border: "#66532d",
+      tone: "var(--status-warning)",
+      border: "color-mix(in srgb, var(--status-warning) 40%, var(--border-color))",
       description: "成品已生成，但存在质量门、体积收益比、低分指标或保护策略限制，正式使用前建议人工查看。",
       limited: true,
     };
@@ -76,8 +76,8 @@ export function resolveDeliveryStatus(...sources) {
       status: "PASS",
       label: "可交付",
       badge: "1080P 高清成品",
-      tone: "#8be6b1",
-      border: "#315342",
+      tone: "var(--status-success)",
+      border: "color-mix(in srgb, var(--status-success) 40%, var(--border-color))",
       description: "最终交付门通过，可用于 1080P 本地交付。",
       limited: false,
     };
@@ -87,8 +87,8 @@ export function resolveDeliveryStatus(...sources) {
     status: "WAITING",
     label: "等待判定",
     badge: "1080P 本地预览",
-    tone: "#6e7d80",
-    border: "#263738",
+    tone: "var(--text-secondary)",
+    border: "var(--border-color)",
     description: "等待后端交付状态或人工确认。",
     limited: false,
   };
@@ -121,15 +121,15 @@ export function resolveImageTypeTag(...sources) {
   const imageType = String(payload.image_type || payload.imageType || "unknown").toLowerCase();
   const hasAlpha = payload.has_alpha === true || payload.has_real_alpha === true || payload.alpha_used === true;
 
-  if (hasAlpha) return { label: "透明 PNG", detail: "包含 Alpha 或透明边缘，优先保护透明通道。", tone: "#8be6b1" };
-  if (imageType.includes("text")) return { label: "中文文字 / 海报", detail: "文字、小字、图标和版式边缘优先保护。", tone: "#f0c36f" };
-  if (imageType.includes("product") || imageType.includes("kv")) return { label: "产品 / 品牌 KV", detail: "优先保护 Logo、包装字、品牌色和高光。", tone: "#8effed" };
-  if (imageType.includes("portrait") || imageType.includes("person") || imageType.includes("face")) return { label: "人物 / 商业照片", detail: "优先保护人脸、肤色、手部和身份特征。", tone: "#d6b4ff" };
-  if (imageType.includes("architecture") || imageType.includes("building")) return { label: "建筑 / 空间", detail: "重点观察结构线、天空交界和低频墙面。", tone: "#9cc7ff" };
-  if (imageType.includes("gradient") || imageType.includes("synthetic")) return { label: "合成渐变 / 高光", detail: "重点保护渐变、色带、高光和品牌色气质。", tone: "#f0c36f" };
-  if (imageType.includes("landscape")) return { label: "风景 / 场景", detail: "重点观察低频天空、地面纹理和远景层次。", tone: "#8be6b1" };
+  if (hasAlpha) return { label: "透明 PNG", detail: "包含 Alpha 或透明边缘，优先保护透明通道。", tone: "var(--status-success)" };
+  if (imageType.includes("text")) return { label: "中文文字 / 海报", detail: "文字、小字、图标和版式边缘优先保护。", tone: "var(--status-warning)" };
+  if (imageType.includes("product") || imageType.includes("kv")) return { label: "产品 / 品牌 KV", detail: "优先保护 Logo、包装字、品牌色和高光。", tone: "var(--brand-primary)" };
+  if (imageType.includes("portrait") || imageType.includes("person") || imageType.includes("face")) return { label: "人物 / 商业照片", detail: "优先保护人脸、肤色、手部和身份特征。", tone: "var(--feature-beta-color)" };
+  if (imageType.includes("architecture") || imageType.includes("building")) return { label: "建筑 / 空间", detail: "重点观察结构线、天空交界和低频墙面。", tone: "var(--feature-enabled-color)" };
+  if (imageType.includes("gradient") || imageType.includes("synthetic")) return { label: "合成渐变 / 高光", detail: "重点保护渐变、色带、高光和品牌色气质。", tone: "var(--status-warning)" };
+  if (imageType.includes("landscape")) return { label: "风景 / 场景", detail: "重点观察低频天空、地面纹理和远景层次。", tone: "var(--status-success)" };
 
-  return { label: "普通图像", detail: "未命中特定高风险类型，按通用 1080P 保真规则评估。", tone: "#94a3b8" };
+  return { label: "普通图像", detail: "未命中特定高风险类型，按通用 1080P 保真规则评估。", tone: "var(--text-secondary)" };
 }
 
 export function resolveReviewReasonTags(...sources) {
@@ -186,21 +186,21 @@ export function resolveBenefitTag(...sources) {
   const sizeGrowth = readNumber(payload, "phase6_size_growth_ratio") ?? readNumber(payload, "file_size_ratio");
 
   if (delivery.status === "FAIL") {
-    return { label: "不建议通过", detail: "当前结果存在交付风险，不建议作为正式成品使用。", tone: "#ff8a8a" };
+    return { label: "不建议通过", detail: "当前结果存在交付风险，不建议作为正式成品使用。", tone: "var(--status-danger)" };
   }
   if (delivery.status === LIMITATION_STATUS) {
     if (sizeGrowth !== null && sizeGrowth > 10 && (visibleBenefit === null || visibleBenefit < 3)) {
-      return { label: "低收益提示", detail: "成品已生成，但体积增长或指标限制使收益需要人工确认。", tone: "#f0c36f" };
+      return { label: "低收益提示", detail: "成品已生成，但体积增长或指标限制使收益需要人工确认。", tone: "var(--status-warning)" };
     }
-    return { label: "建议人工复核", detail: "成品可预览，但正式使用前应查看关键局部。", tone: "#f0c36f" };
+    return { label: "建议人工复核", detail: "成品可预览，但正式使用前应查看关键局部。", tone: "var(--status-warning)" };
   }
   if ((visibleBenefit !== null && visibleBenefit >= 4) || (clarityScore !== null && clarityScore >= 85 && textureScore !== null && textureScore >= 60)) {
-    return { label: "明显提升", detail: "指标显示清晰度或材质收益较明确，仍建议查看局部确认。", tone: "#8be6b1" };
+    return { label: "明显提升", detail: "指标显示清晰度或材质收益较明确，仍建议查看局部确认。", tone: "var(--status-success)" };
   }
   if ((visibleBenefit !== null && visibleBenefit >= 2) || (clarityScore !== null && clarityScore >= 70)) {
-    return { label: "轻微提升", detail: "画质有一定改善，但不应理解为强效果重绘。", tone: "#8effed" };
+    return { label: "轻微提升", detail: "画质有一定改善，但不应理解为强效果重绘。", tone: "var(--brand-primary)" };
   }
-  return { label: "保护通过", detail: "当前更偏保真保护，变化较小属于可接受结果。", tone: "#94a3b8" };
+  return { label: "保护通过", detail: "当前更偏保真保护，变化较小属于可接受结果。", tone: "var(--text-secondary)" };
 }
 
 export function resolveReportCenterMeta(...sources) {

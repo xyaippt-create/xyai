@@ -2,17 +2,36 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import TaskDetailPage from "./TaskDetailPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
+import UnifiedFeedback from "./UnifiedFeedback.jsx";
+import { HddePageHeader } from "./HddeUI.jsx";
 import { resolveDeliveryStatus, resolveReportCenterMeta } from "./deliveryStatus.js";
+import { getFileDisplayName } from "./fileDisplayName.js";
+import { PRODUCT_BRAND_LINE, PRODUCT_VERSION_LABEL } from "./productVersion.js";
+import { resolve1080pSizeTreatment } from "./sizeTreatment.js";
 
-const API_BASE = "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8787";
 const OUTPUT_PROFILE = "delivery_1080p";
 const DEFAULT_OUTPUT_FORMAT = "auto";
 const DEFAULT_SCALE = "2";
 const DEFAULT_LEGACY_FORMAT = "png";
 const PROCESSING_MODE_STANDARD = "standard";
 const PROCESSING_MODE_SAFE_BETA = "safe_1080p_beta";
-const DEFAULT_SAFE_BETA_OUTPUT_DIR = "";
+const PROCESSING_MODE_FOUR_K = "4k_v1";
+const PROCESSING_MODE_COLOR_CORRECTION = "AUTO_COLOR_CORRECTION";
+const FOUR_K_OUTPUT_PROFILE = "delivery_4k_v1";
 const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
+
+function resolveProcessingOutputDirectory(workdirInfo, processingMode) {
+  if (workdirInfo?.directory_ready === false) return "";
+  const standardOutputDir = workdirInfo?.output_dir || "";
+  if (processingMode === PROCESSING_MODE_SAFE_BETA) {
+    return workdirInfo?.beta_output_dir || standardOutputDir;
+  }
+  if (processingMode === PROCESSING_MODE_FOUR_K) {
+    return workdirInfo?.four_k_output_dir || "";
+  }
+  return standardOutputDir;
+}
 
 const JPG95_REVIEW_OPTIONS = [
   { decision: "recommend_adopt", label: "建议采用", recommendation: "candidate_recommended" },
@@ -35,13 +54,18 @@ const JPG95_REVIEW_FIELD_NAMES = [
 const processingModeOptions = [
   {
     id: PROCESSING_MODE_STANDARD,
-    label: "1080P标准版",
+    label: "1080P标准增强",
     desc: "沿用当前高清交付流程，适合标准 1080P 交付。",
   },
   {
     id: PROCESSING_MODE_SAFE_BETA,
-    label: "1080P安全增强版 Beta",
+    label: "1080P安全增强",
     desc: "适用于中文商业非人像图，使用 35% protected 策略进行安全增强。",
+  },
+  {
+    id: PROCESSING_MODE_FOUR_K,
+    label: "4K高清画质增强",
+    desc: "保持原图比例，将长边高质量适配至3840px；不宣称真实细节重建。",
   },
 ];
 
@@ -53,22 +77,23 @@ const safeBetaBoundaryItems = [
 ];
 
 const DECOR_LABEL = {
-  color: "#6e7d80",
-  fontSize: "10px",
+  color: "var(--text-muted)",
+  fontSize: "12px",
   letterSpacing: "0.18em",
   textTransform: "uppercase",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
 };
 
 const PANEL_STYLE = {
-  backgroundColor: "#101819",
-  border: "1px solid #263738",
+  backgroundColor: "var(--card-background)",
+  border: "1px solid var(--border-color)",
   borderRadius: "8px",
 };
 
-const TITLE_STYLE = { color: "#f4f7f8" };
+const TITLE_STYLE = { color: "var(--text-primary)" };
 
 const statusText = {
+  pending: "待处理",
   queued: "待处理",
   uploading: "上传中",
   processing: "处理中",
@@ -76,15 +101,7 @@ const statusText = {
   failed: "失败",
   need_reselect: "需重新选择",
 };
-
-const statusColor = {
-  queued: "#6e7d80",
-  uploading: "#f0c36f",
-  processing: "#6feaf0",
-  completed: "#8be6b1",
-  failed: "#ff8a8a",
-  need_reselect: "#f0c36f",
-};
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "blocked"]);
 
 const deliveryStatusLabel = {
   PASS: "可交付",
@@ -92,19 +109,16 @@ const deliveryStatusLabel = {
   FAIL: "不建议交付",
 };
 
-const deliveryStatusColor = {
-  PASS: "#8be6b1",
-  PASS_WITH_LIMITATION: "#f0c36f",
-  FAIL: "#ff8a8a",
-};
-
 function getModeDisplay(mode) {
   const normalized = mode || "";
   if (["fidelity", "texture", "text_safe"].includes(normalized)) {
-    return { label: "1080P标准版", className: "text-[#00ffcc]" };
+    return { label: "1080P标准增强", className: "text-[var(--brand-primary)]" };
   }
-  if (normalized === PROCESSING_MODE_SAFE_BETA) return { label: "1080P安全增强版 Beta", className: "text-[#6feaf0]" };
-  return { label: normalized || "未选择", className: "text-[#94a3b8]" };
+  if (normalized === PROCESSING_MODE_SAFE_BETA) return { label: "1080P安全增强", className: "text-[var(--brand-primary)]" };
+  if (normalized === PROCESSING_MODE_FOUR_K) return { label: "4K高清画质增强", className: "text-[var(--brand-primary)]" };
+  if (normalized === PROCESSING_MODE_COLOR_CORRECTION) return { label: "自动颜色校正", className: "text-[var(--brand-primary)]" };
+  if (normalized === "image_diagnosis") return { label: "图片诊断", className: "text-[var(--brand-primary)]" };
+  return { label: normalized || "未选择", className: "text-[var(--text-secondary)]" };
 }
 function getOutputFormatDisplay(format) {
   const normalized = (format || DEFAULT_OUTPUT_FORMAT).toString().toLowerCase();
@@ -114,6 +128,22 @@ function getOutputFormatDisplay(format) {
 
 function getProcessingModeDisplay(mode) {
   return processingModeOptions.find((item) => item.id === mode) || processingModeOptions[0];
+}
+
+function processingStageLabel(value, status = "") {
+  if (status === "completed") return "处理完成";
+  if (status === "failed" || status === "blocked") return "处理未完成";
+  const labels = {
+    pending: "等待处理",
+    upload: "正在上传",
+    uploading: "正在上传",
+    contract_validation: "核对处理策略",
+    image_processing: "正在处理图片",
+    output_file_write: "正在写入成品",
+    output_verify: "正在核对结果",
+    completed: "处理完成",
+  };
+  return labels[String(value || "").toLowerCase()] || (status === "processing" ? "正在处理" : "");
 }
 
 function normalizeApiUrl(url) {
@@ -344,28 +374,92 @@ function safeBetaReasonText(item, result) {
   const reason = skipped?.reason || item?.error || item?.final_delivery_reason || "";
   if (!reason) return "-";
   if (String(reason).includes("skip_portrait_metrics")) return "人物图保护跳过";
+  if (String(reason).includes("text_logo_risk")) {
+    return "文字与Logo需要重点复核，请在前后对比中确认清晰度与形状后再决定是否交付。";
+  }
   return reason;
 }
 
 function SafeBetaMetricBar({ label, keyName, value, active }) {
   const number = Number(value);
   const hasMetric = Number.isFinite(number);
-  const width = hasMetric ? Math.max(4, Math.min(100, number)) : active ? 100 : 0;
+  const width = hasMetric ? Math.max(0, Math.min(100, number)) : active ? 100 : 0;
   return (
-    <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/70 px-3 py-2">
-      <div className="mb-1.5 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-xs font-medium text-[#e2e8f0]">{label}</p>
-          <p className="mt-0.5 truncate font-mono text-[9px] uppercase tracking-[0.2em] text-[#475569]" title={keyName}>{keyName}</p>
+    <article className="hdde-report-score-card" data-metric={keyName}>
+      <div>
+        <span>{label}</span>
+        <strong>{value || "暂无"}</strong>
+      </div>
+      <div className="hdde-report-score-meter" aria-label={`${label} ${value || "暂无"}`}>
+        <span style={{ width: `${width}%` }} />
+      </div>
+    </article>
+  );
+}
+
+function SafeBetaBeforeAfterCompare({ originalFile, originalUrl, outputUrl, filename }) {
+  const [position, setPosition] = useState(50);
+  const [localOriginalUrl, setLocalOriginalUrl] = useState("");
+
+  useEffect(() => {
+    if (originalUrl || !originalFile || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+      setLocalOriginalUrl("");
+      return () => {};
+    }
+    const objectUrl = URL.createObjectURL(originalFile);
+    setLocalOriginalUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [originalFile, originalUrl]);
+
+  const beforeUrl = originalUrl || localOriginalUrl;
+  const ready = Boolean(beforeUrl && outputUrl);
+
+  if (!ready) {
+    return (
+      <div className="flex h-full min-h-[420px] items-center justify-center rounded-xl border border-[var(--border-color)] bg-[var(--elevated-background)] px-8 text-center">
+        <div className="max-w-lg">
+          <p className="text-lg font-semibold text-[var(--text-primary)]">对比图正在准备</p>
+          <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+            需要同时取得处理前图片和处理后成品，才能进行拖动对比。你仍可打开输出文件夹查看当前结果。
+          </p>
         </div>
-        <span className={`shrink-0 font-mono text-sm font-bold tracking-tight ${hasMetric || active ? "text-[#00ffcc]" : "text-[#64748b]"}`}>
-          {value || "-"}
+      </div>
+    );
+  }
+
+  return (
+    <figure
+      className="relative h-full min-h-[420px] overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--elevated-background)] shadow-sm"
+      data-testid="safe-before-after-comparison"
+    >
+      <img src={beforeUrl} alt={`${filename || "当前图片"}处理前`} className="absolute inset-0 h-full w-full select-none object-contain" draggable="false" />
+      <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}>
+        <img src={outputUrl} alt={`${filename || "当前图片"}处理后`} className="absolute inset-0 h-full w-full select-none object-contain" draggable="false" />
+      </div>
+
+      <div className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-white shadow-[0_0_0_1px_rgba(15,23,42,0.35)]" style={{ left: `${position}%` }}>
+        <span className="absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-[var(--brand-primary)] text-sm font-bold text-white shadow-lg">
+          ↔
         </span>
       </div>
-      <div className="relative h-1.5 overflow-hidden rounded-sm border border-[#1c1f26] bg-black/35">
-        <div className="absolute inset-y-0 left-0 bg-[#3f6f68]" style={{ width: `${width}%` }} />
-      </div>
-    </div>
+
+      <span className="pointer-events-none absolute left-4 top-4 z-30 rounded-full bg-black/65 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-sm">处理后</span>
+      <span className="pointer-events-none absolute right-4 top-4 z-30 rounded-full bg-black/65 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-sm">处理前</span>
+
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={position}
+        onChange={(event) => setPosition(Number(event.target.value))}
+        aria-label="拖动查看处理前后差异"
+        className="absolute inset-0 z-40 h-full w-full cursor-ew-resize opacity-0"
+        data-testid="safe-comparison-slider"
+      />
+      <figcaption className="pointer-events-none absolute bottom-4 left-1/2 z-30 -translate-x-1/2 rounded-full bg-black/65 px-4 py-2 text-xs text-white backdrop-blur-sm">
+        拖动中线查看差异
+      </figcaption>
+    </figure>
   );
 }
 
@@ -415,11 +509,11 @@ function makeSafeBetaTimeline(item, result) {
   };
 
   return [
-    { name: "图像读取", detail: "读取当前队列上传文件，确认真实 File 对象。", state: progress >= 15 || completed ? "完成" : phaseStatus(15) },
-    { name: "安全判定", detail: "判断中文商业非人像 / 人物保护跳过 / 输入缺失。", state: skipped ? "跳过" : progress >= 35 || completed ? "完成" : phaseStatus(35) },
-    { name: "安全增强", detail: "执行 1080P安全增强 Beta，不展示不存在的算法细分进度。", state: phaseStatus(55) },
-    { name: "对比生成", detail: "生成 contact sheet / 输出映射。", state: hasContactSheet ? "完成" : completed ? "跳过" : phaseStatus(80) },
-    { name: "交付输出", detail: "写入 output_path，准备统一反馈包入口。", state: hasOutput ? "完成" : phaseStatus(100) },
+    { name: "读取图片", detail: "确认当前图片可以安全读取。", state: progress >= 15 || completed ? "完成" : phaseStatus(15) },
+    { name: "内容检查", detail: "识别不适合增强的内容并优先保护原图。", state: skipped ? "跳过" : progress >= 35 || completed ? "完成" : phaseStatus(35) },
+    { name: "安全增强", detail: "在保持文字、Logo和画面结构的前提下提升清晰度。", state: phaseStatus(55) },
+    { name: "生成对比", detail: "准备可拖动的处理前后对比。", state: hasContactSheet ? "完成" : completed ? "完成" : phaseStatus(80) },
+    { name: "保存结果", detail: "将成品保存到当前输出文件夹。", state: hasOutput ? "完成" : phaseStatus(100) },
   ];
 }
 
@@ -627,7 +721,7 @@ async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
     response = await responsePromise;
   } catch (error) {
     if (error?.name === "AbortError") {
-      const timeoutError = new Error(`Beta request timed out after ${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}s`);
+      const timeoutError = new Error(`安全增强请求超时（${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}秒）`);
       timeoutError.isSafeBetaTimeout = true;
       timeoutError.timeout_source = "frontend";
       logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
@@ -647,11 +741,11 @@ async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
   try {
     payload = JSON.parse(rawText || "{}");
   } catch (error) {
-    throw new Error(`Beta response parse failed: ${error.message}`);
+    throw new Error(`安全增强响应解析失败：${error.message}`);
   }
   logSafeBeta(betaRunId, "BETA_FETCH_RESPONSE_JSON", { payload });
   if (!response.ok || payload.ok === false || payload.success === false || payload.status === "FAILED" || payload.status === "failed") {
-    const error = new Error(formatBetaFailureMessage(payload, payload.stage || `Beta request failed: HTTP ${response.status}`));
+    const error = new Error(formatBetaFailureMessage(payload, payload.stage || `安全增强请求失败：HTTP ${response.status}`));
     error.payload = payload;
     throw error;
   }
@@ -690,7 +784,7 @@ function betaQueuePatchFromProcessed(item, processedRows, results, fallbackOutpu
   if (!outputPath) return null;
   const outputName = mapped.output_name || processed.output_name || outputPath.split(/[\\/]/).pop() || "";
   const textLogoRisk = isTextLogoRiskRow(processed);
-  const reason = textLogoRisk ? "已生成但不建议交付：text_logo_risk，需要人工复核文字与 Logo。" : fallbackMessage;
+  const reason = textLogoRisk ? "文字与Logo需要重点复核，请在前后对比中确认清晰度与形状后再决定是否交付。" : fallbackMessage;
   return {
     status: "completed",
     progress: 100,
@@ -713,13 +807,13 @@ function betaQueuePatchFromProcessed(item, processedRows, results, fallbackOutpu
   };
 }
 
-function formatBetaFailureMessage(payload, fallback = "1080P安全增强 Beta 处理失败") {
+function formatBetaFailureMessage(payload, fallback = "1080P安全增强处理失败") {
   const data = payload?.data || {};
   const skipped = Array.isArray(payload?.skipped) ? payload.skipped : Array.isArray(data?.skipped) ? data.skipped : [];
   const firstSkip = skipped.find((item) => item && typeof item === "object") || {};
   if (firstSkip.reason) {
     const file = firstSkip.file || payload?.current_file || data?.failed_file || "";
-    return `${file ? `${file} ` : ""}被 1080P安全增强 Beta 安全策略跳过：${firstSkip.reason}`;
+    return `${file ? `${file} ` : ""}被1080P安全增强策略跳过：${firstSkip.reason}`;
   }
   return payload?.error || payload?.message || data?.error_message || data?.reason || fallback;
 }
@@ -730,11 +824,16 @@ function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, o
     const formData = new FormData();
     formData.append("file", item.file);
     formData.append("mode", activeMode);
-    formData.append("scale", DEFAULT_SCALE);
-    formData.append("format", DEFAULT_LEGACY_FORMAT);
-    formData.append("output_profile", OUTPUT_PROFILE);
-    formData.append("output_format", outputFormat || DEFAULT_OUTPUT_FORMAT);
-    if (outputDirForRequest) formData.append("output_dir", outputDirForRequest);
+    if (activeMode === PROCESSING_MODE_FOUR_K) {
+      formData.append("output_profile", FOUR_K_OUTPUT_PROFILE);
+      formData.append("output_format", "png");
+    } else {
+      formData.append("scale", DEFAULT_SCALE);
+      formData.append("format", DEFAULT_LEGACY_FORMAT);
+      formData.append("output_profile", OUTPUT_PROFILE);
+      formData.append("output_format", outputFormat || DEFAULT_OUTPUT_FORMAT);
+      if (outputDirForRequest) formData.append("output_dir", outputDirForRequest);
+    }
     console.info("[VisualMasterPro output_dir] upload FormData", {
       filename: item.name,
       output_dir: outputDirForRequest,
@@ -819,20 +918,8 @@ function streamTask(taskId, onLog, onProgress) {
 }
 
 function StatusPill({ status }) {
-  const color = statusColor[status] || "#6e7d80";
   return (
-    <span
-      style={{
-        color,
-        background: "#0d181a",
-        border: `1px solid ${status === "completed" ? "#8be6b1" : status === "failed" ? "#5a2525" : "#263738"}`,
-        borderRadius: "4px",
-        padding: "4px 8px",
-        fontSize: "10px",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        whiteSpace: "nowrap",
-      }}
-    >
+    <span className="hdde-processing-status-pill" data-status={status || "unknown"}>
       {statusText[status] || "未知"}
     </span>
   );
@@ -851,20 +938,11 @@ function resolveQueueDelivery(item, status) {
 function DeliveryPill({ status, item }) {
   const delivery = resolveQueueDelivery(item, status);
   const normalized = delivery.status || "WAITING";
-  const color = delivery.tone || deliveryStatusColor[normalized] || "#6e7d80";
   const label = normalized === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : delivery.label || deliveryStatusLabel[normalized] || "等待判定";
   return (
     <span
-      style={{
-        color,
-        background: "#0d181a",
-        border: `1px solid ${delivery.border || (normalized === "PASS" ? "#315342" : normalized === "PASS_WITH_LIMITATION" ? "#66532d" : normalized === "FAIL" ? "#5a2525" : "#263738")}`,
-        borderRadius: "4px",
-        padding: "4px 8px",
-        fontSize: "10px",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        whiteSpace: "nowrap",
-      }}
+      className="hdde-processing-delivery-pill"
+      data-status={normalized}
       title={`${delivery.label || label} · ${normalized}`}
     >
       {label}
@@ -975,8 +1053,8 @@ function buildBatchReport(fileQueue) {
 
   return {
     report_name: "batch_report.json",
-    product: "影界 / VisualMasterPro",
-    version: "V0.4.6 RC1",
+    product: "影界 HDDE",
+    version: PRODUCT_VERSION_LABEL,
     scope: "local_report_center_mvp",
     generated_at: new Date().toISOString(),
     note: "本报告为前台解释层导出，不改变后端 raw 字段、delivery guard 或真实交付判断逻辑。",
@@ -993,6 +1071,7 @@ function makeTaskConfig(item) {
     streamEndpoint: item.streamEndpoint,
     fileName: item.name,
     filename: item.name,
+    original_filename: item.name,
     originalUrl: item.originalUrl,
     final_output_url: item.final_output_url,
     preview_output_url: item.preview_output_url,
@@ -1003,6 +1082,19 @@ function makeTaskConfig(item) {
     mode: item.mode,
     output_format: item.output_format,
     task_status: item.status,
+    input_width: item.input_width,
+    input_height: item.input_height,
+    input_size_bytes: item.input_size_bytes,
+    output_width: item.output_width,
+    output_height: item.output_height,
+    output_size_bytes: item.output_size_bytes,
+    output_path: item.output_path,
+    output_directory: item.output_dir,
+    final_output_exists: item.final_output_exists,
+    processing_stage: item.processing_stage,
+    created_at: item.created_at,
+    completed_at: item.completed_at,
+    duration_ms: item.duration_ms,
     task_result: {
       ...(item.task_result || {}),
       final_output_url: item.final_output_url || item.task_result?.final_output_url || "",
@@ -1040,22 +1132,148 @@ function makeTaskConfig(item) {
   };
 }
 
-export default function DashboardPage({ onTaskContextChange }) {
+function taskToQueueItem(task) {
+  const taskId = task?.task_id || task?.taskId || "";
+  const result = task?.task_result || {};
+  const inputPath = String(task?.input_path || result?.input_path || "");
+  const fallbackName = inputPath.split(/[\\/]/).pop() || result?.input_filename || "已创建任务";
+  const status = task?.task_status || task?.status || ((task?.result_id || result?.result_id) && (task?.result_file || task?.output_path || result?.result_file || result?.output_path) ? "completed" : "queued");
+  return {
+    id: `task-${taskId}`,
+    file: null,
+    name: getFileDisplayName(task?.original_filename || fallbackName, "已创建任务"),
+    size: formatBytesToMb(task?.input_size_bytes || result?.input_size_bytes, "-"),
+    type: task?.input_format || result?.input_format || "image",
+    status,
+    mode: task?.feature_key === "image_diagnosis" ? "image_diagnosis" : task?.mode || "fidelity",
+    taskFamily: task?.task_family || task?.feature_key || "",
+    output_format: result?.output_format || task?.output_format || "",
+    output_dir: task?.output_directory || result?.output_dir || "",
+    taskId,
+    featureKey: task?.feature_key || result?.feature_key || task?.processing_type || task?.task_family || "",
+    resultId: task?.result_id || result?.result_id || "",
+    deliveryId: task?.delivery_id || result?.delivery_id || "",
+    streamEndpoint: task?.streamEndpoint || `/api/v1/tasks/${taskId}/stream`,
+    originalUrl: normalizeApiUrl(task?.originalUrl || result?.originalUrl),
+    input_width: task?.input_width || result?.input_width || 0,
+    input_height: task?.input_height || result?.input_height || 0,
+    input_size_bytes: task?.input_size_bytes || result?.input_size_bytes || 0,
+    output_width: task?.output_width || result?.output_width || 0,
+    output_height: task?.output_height || result?.output_height || 0,
+    output_size_bytes: task?.output_size_bytes || result?.output_size_bytes || result?.output_size || 0,
+    resize_policy: task?.resize_policy || result?.resize_policy || "",
+    final_output_url: normalizeApiUrl(task?.final_output_url || task?.enhancedUrl || result?.final_output_url || (
+      taskId
+      && (task?.result_id || result?.result_id)
+      && (task?.result_file || task?.output_path || result?.result_file || result?.output_path)
+        ? `/api/v1/tasks/${encodeURIComponent(taskId)}/result-file`
+        : ""
+    )),
+    preview_output_url: normalizeApiUrl(task?.preview_output_url || result?.preview_output_url),
+    final_delivery_status: task?.final_delivery_status || result?.final_delivery_status || "",
+    final_delivery_reason: task?.final_delivery_reason || result?.final_delivery_reason || "",
+    final_delivery_risk_level: task?.final_delivery_risk_level || result?.final_delivery_risk_level || "",
+    final_delivery_recommended_usage: task?.final_delivery_recommended_usage || result?.final_delivery_recommended_usage || "",
+    output_path: result?.output_path || task?.output_path || "",
+    output_filename: result?.output_filename || "",
+    input_path: inputPath,
+    task_result: result,
+    task_report: task?.task_report || {},
+    debug_quality: task?.debug_quality || result?.debug_quality || {},
+    error: task?.error_message || task?.task_error || "",
+    logs: [],
+    progress: Number(task?.task_progress ?? (status === "completed" ? 100 : 0)),
+    processing_stage: task?.processing_stage || task?.current_stage || "",
+    created_at: task?.created_at || "",
+    completed_at: task?.completed_at || task?.updated_at || "",
+    duration_ms: task?.duration_ms || result?.duration_ms || null,
+    final_output_exists: task?.final_output_exists ?? result?.final_output_exists ?? false,
+  };
+}
+
+function isRunnableProcessingItem(item) {
+  return !["color_correction", "image_diagnosis"].includes(item?.taskFamily);
+}
+
+function colorBatchTaskToQueueItem(entry, batch) {
+  const task = entry?.task || {};
+  const result = entry?.result || {};
+  const ui = entry?.ui || {};
+  const taskId = task.task_id || "";
+  return {
+    id: `color-task-${taskId}`,
+    file: null,
+    name: getFileDisplayName(ui.source_display_name, "颜色校正图片"),
+    size: formatBytesToMb(result.source_size_bytes, "-"),
+    type: result.source_format || "image",
+    status: task.status || "pending",
+    mode: PROCESSING_MODE_COLOR_CORRECTION,
+    taskFamily: "color_correction",
+    batchId: batch.batch_id,
+    output_format: result.output_format || "",
+    output_dir: ui.output_directory || batch.output_directory || "",
+    taskId,
+    featureKey: task.feature_key || result.feature_key || "color_correction",
+    resultId: task.result_id || result.result_id || "",
+    deliveryId: task.delivery_id || result.delivery_id || "",
+    streamEndpoint: "",
+    originalUrl: normalizeApiUrl(ui.source_preview_url),
+    input_width: result.width || 0,
+    input_height: result.height || 0,
+    input_size_bytes: result.source_size_bytes || 0,
+    output_width: result.width || 0,
+    output_height: result.height || 0,
+    output_size_bytes: result.output_size_bytes || 0,
+    final_output_url: normalizeApiUrl(ui.output_preview_url),
+    preview_output_url: normalizeApiUrl(ui.output_preview_url),
+    output_path: ui.output_path || "",
+    output_filename: ui.output_display_name || "",
+    task_result: {
+      ...result,
+      output_path: ui.output_path || "",
+      output_dir: ui.output_directory || batch.output_directory || "",
+      output_filename: ui.output_display_name || "",
+    },
+    task_report: null,
+    debug_quality: null,
+    error: task.failure_reason || "",
+    logs: [],
+    progress: Number(task.progress || 0),
+    processing_stage: task.status || "pending",
+    created_at: task.created_at || "",
+    completed_at: task.completed_at || "",
+    duration_ms: result.processing_time_ms || null,
+    final_output_exists: Boolean(ui.output_path),
+    review_status: entry?.review?.status || "not_available",
+    reviewed_at: entry?.review?.reviewed_at || "",
+  };
+}
+
+export default function DashboardPage({
+  initialProcessingMode = "",
+  initialTaskView = "current",
+  onTaskContextChange,
+  onNavigate,
+  initialSourceFile = null,
+  initialSourceRequestId = "",
+  onInitialSourceConsumed,
+}) {
   const fileInputRef = useRef(null);
   const processingRef = useRef(false);
+  const consumedSourceRequestRef = useRef("");
   const [activeScreen, setActiveScreen] = useState("dashboard");
   const [activeItemId, setActiveItemId] = useState("");
   const [debugItemId, setDebugItemId] = useState("");
   const [fileQueue, setFileQueue] = useState([]);
+  const [taskView, setTaskView] = useState(initialTaskView === "history" ? "history" : "current");
+  const [colorBatches, setColorBatches] = useState([]);
   const [processingMode, setProcessingMode] = useState(PROCESSING_MODE_STANDARD);
   const [activeMode] = useState("fidelity");
   const [outputFormat, setOutputFormat] = useState(DEFAULT_OUTPUT_FORMAT);
   const [safeBetaResult, setSafeBetaResult] = useState(null);
-  const [safeBetaFeedbackResult, setSafeBetaFeedbackResult] = useState(null);
   const [safeBetaStartedAt, setSafeBetaStartedAt] = useState(null);
   const [safeBetaTick, setSafeBetaTick] = useState(0);
   const [appliedOutputDir, setAppliedOutputDir] = useState("");
-  const [defaultOutputDir, setDefaultOutputDir] = useState("");
   const [workdirInfo, setWorkdirInfo] = useState(null);
   const [workdirError, setWorkdirError] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
@@ -1066,23 +1284,76 @@ export default function DashboardPage({ onTaskContextChange }) {
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
 
   useEffect(() => {
-    requestJson("GET", `${API_BASE}/api/health`)
-      .then(async (payload) => {
-        const dir = payload?.data?.default_output_dir || payload?.data?.outputDir || "";
-        setDefaultOutputDir(dir);
-      })
-      .catch(() => setDefaultOutputDir(""));
+    if (processingModeOptions.some((option) => option.id === initialProcessingMode)) {
+      setProcessingMode(initialProcessingMode);
+      setAppliedOutputDir("");
+    }
+  }, [initialProcessingMode]);
+
+  useEffect(() => {
+    setTaskView(initialTaskView === "history" ? "history" : "current");
+  }, [initialTaskView]);
+
+  useEffect(() => {
     requestJson("GET", `${API_BASE}/api/app/workdir`)
       .then((payload) => {
         const data = payload?.data || payload || {};
         setWorkdirInfo(data);
-        const fallbackDir = data.beta_output_dir || data.legacy_output_dir || data.safe_beta_output_dir || data.output_dir || "";
-        if (fallbackDir) setDefaultOutputDir(fallbackDir);
-        setWorkdirError("");
+        setWorkdirError(data.directory_ready === false ? data.directory_message || "正式目录未就绪，请前往系统设置重新选择目录。" : "");
       })
       .catch((error) => {
         setWorkdirInfo(null);
         setWorkdirError(error.message || "工作目录初始化失败，请检查权限");
+      });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    const requestedBatchId = new URLSearchParams(window.location.search).get("batch") || "";
+    const loadColorBatches = async () => {
+      try {
+        const payload = await requestJson("GET", `${API_BASE}/api/color-correction/batches`);
+        if (cancelled) return;
+        const batches = payload?.data?.batches || [];
+        setColorBatches(batches);
+        const colorItems = batches.flatMap((batch) => (batch.items || []).map((item) => colorBatchTaskToQueueItem(item, batch)));
+        setFileQueue((current) => {
+          const otherItems = current.filter((item) => item.taskFamily !== "color_correction");
+          return [...colorItems, ...otherItems];
+        });
+        if (requestedBatchId) {
+          const requestedItems = colorItems.filter((item) => item.batchId === requestedBatchId);
+          const preferred = requestedItems.find((item) => ["processing", "pending"].includes(item.status)) || requestedItems[0];
+          if (preferred) setActiveItemId((current) => current || preferred.id);
+        }
+        if (batches.some((batch) => ["pending", "processing"].includes(batch.status))) {
+          timer = window.setTimeout(loadColorBatches, 700);
+        }
+      } catch {
+        // 旧运行实例没有批量颜色校正接口时，保留现有处理中心能力。
+      }
+    };
+    void loadColorBatches();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    requestJson("GET", `${API_BASE}/api/v1/tasks`)
+      .then((payload) => {
+        const tasks = payload?.data?.tasks || payload?.tasks || [];
+        const restored = tasks.map(taskToQueueItem).filter((item) => item.taskId);
+        if (!restored.length) return;
+        setFileQueue((current) => {
+          const known = new Set(current.map((item) => item.taskId).filter(Boolean));
+          return [...restored.filter((item) => !known.has(item.taskId)), ...current];
+        });
+      })
+      .catch(() => {
+        // 当前运行实例没有可恢复任务时，处理中心仍可正常创建新任务。
       });
   }, []);
 
@@ -1092,10 +1363,15 @@ export default function DashboardPage({ onTaskContextChange }) {
     return () => window.clearInterval(timer);
   }, [safeBetaResult?.status]);
 
-  const activeItem = useMemo(() => fileQueue.find((item) => item.id === activeItemId) || fileQueue.find((item) => item.status === "processing") || fileQueue.find((item) => item.status === "completed") || null, [fileQueue, activeItemId]);
+  const activeItem = useMemo(() => {
+    const belongsToView = (item) => (taskView === "history" ? TERMINAL_TASK_STATUSES.has(item.status) : !TERMINAL_TASK_STATUSES.has(item.status));
+    const selected = fileQueue.find((item) => item.id === activeItemId);
+    if (selected && belongsToView(selected)) return selected;
+    return fileQueue.find((item) => belongsToView(item) && item.status === "processing") || fileQueue.find(belongsToView) || null;
+  }, [fileQueue, activeItemId, taskView]);
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
   const taskContextSnapshot = useMemo(() => {
-    if (!activeItem?.taskId) return null;
+    if (!activeItem?.taskId || activeItem?.taskFamily === "color_correction") return null;
     const originalSource = activeItem.originalUrl || activeItem.task_result?.original_url || activeItem.task_result?.input_url || "";
     const resultSource =
       activeItem.preview_output_url ||
@@ -1105,6 +1381,8 @@ export default function DashboardPage({ onTaskContextChange }) {
       "";
     return {
       taskId: activeItem.taskId,
+      mode: activeItem.mode,
+      taskConfig: makeTaskConfig(activeItem),
       taskResult: activeItem.task_result && typeof activeItem.task_result === "object" ? activeItem.task_result : null,
       taskReport: activeItem.task_report && typeof activeItem.task_report === "object" ? activeItem.task_report : null,
       debugQuality: activeItem.debug_quality && typeof activeItem.debug_quality === "object" ? activeItem.debug_quality : null,
@@ -1112,6 +1390,8 @@ export default function DashboardPage({ onTaskContextChange }) {
     };
   }, [
     activeItem?.taskId,
+    activeItem?.taskFamily,
+    activeItem?.mode,
     activeItem?.originalUrl,
     activeItem?.preview_output_url,
     activeItem?.final_output_url,
@@ -1125,12 +1405,21 @@ export default function DashboardPage({ onTaskContextChange }) {
     onTaskContextChange(taskContextSnapshot);
   }, [onTaskContextChange, taskContextSnapshot]);
 
-  const completedItems = fileQueue.filter((item) => item.status === "completed");
-  const canStartExecution = (processingMode === PROCESSING_MODE_SAFE_BETA || fileQueue.length > 0) && !isProcessingQueue;
-  const safeBetaDefaultOutputDir = workdirInfo?.beta_output_dir || workdirInfo?.legacy_output_dir || workdirInfo?.safe_beta_output_dir || DEFAULT_SAFE_BETA_OUTPUT_DIR;
-  const currentWorkdirRoot = workdirInfo?.app_data_root || "";
-  const currentWorkdirSource = workdirInfo?.app_data_root_source || "";
-  const currentWorkdirWritable = Boolean(workdirInfo?.app_data_root_writable);
+  const completedItems = fileQueue.filter((item) => item.status === "completed" && item.taskFamily !== "image_diagnosis");
+  const currentTaskItems = fileQueue.filter((item) => !TERMINAL_TASK_STATUSES.has(item.status));
+  const historyTaskItems = fileQueue.filter((item) => item.taskId && TERMINAL_TASK_STATUSES.has(item.status));
+  const visibleTaskItems = taskView === "history" ? historyTaskItems : currentTaskItems;
+  const requestedColorBatchId = new URLSearchParams(window.location.search).get("batch") || "";
+  const activeColorBatch = colorBatches.find((batch) => batch.batch_id === requestedColorBatchId) || colorBatches[0] || null;
+  const localQueueItems = fileQueue.filter(isRunnableProcessingItem);
+  const directoryReady = Boolean(workdirInfo?.directory_ready) && !workdirError;
+  const directoryMessage = workdirError || workdirInfo?.directory_message || "正式目录未就绪，请前往系统设置重新选择目录。";
+  const canStartExecution = directoryReady && (processingMode === PROCESSING_MODE_SAFE_BETA || localQueueItems.length > 0) && !isProcessingQueue;
+  const standardOutputDir = resolveProcessingOutputDirectory(workdirInfo, PROCESSING_MODE_STANDARD);
+  const safeBetaDefaultOutputDir = resolveProcessingOutputDirectory(workdirInfo, PROCESSING_MODE_SAFE_BETA);
+  const currentWorkdirRoot = directoryReady ? workdirInfo?.app_data_root || "" : "";
+  const currentWorkdirSource = directoryReady ? workdirInfo?.app_data_root_source || "" : "";
+  const currentWorkdirWritable = directoryReady && Boolean(workdirInfo?.app_data_root_writable);
 
   const updateQueueItem = (id, patch) => {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -1176,7 +1465,7 @@ export default function DashboardPage({ onTaskContextChange }) {
       size: formatFileSize(file),
       type: file.type || "image",
       status: "queued",
-      mode: activeMode,
+      mode: processingMode === PROCESSING_MODE_FOUR_K ? PROCESSING_MODE_FOUR_K : activeMode,
       output_format: outputFormat,
       output_dir: appliedOutputDir,
       taskId: "",
@@ -1184,8 +1473,10 @@ export default function DashboardPage({ onTaskContextChange }) {
       originalUrl: "",
       input_width: 0,
       input_height: 0,
+      input_size_bytes: file.size,
       output_width: 0,
       output_height: 0,
+      output_size_bytes: 0,
       resize_policy: "",
       final_output_url: "",
       preview_output_url: "",
@@ -1207,17 +1498,21 @@ export default function DashboardPage({ onTaskContextChange }) {
       error: "",
       logs: [],
       progress: 0,
+      processing_stage: "",
+      created_at: "",
+      completed_at: "",
+      duration_ms: null,
+      final_output_exists: false,
     }));
     if (replaceQueue) {
       setFileQueue(nextItems);
       setActiveItemId(nextItems[0]?.id || null);
       setDebugItemId(nextItems[0]?.id || null);
       setSafeBetaResult(null);
-      setSafeBetaFeedbackResult(null);
       setSafeBetaStartedAt(null);
       setSafeBetaTick(0);
       setCurrentIndex(0);
-      setNotice(`已重新选择 ${nextItems.length} 张，Beta 状态已重置。`);
+      setNotice(`已重新选择 ${nextItems.length} 张，安全增强状态已重置。`);
       return;
     }
     setFileQueue((prev) => [...prev, ...nextItems]);
@@ -1225,12 +1520,23 @@ export default function DashboardPage({ onTaskContextChange }) {
     setNotice(`已选择 ${fileQueue.length + nextItems.length} 张。`);
   };
 
+  useEffect(() => {
+    if (!initialSourceFile || !initialSourceRequestId || consumedSourceRequestRef.current === initialSourceRequestId) return;
+    consumedSourceRequestRef.current = initialSourceRequestId;
+    addFiles([initialSourceFile], { replaceQueue: processingMode === PROCESSING_MODE_SAFE_BETA });
+    if (typeof onInitialSourceConsumed === "function") onInitialSourceConsumed(initialSourceRequestId);
+  }, [initialSourceFile, initialSourceRequestId, onInitialSourceConsumed, processingMode]);
+
   const handleFileChange = (event) => {
     addFiles(event.target.files, { replaceQueue: processingMode === PROCESSING_MODE_SAFE_BETA });
     event.target.value = "";
   };
 
-  const resolveOutputDirForRequest = () => appliedOutputDir.trim() || defaultOutputDir.trim();
+  const resolveOutputDirForRequest = () => (
+    processingMode === PROCESSING_MODE_FOUR_K
+      ? ""
+      : appliedOutputDir.trim() || standardOutputDir.trim()
+  );
 
   const handleSelectOutputDir = () => {
     setOutputDirError("");
@@ -1245,10 +1551,10 @@ export default function DashboardPage({ onTaskContextChange }) {
         const normalized = payload.output_dir || payload?.data?.normalized_path || "";
         const validatePayload = await requestJson("POST", `${API_BASE}/api/output/validate`, { output_dir: normalized });
         const checkedPath = validatePayload?.normalized_path || validatePayload?.data?.normalized_path || normalized;
-        setAppliedOutputDir(checkedPath === defaultOutputDir ? "" : checkedPath);
+        setAppliedOutputDir(checkedPath === standardOutputDir ? "" : checkedPath);
         setOutputDirError("");
-        setOutputDirSuccess(normalized === defaultOutputDir ? "✓ 已恢复默认输出位置" : "✓ 已成功绑定本地输出文件夹");
-        setNotice(normalized === defaultOutputDir ? "已恢复默认输出位置。" : "已成功绑定本地输出文件夹。");
+        setOutputDirSuccess(normalized === standardOutputDir ? "✓ 已恢复默认输出位置" : "✓ 已成功绑定本地输出文件夹");
+        setNotice(normalized === standardOutputDir ? "已恢复默认输出位置。" : "已成功绑定本地输出文件夹。");
       })
       .catch((error) => {
         setOutputDirSuccess("");
@@ -1258,7 +1564,11 @@ export default function DashboardPage({ onTaskContextChange }) {
   };
 
   const handleOpenOutputDir = () => {
-    const target = processingMode === PROCESSING_MODE_SAFE_BETA ? appliedOutputDir.trim() || safeBetaDefaultOutputDir : appliedOutputDir.trim() || defaultOutputDir;
+    const target = processingMode === PROCESSING_MODE_SAFE_BETA
+      ? appliedOutputDir.trim() || safeBetaDefaultOutputDir
+      : processingMode === PROCESSING_MODE_FOUR_K
+        ? resolveProcessingOutputDirectory(workdirInfo, PROCESSING_MODE_FOUR_K)
+        : appliedOutputDir.trim() || standardOutputDir;
     if (!target) {
       setOutputDirError("当前没有可打开的输出目录。");
       return;
@@ -1277,8 +1587,8 @@ export default function DashboardPage({ onTaskContextChange }) {
   };
 
   const handleOpenWorkdir = () => {
-    if (!currentWorkdirRoot) {
-      setNotice("当前工作目录尚未接入，请确认本地后端已启动。");
+    if (!directoryReady || !currentWorkdirRoot) {
+      setNotice(directoryMessage);
       return;
     }
     requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: currentWorkdirRoot })
@@ -1341,13 +1651,17 @@ export default function DashboardPage({ onTaskContextChange }) {
   };
 
   const runSafeBetaModeV2 = async () => {
+    if (!directoryReady) {
+      setNotice(directoryMessage);
+      return;
+    }
     const startedAt = Date.now();
     const betaRunId = makeBetaRunId();
     const betaOutputDir = appliedOutputDir.trim() || safeBetaDefaultOutputDir;
     const betaItems = fileQueue.filter(isCurrentSafeBetaInputItem);
     const betaItemIds = betaItems.map((item) => item.id);
     const firstFileName = betaItems[0]?.name || "";
-    const firstCurrentFile = firstFileName || "正在连接 Beta 后端";
+    const firstCurrentFile = firstFileName || "正在连接安全增强服务";
     logSafeBeta(betaRunId, "BETA_CLICK_HANDLER_ENTERED", {
       selected_count: betaItems.length,
       processing_mode: processingMode,
@@ -1529,7 +1843,7 @@ export default function DashboardPage({ onTaskContextChange }) {
             beta_processed: processed,
             beta_status: "PASS",
             final_delivery_status: "PASS_WITH_LIMITATION",
-            final_delivery_reason: "1080P安全增强 Beta 已生成，建议查看后使用。",
+            final_delivery_reason: "1080P安全增强成品已生成，建议查看后使用。",
             final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
             error: "",
             logs: ["处理完成"],
@@ -1552,7 +1866,6 @@ export default function DashboardPage({ onTaskContextChange }) {
     setActiveScreen("safe_beta_task");
     setSafeBetaStartedAt(startedAt);
     setSafeBetaTick(0);
-    setSafeBetaFeedbackResult(null);
     setBetaQueuePatch({
       status: "processing",
       progress: 5,
@@ -1560,10 +1873,10 @@ export default function DashboardPage({ onTaskContextChange }) {
       output_dir: betaOutputDir,
       output_filename: "",
       final_delivery_status: "",
-      final_delivery_reason: "Beta 处理中",
+      final_delivery_reason: "安全增强处理中",
       final_output_url: "",
       error: "",
-      logs: ["正在连接 Beta 后端"],
+      logs: ["正在连接安全增强服务"],
     });
     setSafeBetaResult({
       status: "RUNNING",
@@ -1578,9 +1891,9 @@ export default function DashboardPage({ onTaskContextChange }) {
       has_enhanced: false,
       has_contact_sheet: false,
       elapsed_seconds: 0,
-      message: "正在连接 Beta 后端",
+      message: "正在连接安全增强服务",
     });
-    setNotice("1080P安全增强 Beta：正在连接 Beta 后端。");
+    setNotice("1080P安全增强：正在连接处理服务。");
     const stageTimers = [
       window.setTimeout(() => setBetaStage(15, firstFileName || "正在读取图片", "正在读取图片"), 250),
       window.setTimeout(() => setBetaStage(35, firstFileName || "正在执行 1080P安全增强", "正在执行 1080P安全增强，处理中请稍候"), 1000),
@@ -1604,7 +1917,7 @@ export default function DashboardPage({ onTaskContextChange }) {
       const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems, betaRunId, betaOutputDir);
       const data = payload?.data || {};
       if (!isBetaSuccess(payload) && !isBetaSuccess(data)) {
-        throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "Beta run failed");
+        throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "安全增强处理失败");
       }
       logSafeBeta(betaRunId, "BETA_SUCCESS_BRANCH_ENTERED", {
         response_beta_run_id: payload.beta_run_id || data.beta_run_id || "",
@@ -1668,7 +1981,7 @@ export default function DashboardPage({ onTaskContextChange }) {
         progress: 100,
         processed_count: processedCount,
       });
-      setNotice(`1080P安全增强 Beta 完成：${resultStatus}`);
+      setNotice(`1080P安全增强完成：${resultStatus}`);
     } catch (error) {
       const errorPayload = error?.payload || {};
       const errorData = errorPayload?.data || {};
@@ -1757,7 +2070,7 @@ export default function DashboardPage({ onTaskContextChange }) {
               logs: [timeoutMessage],
             };
           }
-          const itemMessage = skipped?.reason ? `${item.name} 被 1080P安全增强 Beta 安全策略跳过：${skipped.reason}` : failureMessage;
+          const itemMessage = skipped?.reason ? `${item.name} 被1080P安全增强策略跳过：${skipped.reason}` : failureMessage;
           return {
             ...item,
             status: "failed",
@@ -1777,7 +2090,7 @@ export default function DashboardPage({ onTaskContextChange }) {
         status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : "BLOCKED",
         error: timeoutMessage,
       });
-      setNotice(`1080P安全增强 Beta 处理失败：${failureMessage}`);
+      setNotice(`1080P安全增强处理失败：${failureMessage}`);
       setNotice(timeoutMessage);
     } finally {
       stageTimers.forEach((timer) => window.clearTimeout(timer));
@@ -1787,66 +2100,17 @@ export default function DashboardPage({ onTaskContextChange }) {
       setActiveScreen("safe_beta_task");
     }
   };
-  const exportSafeBetaFeedbackPackage = async () => {
-    if (!safeBetaResult?.output_dir) return;
-    try {
-      const activeReviewFields = pickJpg95ReviewFields(activeItem || {});
-      const processedForFeedback = (safeBetaResult.processed || []).map((row) =>
-        isSameSafeBetaRow(row, activeItem) ? { ...row, ...activeReviewFields, candidate_is_final_output: false, final_output_source: "png_main" } : row,
-      );
-      const payload = await requestJson("POST", `${API_BASE}/api/beta/safe-1080p/feedback-package`, {
-        run_result: {
-          status: "ok",
-          verification_result: safeBetaResult.status,
-          mode: "safe_1080p",
-          input_dir: safeBetaResult.input_dir || "",
-          output_dir: safeBetaResult.output_dir,
-          app_data_root: safeBetaResult.app_data_root || workdirInfo?.app_data_root || "",
-          app_data_root_source: safeBetaResult.app_data_root_source || workdirInfo?.app_data_root_source || "",
-          app_data_root_exists: safeBetaResult.app_data_root_exists ?? workdirInfo?.app_data_root_exists ?? false,
-          app_data_root_writable: safeBetaResult.app_data_root_writable ?? workdirInfo?.app_data_root_writable ?? false,
-          report_dir: safeBetaResult.report_dir || workdirInfo?.report_dir || "",
-          feedback_dir: safeBetaResult.feedback_dir || workdirInfo?.feedback_dir || "",
-          beta_upload_dir: safeBetaResult.beta_upload_dir || workdirInfo?.beta_upload_dir || "",
-          input_dir_exists: Boolean(safeBetaResult.input_dir),
-          input_image_count: safeBetaResult.input_file_count || 0,
-          processed_count: safeBetaResult.processed_count || 0,
-          skipped_count: safeBetaResult.skipped_count || 0,
-          beta_run_id: safeBetaResult.beta_run_id || "",
-          current_file: safeBetaResult.current_file || activeItem?.name || "",
-          stage: safeBetaResult.stage || "",
-          error: safeBetaResult.message || activeItem?.error || "",
-          message: safeBetaResult.message || "",
-          results: safeBetaResult.results || [],
-          enhanced_files: safeBetaResult.enhanced_files || [],
-          processed: processedForFeedback,
-          skipped: safeBetaResult.skipped || [],
-          started_at: safeBetaResult.started_at || "",
-          finished_at: safeBetaResult.finished_at || "",
-          elapsed_seconds: safeBetaResult.elapsed_seconds || "",
-        },
-      });
-      setSafeBetaFeedbackResult(payload?.data || payload);
-      setNotice("测试反馈包已导出。");
-    } catch (error) {
-      setSafeBetaFeedbackResult({
-        feedback_bundle_status: "BLOCKED",
-        feedback_zip_path: "",
-        feedback_bundle_error: error.message,
-      });
-      setNotice(`测试反馈包导出失败：${error.message}`);
-    }
-  };
-
   const processOneItem = async (item, index, total, queueOutputDir) => {
-    const activeOutputDir = (queueOutputDir || defaultOutputDir || "").trim();
+    const requestMode = processingMode === PROCESSING_MODE_FOUR_K ? PROCESSING_MODE_FOUR_K : activeMode;
+    const activeOutputDir = requestMode === PROCESSING_MODE_FOUR_K
+      ? resolveProcessingOutputDirectory(workdirInfo, PROCESSING_MODE_FOUR_K)
+      : (queueOutputDir || standardOutputDir || "").trim();
     setCurrentIndex(index + 1);
     setActiveItemId(item.id);
-    setActiveScreen("task_detail");
     updateQueueItem(item.id, {
       status: "uploading",
-      mode: activeMode,
-      output_format: outputFormat,
+      mode: requestMode,
+      output_format: requestMode === PROCESSING_MODE_FOUR_K ? "png" : outputFormat,
       output_dir: activeOutputDir,
       error: "",
       logs: ["正在确认输出目录"],
@@ -1854,7 +2118,7 @@ export default function DashboardPage({ onTaskContextChange }) {
     });
 
     try {
-      const uploadPayload = await uploadFileWithXhr(item, activeMode, activeOutputDir, outputFormat, (percent) => {
+      const uploadPayload = await uploadFileWithXhr(item, requestMode, activeOutputDir, outputFormat, (percent) => {
         updateQueueItem(item.id, { progress: Math.min(30, percent) });
       });
       const taskId = uploadPayload.taskId;
@@ -1865,10 +2129,14 @@ export default function DashboardPage({ onTaskContextChange }) {
         taskId,
         streamEndpoint: uploadPayload.data?.streamEndpoint || `/api/v1/tasks/${taskId}/stream`,
         originalUrl: uploadPayload.originalUrl,
+        mode: requestMode,
         input_width: uploadPayload.data?.input_width || 0,
         input_height: uploadPayload.data?.input_height || 0,
+        input_size_bytes: uploadPayload.data?.input_size_bytes || item.file?.size || 0,
         output_width: uploadPayload.data?.output_width || 0,
         output_height: uploadPayload.data?.output_height || 0,
+        created_at: uploadPayload.data?.created_at || "",
+        processing_stage: uploadPayload.data?.processing_stage || "pending",
         progress: 35,
         logs: ["上传完成，正在监听后端 SSE 日志。"],
       });
@@ -1917,10 +2185,15 @@ export default function DashboardPage({ onTaskContextChange }) {
         input_height: taskResult.input_height || uploadPayload.data?.input_height || 0,
         output_width: taskResult.output_width || taskResult.width || 0,
         output_height: taskResult.output_height || taskResult.height || 0,
+        output_size_bytes: taskResult.output_size_bytes || taskResult.output_size || 0,
         resize_policy: taskResult.resize_policy || "",
         hash_equal: taskResult.hash_equal ?? debugQuality.hash_equal ?? null,
         pixel_diff_score: taskResult.pixel_diff_score ?? debugQuality.pixel_diff_score ?? null,
         debug_timing: taskResult.debug_timing || merged.data?.debug_timing || null,
+        processing_stage: merged.data?.processing_stage || "completed",
+        completed_at: merged.data?.completed_at || "",
+        duration_ms: taskResult.duration_ms || merged.data?.duration_ms || null,
+        final_output_exists: taskResult.final_output_exists ?? merged.data?.final_output_exists ?? Boolean(finalOutputUrl),
         error: "",
       });
       setNotice(`当前处理：第 ${index + 1} / ${total} 张已完成。`);
@@ -1939,11 +2212,15 @@ export default function DashboardPage({ onTaskContextChange }) {
 
   const handleStartQueue = async () => {
     if (processingRef.current) return;
+    if (!directoryReady) {
+      setNotice(directoryMessage);
+      return;
+    }
     if (processingMode === PROCESSING_MODE_SAFE_BETA) {
       await runSafeBetaModeV2();
       return;
     }
-    const runnable = fileQueue.filter((item) => item.status === "queued" || item.status === "failed");
+    const runnable = fileQueue.filter((item) => isRunnableProcessingItem(item) && (item.status === "queued" || item.status === "failed"));
     if (!runnable.length) {
       setNotice("队列中没有待处理图片。");
       return;
@@ -1977,6 +2254,21 @@ export default function DashboardPage({ onTaskContextChange }) {
     if (!item) return;
     setActiveItemId(item.id);
     setDebugItemId(item.id);
+    if (item.taskFamily === "color_correction") {
+      if (item.status === "completed" && item.taskId && typeof onNavigate === "function") {
+        const batchQuery = item.batchId ? `&batch=${encodeURIComponent(item.batchId)}` : "";
+        onNavigate(`/color-correction/result?task_id=${encodeURIComponent(item.taskId)}${batchQuery}`);
+        return;
+      }
+      setNotice(item.status === "failed" ? `已定位失败图片：${item.name}。${item.error || "请查看失败原因。"}` : `当前颜色校正结果尚未完成：${item.name}。`);
+      return;
+    }
+    if (item.taskFamily === "image_diagnosis") {
+      if (item.taskId && typeof onNavigate === "function") {
+        onNavigate(`/image-diagnosis?task_id=${encodeURIComponent(item.taskId)}`);
+      }
+      return;
+    }
     if (item.mode === PROCESSING_MODE_SAFE_BETA) {
       const outputPath = firstSafeBetaOutputPath(item, safeBetaResult);
       const stateText = safeBetaItemStatusText(item, safeBetaResult);
@@ -1984,6 +2276,11 @@ export default function DashboardPage({ onTaskContextChange }) {
       setNotice(`已定位：${item.name}｜${stateText}${outputPath ? `｜${outputPath}` : ""}`);
       return;
     }
+    if (item.taskId && typeof onNavigate === "function") {
+      onNavigate(`/task-detail?task_id=${encodeURIComponent(item.taskId)}`);
+      return;
+    }
+    setActiveScreen("task_detail");
     setNotice(`已定位：${item.name}`);
   };
 
@@ -1994,65 +2291,93 @@ export default function DashboardPage({ onTaskContextChange }) {
       const outputPath = firstSafeBetaOutputPath(item, safeBetaResult);
       if (contactSheet || outputPath) {
         setActiveScreen("safe_beta_compare");
-        setNotice(contactSheet ? "已打开 1080P安全增强版 Beta 对比查看。" : "当前图片没有 contact sheet，已显示输出路径，请打开输出目录查看增强图。");
+        setNotice(contactSheet ? "已打开1080P安全增强前后对比。" : "当前图片没有可用对比图，请打开输出目录查看增强图。");
         return;
       }
-      setNotice("当前图片尚未生成对比图，请先运行 1080P安全增强 Beta。");
+      setNotice("当前图片尚未生成对比图，请先运行1080P安全增强。");
       return;
     }
     if (!item?.final_output_url) return;
     setActiveItemId(item.id);
+    if (item.taskId && typeof onNavigate === "function") {
+      onNavigate(`/task-detail/compare?task_id=${encodeURIComponent(item.taskId)}`);
+      return;
+    }
     setActiveScreen("image_compare");
   };
 
   const selectForReport = (item) => {
+    if (item?.taskFamily === "color_correction") {
+      setNotice("批量颜色校正结果可在当前列表逐图查看并打开，不额外生成整批质量报告。");
+      return;
+    }
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
       locateQueueItem(item);
       setActiveScreen("safe_beta_report");
-      setNotice("已打开 1080P安全增强版 Beta 交付报告。");
+      setNotice("已打开1080P安全增强交付报告。");
       return;
     }
     if (!item?.task_report && !item?.debug_quality) return;
     setActiveItemId(item.id);
+    if (item.taskId && typeof onNavigate === "function") {
+      onNavigate(`/task-detail/report?task_id=${encodeURIComponent(item.taskId)}`);
+      return;
+    }
     setActiveScreen("quality_report");
   };
 
-  const handleCreateFeedbackBundle = async (item) => {
-    if (!item?.taskId) return;
-    try {
-      const payload = await requestJson("POST", `${API_BASE}/api/v1/tasks/${encodeURIComponent(item.taskId)}/feedback-bundle`, {});
-      const bundle = payload?.data || payload || {};
-      updateQueueItem(item.id, {
-        feedback_bundle_status: bundle.feedback_bundle_status || "",
-        feedback_bundle_path: bundle.feedback_bundle_path || "",
-        feedback_bundle_size: bundle.feedback_bundle_size || 0,
-      });
-      setNotice(bundle.feedback_bundle_status === "PASS" ? "诊断反馈包已生成。" : "诊断反馈包生成失败。");
-    } catch (error) {
-      updateQueueItem(item.id, { feedback_bundle_status: "FAIL" });
-      setNotice(error.message || "诊断反馈包生成失败。");
-    }
-  };
-
   const handleOpenFinalOutput = (item) => {
+    if (item?.taskFamily === "color_correction") {
+      if (!item.output_path) return;
+      requestJson("POST", `${API_BASE}/api/color-correction/open-output`, { task_id: item.taskId })
+        .then(() => setNotice(`已打开颜色校正结果：${item.name}。`))
+        .catch((error) => setNotice(error.message || "无法打开颜色校正结果。"));
+      return;
+    }
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
-      setNotice("Beta 成品为本地文件，请使用“打开当前目录”或复制成品路径查看。");
+      setNotice("安全增强成品为本地文件，请使用“打开当前目录”或复制成品路径查看。");
       return;
     }
     if (!item?.final_output_url) return;
     window.open(item.final_output_url, "_blank", "noopener,noreferrer");
   };
 
+  const handleOpenItemOutputFolder = (item) => {
+    if (item?.taskFamily === "color_correction") {
+      if (!item.output_path) {
+        setNotice("当前图片尚未生成可打开的输出文件夹。");
+        return;
+      }
+      requestJson("POST", `${API_BASE}/api/color-correction/open-output-folder`, { task_id: item.taskId })
+        .then(() => setNotice("已打开颜色校正输出文件夹。"))
+        .catch((error) => setNotice(error.message || "无法打开颜色校正输出文件夹。"));
+      return;
+    }
+    const safePath = item?.mode === PROCESSING_MODE_SAFE_BETA
+      ? firstSafeBetaOutputPath(item, safeBetaResult)
+      : "";
+    const pathValue = safePath || item?.output_path || item?.task_result?.output_path || "";
+    const target = item?.output_dir || item?.task_result?.output_dir || String(pathValue).replace(/[\\/][^\\/]+$/, "");
+    if (!target) {
+      setNotice("当前任务还没有可打开的输出文件夹。");
+      return;
+    }
+    requestJson("POST", `${API_BASE}/api/output/open`, { output_dir: target })
+      .then((payload) => setNotice(payload.message || "已打开输出文件夹。"))
+      .catch((error) => setNotice(error.message || "无法打开输出文件夹。"));
+  };
+
   const handleCopyFinalOutputUrl = async (item) => {
     const betaPath = item?.mode === PROCESSING_MODE_SAFE_BETA ? firstSafeBetaOutputPath(item, safeBetaResult) : "";
-    const value = betaPath || item?.final_output_url || "";
+    const colorPath = item?.taskFamily === "color_correction" ? item?.output_path || "" : "";
+    const value = colorPath || betaPath || item?.final_output_url || "";
     if (!value) {
-      setNotice(item?.mode === PROCESSING_MODE_SAFE_BETA ? "当前 Beta 任务还没有可复制的成品路径。" : "当前任务还没有可复制的成品映射路径。");
+      setNotice(item?.mode === PROCESSING_MODE_SAFE_BETA ? "当前安全增强任务还没有可复制的成品路径。" : "当前任务还没有可复制的成品映射路径。");
       return;
     }
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(betaPath ? "已复制 Beta 成品本地路径。" : "已复制成品映射 URL。");
+      setNotice(colorPath ? "已复制颜色校正成品路径。" : betaPath ? "已复制安全增强成品路径。" : "已复制成品映射 URL。");
     } catch (error) {
       setNotice(error.message || "复制成品路径失败。");
     }
@@ -2131,7 +2456,7 @@ export default function DashboardPage({ onTaskContextChange }) {
       <ImageSliderComparePage
         taskConfig={makeTaskConfig(activeItem)}
         compareAssets={makeTaskConfig(activeItem)?.compareAssets}
-        onBackToTask={() => setActiveScreen("dashboard")}
+        onBackToTask={() => setActiveScreen("task_detail")}
         onViewReport={() => selectForReport(activeItem)}
       />
     );
@@ -2149,66 +2474,75 @@ export default function DashboardPage({ onTaskContextChange }) {
 
   if (activeScreen === "safe_beta_task") {
     const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
-    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
     const reasonText = safeBetaReasonText(activeItem, safeBetaResult);
     const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
     const isPortraitSkip = reasonText === "人物图保护跳过";
     const deliveryConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "建议查看后使用" : activeItem?.status === "failed" ? "不建议交付" : "等待";
-    const canViewCompare = Boolean(contactSheet || outputPath);
+    const canViewCompare = Boolean(outputPath);
     const timeline = makeSafeBetaTimeline(activeItem, safeBetaResult);
-    const betaLogs = makeSafeBetaStageLogs(activeItem, safeBetaResult);
+    const progressValue = safeBetaResult?.progress ?? activeItem?.progress ?? 0;
+    const rawInputName = activeItem?.name || safeBetaResult?.current_file || "";
+    const inputDisplayName = getFileDisplayName(rawInputName, "等待任务");
+    const taskHeading = isPortraitSkip
+      ? "已保护原图"
+      : outputPath || activeItem?.status === "completed"
+        ? "图片处理已完成"
+        : activeItem?.status === "failed"
+          ? "图片处理未完成"
+          : "正在处理你的图片";
     return (
-      <section className="flex h-[100dvh] w-full flex-col overflow-hidden bg-[#0b0c0e] p-4 text-slate-100">
-        <header className="mb-4 flex shrink-0 items-center justify-between gap-5 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+      <section
+        className="hdde-enhanced-page flex h-full min-h-0 w-full flex-col overflow-hidden bg-[var(--content-background)] p-4 text-[var(--text-primary)]"
+        data-testid="safe-task-detail-page"
+      >
+        <header className="mb-4 flex shrink-0 items-center justify-between gap-5 rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-4 shadow-sm">
           <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">SAFE 1080P BETA / CORE TASK</p>
-            <h1 className="mt-2 truncate text-xl font-semibold tracking-wide text-white">1080P安全增强版 Beta · 核心增强任务页</h1>
-            <p className="mt-1 truncate font-mono text-xs text-[#64748b]" title={activeItem?.name || ""}>
-              beta_run_id: {safeBetaResult?.beta_run_id || "-"} · 当前文件：{activeItem?.name || safeBetaResult?.current_file || "等待任务"}
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">安全增强任务</p>
+            <h1 className="mt-2 truncate text-xl font-semibold tracking-wide text-[var(--text-primary)]">{taskHeading}</h1>
+            <p className="mt-1 truncate text-sm text-[var(--text-secondary)]" title={rawInputName}>
+              当前文件：{inputDisplayName}
             </p>
           </div>
           <div className="flex shrink-0 gap-2">
-            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-2 text-xs text-[#94a3b8] transition hover:bg-[#2d3139] hover:text-white">返回工作台</button>
-            <button type="button" disabled={!canViewCompare} title={!canViewCompare ? "当前尚未生成对比图" : ""} onClick={() => selectForCompare(activeItem)} className="rounded-sm border border-[#2d665f] px-3 py-2 text-xs text-[#5bf5dc] transition hover:bg-[#163631] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">查看高清对比</button>
-            <button type="button" onClick={() => selectForReport(activeItem)} className="rounded-sm border border-[#66532d] bg-[#17130a] px-3 py-2 text-xs text-[#f0c36f] transition hover:bg-[#211b0e]">查看交付报告</button>
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-md border border-[var(--border-color)] bg-[var(--card-background)] px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]">返回处理中心</button>
           </div>
         </header>
 
-        <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-4">
+        <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-4">
           <section className="flex min-h-0 flex-col gap-4 overflow-hidden">
-            <div className="grid shrink-0 grid-cols-2 gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4 text-xs">
+            <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-4 text-sm">
               {[
-                ["模式", "1080P安全增强版 Beta"],
-                ["目标规格", "1080P安全增强"],
+                ["处理方式", "1080P安全增强"],
                 ["当前状态", statusTextValue],
-                ["交付结论", deliveryConclusion],
-                ["输出路径", outputPath || "未生成"],
-                ["contact sheet", contactSheet || "未生成"],
+                ["结果建议", deliveryConclusion],
               ].map(([label, value]) => (
-                <div key={label} className="min-w-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 p-3">
-                  <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#475569]">{label}</p>
-                  <p className="mt-1 truncate text-sm text-[#e2e8f0]" title={String(value)}>{value}</p>
+                <div key={label} className="min-w-0 rounded-md border border-[var(--divider-color)] bg-[var(--elevated-background)] p-3">
+                  <p className="text-xs font-medium text-[var(--text-muted)]">{label}</p>
+                  <p className="mt-1 break-words text-sm font-medium leading-5 text-[var(--text-primary)]">{value}</p>
                 </div>
               ))}
             </div>
 
-            <section className="min-h-0 flex-1 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
+            <section className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-4">
               <div className="mb-4 flex items-center justify-between">
                 <div>
-                  <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Progress Timeline</p>
-                  <h2 className="mt-2 text-lg font-semibold text-white">核心增强阶段</h2>
+                  <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">处理进度</p>
+                  <h2 className="mt-2 text-lg font-semibold text-[var(--text-primary)]">本次处理步骤</h2>
                 </div>
-                <span className="font-mono text-xs text-[#64748b]">{safeBetaResult?.progress ?? activeItem?.progress ?? 0}%</span>
+                <span className="text-sm font-semibold text-[var(--brand-primary)]">{progressValue}%</span>
+              </div>
+              <div className="mb-4 h-2 overflow-hidden rounded-full bg-[var(--divider-color)]">
+                <div className="h-full rounded-full bg-[var(--brand-primary)] transition-[width] duration-200" style={{ width: `${Math.max(0, Math.min(100, Number(progressValue) || 0))}%` }} />
               </div>
               <div className="space-y-3">
                 {timeline.map((stage, index) => {
-                  const color = stage.state === "完成" ? "text-[#8be6b1]" : stage.state === "执行中" ? "text-[#6feaf0]" : stage.state === "跳过" ? "text-[#f0c36f]" : stage.state === "失败" ? "text-[#ff8a8a]" : "text-[#64748b]";
+                  const color = stage.state === "完成" ? "text-[var(--status-success)]" : stage.state === "执行中" ? "text-[var(--brand-primary)]" : stage.state === "跳过" ? "text-[var(--status-warning)]" : stage.state === "失败" ? "text-[var(--status-danger)]" : "text-[var(--text-muted)]";
                   return (
-                    <div key={stage.name} className="grid grid-cols-[32px_minmax(0,1fr)_72px] items-start gap-3 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/35 p-3">
-                      <div className="flex h-7 w-7 items-center justify-center rounded-sm border border-[#263738] font-mono text-xs text-[#94a3b8]">{index + 1}</div>
+                    <div key={stage.name} className="grid grid-cols-[32px_minmax(0,1fr)_72px] items-start gap-3 rounded-md border border-[var(--divider-color)] bg-[var(--elevated-background)] p-3">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border-color)] font-mono text-xs text-[var(--text-secondary)]">{index + 1}</div>
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-[#e2e8f0]">{stage.name}</p>
-                        <p className="mt-1 text-xs leading-5 text-[#64748b]">{stage.detail}</p>
+                        <p className="text-sm font-medium text-[var(--text-primary)]">{stage.name}</p>
+                        <p className="mt-1 text-sm leading-5 text-[var(--text-secondary)]">{stage.detail}</p>
                       </div>
                       <span className={`text-right text-xs font-semibold ${color}`}>{stage.state}</span>
                     </div>
@@ -2219,31 +2553,35 @@ export default function DashboardPage({ onTaskContextChange }) {
           </section>
 
           <aside className="flex min-h-0 flex-col gap-4">
-            <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">BETA STAGE LOG</p>
-              <h2 className="mt-2 text-lg font-semibold text-white">安全增强阶段日志</h2>
-              <p className="mt-1 text-xs leading-5 text-[#64748b]">这是 Beta 前端阶段日志，不是标准 SSE。</p>
-              <div className="mt-4 max-h-[280px] space-y-2 overflow-y-auto pr-1">
-                {(betaLogs.length ? betaLogs : ["等待 Beta 阶段日志"]).map((item) => (
-                  <div key={item} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2 font-mono text-[11px] text-[#94a3b8]">{item}</div>
-                ))}
-              </div>
+            <section className="rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-5">
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">本次结果</p>
+              <h2 className="mt-2 text-lg font-semibold text-[var(--text-primary)]">{deliveryConclusion}</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+                {outputPath
+                  ? "成品已经保存。请先查看前后对比和质量报告，再决定是否用于正式交付。"
+                  : isPortraitSkip
+                    ? "检测到人物主体，为保护原图已停止增强。"
+                    : reasonText !== "-"
+                      ? reasonText
+                      : "处理完成后，这里会给出交付建议。"}
+              </p>
             </section>
 
-            <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Unified Actions</p>
-              <h2 className="mt-2 text-lg font-semibold text-white">可用操作</h2>
-              <div className="mt-4 grid gap-2">
-                <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
-                <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
-                <button type="button" onClick={exportSafeBetaFeedbackPackage} disabled={!safeBetaResult?.output_dir || isProcessingQueue} className="rounded-sm bg-[#10b981] px-4 py-2 text-xs font-bold text-[#0b0c0e] transition hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569]">导出测试反馈包 / 反馈包中心</button>
+            <section className="rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-5">
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">下一步</p>
+              <h2 className="mt-2 text-lg font-semibold text-[var(--text-primary)]">查看与交付</h2>
+              <div className="mt-4 grid gap-2.5">
+                <button type="button" disabled={!canViewCompare} onClick={() => selectForCompare(activeItem)} className="rounded-md bg-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--brand-primary-hover)] disabled:cursor-not-allowed disabled:bg-[var(--disabled-background)] disabled:text-[var(--text-muted)]">查看前后对比</button>
+                <button type="button" onClick={() => selectForReport(activeItem)} className="rounded-md border border-[var(--feature-enabled-border)] px-4 py-2.5 text-sm font-medium text-[var(--brand-primary)] transition hover:bg-[var(--brand-primary-soft)]">查看质量报告</button>
+                <button type="button" onClick={handleOpenOutputDir} className="rounded-md border border-[var(--border-color)] bg-[var(--card-background)] px-4 py-2 text-sm text-[var(--text-primary)] transition hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]">打开输出目录</button>
+                <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-md border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-primary)] transition hover:bg-[var(--brand-primary-soft)] disabled:cursor-not-allowed disabled:text-[var(--text-muted)]">复制成品路径</button>
               </div>
             </section>
           </aside>
         </main>
 
-        <footer className="mt-3 shrink-0 truncate border-t border-[#1c1f26] pt-2 text-center font-mono text-[10px] tracking-wider text-[#64748b]">
-          影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
+        <footer className="mt-3 shrink-0 truncate border-t border-[var(--divider-color)] pt-2 text-center font-mono text-xs tracking-wider text-[var(--text-muted)]">
+          {PRODUCT_BRAND_LINE}
         </footer>
       </section>
     );
@@ -2251,160 +2589,85 @@ export default function DashboardPage({ onTaskContextChange }) {
 
   if (activeScreen === "safe_beta_compare") {
     const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
-    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
-    const contactSheetLight = firstSafeBetaContactSheetLight(activeItem, safeBetaResult);
     const processed = findSafeBetaProcessedRow(activeItem, safeBetaResult);
     const outputName = activeItem?.output_filename || processed?.output_name || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
     const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
     const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
-    const contactSheetPreviewUrl = firstSafeBetaContactSheetPreviewUrl(activeItem, safeBetaResult);
     const outputPreviewUrl = firstSafeBetaOutputPreviewUrl(activeItem, safeBetaResult);
-    const previewImageUrl = contactSheetPreviewUrl || outputPreviewUrl;
-    const previewImageLabel = contactSheetPreviewUrl ? "CONTACT SHEET" : outputPreviewUrl ? "OUTPUT PREVIEW" : "";
-    const compareTitle = previewImageUrl ? "1080P安全增强版 Beta · 对比结果" : "1080P安全增强版 Beta · 本地对比查看";
+    const originalPreviewUrl = activeItem?.originalUrl || activeItem?.task_result?.original_url || activeItem?.task_result?.input_url || "";
     const compareMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
-    const compareStatusRows = [
-      ["成品状态", outputPath ? "已生成" : statusTextValue],
-      ["contact sheet", contactSheet ? "已生成" : "未生成"],
-      ["网页预览", previewImageUrl ? "已接入" : "未接入"],
-      ["本地路径", contactSheet || outputPath ? "已绑定" : "未绑定"],
-      ["交付结论", deliveryText || "-"],
-    ];
+    const rawInputName = activeItem?.name || "";
+    const inputDisplayName = getFileDisplayName(rawInputName, "未选择图片");
+    const outputDisplayName = getFileDisplayName(outputName, "成品尚未生成");
     return (
-      <section className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-[#060b0c] p-6 text-slate-200">
-        <div className="pointer-events-none absolute inset-0 bg-[#060b0c]" />
-        <header className="relative z-10 mb-4 flex h-[82px] shrink-0 items-center justify-between gap-6 border-b border-[#14282a] pb-4">
+      <section className="hdde-enhanced-page relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-[var(--content-background)] p-6 text-[var(--text-primary)]">
+        <div className="pointer-events-none absolute inset-0 bg-[var(--content-background)]" />
+        <header className="relative z-10 mb-4 flex h-[82px] shrink-0 items-center justify-between gap-6 border-b border-[var(--divider-color)] pb-4">
           <div className="min-w-0">
-            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.28em] text-[#418c80]">影界 HDDE V0.4.6 RC1 / SAFE BETA COMPARE</p>
-            <h1 className="mt-2 truncate text-2xl font-semibold tracking-wide text-slate-100">{compareTitle}</h1>
-            <p className="mt-1 truncate font-mono text-xs text-slate-500" title={activeItem?.name || ""}>
-              前后对比 · 1080P安全增强版 Beta · {activeItem?.name || "未选择样本"}
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">安全增强对比</p>
+            <h1 className="mt-2 truncate text-2xl font-semibold tracking-wide text-[var(--text-primary)]">处理前后对比</h1>
+            <p className="mt-1 truncate text-sm text-[var(--text-secondary)]" title={rawInputName}>
+              {inputDisplayName} · 拖动中线查看清晰度、边缘与颜色变化
             </p>
           </div>
 
           <div className="flex shrink-0 gap-3">
-            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-sm border border-[#193336] px-4 py-2 text-xs tracking-wide text-[#8a999c] transition hover:bg-[#112426] hover:text-slate-200">
-              返回工作台
+            <button type="button" onClick={() => setActiveScreen("dashboard")} className="rounded-md border border-[var(--border-color)] px-4 py-2 text-sm tracking-wide text-[var(--text-secondary)] transition hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]">
+              返回处理中心
             </button>
-            <button type="button" onClick={() => setActiveScreen("safe_beta_report")} className="rounded-sm border border-[#2d665f] bg-[#163631] px-5 py-2 font-mono text-xs font-bold uppercase tracking-widest text-[#5bf5dc] transition hover:brightness-125">
+            <button type="button" onClick={() => setActiveScreen("safe_beta_report")} className="rounded-md border border-[var(--brand-primary)] bg-[var(--brand-primary)] px-5 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-primary-hover)]">
               查看交付报告
             </button>
           </div>
         </header>
 
-        <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] gap-5">
-          <section className="relative h-full min-h-0 overflow-hidden rounded-lg border border-[#193336] bg-[#040708] shadow-[0_40px_140px_rgba(60,179,160,0.14)]">
-            {previewImageUrl ? (
-              <img src={previewImageUrl} alt="1080P安全增强版 Beta contact sheet" className="absolute inset-0 h-full w-full object-contain" />
-            ) : contactSheet ? (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
-                <div className="max-w-2xl px-8 text-center">
-                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#3cb3a0]/45 bg-[#3cb3a0]/10" />
-                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#3cb3a0]/70">本地预览未接入</p>
-                  <p className="mt-3 text-sm leading-7 text-slate-400">contact sheet 已生成，但当前浏览器页面无法直接读取 Windows 本地文件。请点击“打开输出目录”查看本地对比图，或复制成品路径进行复核。</p>
-                  <div className="mt-4 grid grid-cols-3 gap-2 text-left text-xs">
-                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">contact sheet：</span><span className="text-[#8effed]">已生成</span></div>
-                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">网页预览：</span><span className="text-[#f0c36f]">未接入</span></div>
-                    <div className="rounded border border-[#193336] bg-[#0d181a] p-2"><span className="text-slate-500">本地路径：</span><span className="text-[#8effed]">已绑定</span></div>
-                  </div>
-                  <p className="mt-4 break-all rounded border border-[#193336] bg-[#0d181a] p-3 text-left font-mono text-xs leading-6 text-slate-500">{contactSheet}</p>
-                  <div className="mt-4 flex justify-center gap-3">
-                    <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
-                    <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
-                  </div>
-                </div>
-              </div>
-            ) : outputPath ? (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
-                <div className="max-w-2xl px-8 text-center">
-                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#f0c36f]/45 bg-[#f0c36f]/10" />
-                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#f0c36f]">Output Ready</p>
-                  <p className="mt-3 text-sm leading-7 text-slate-400">本地预览不可用，当前没有 contact sheet，可打开输出目录查看增强图。</p>
-                  <p className="mt-4 break-all rounded border border-[#193336] bg-[#0d181a] p-3 text-left font-mono text-xs leading-6 text-slate-500">{outputPath}</p>
-                  <div className="mt-4 flex justify-center gap-3">
-                    <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">打开输出目录</button>
-                    <button type="button" onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26]">复制成品路径</button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#05090a]">
-                <div className="max-w-md px-8 text-center">
-                  <div className="mx-auto mb-4 h-12 w-12 rounded-full border border-[#3cb3a0]/45 bg-[#3cb3a0]/10" />
-                  <p className="font-mono text-xs uppercase tracking-[0.28em] text-[#3cb3a0]/70">Waiting Compare</p>
-                  <p className="mt-3 text-sm leading-7 text-slate-500">当前尚未生成对比图。</p>
-                </div>
-              </div>
-            )}
+        <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-5">
+          <SafeBetaBeforeAfterCompare
+            originalFile={activeItem?.file}
+            originalUrl={originalPreviewUrl}
+            outputUrl={outputPreviewUrl}
+            filename={inputDisplayName}
+          />
 
-            {previewImageUrl ? (
-              <div className="absolute left-5 top-5 z-20 rounded border border-[#3cb3a0]/35 bg-[#3cb3a0]/10 px-4 py-2 font-mono text-[10px] uppercase tracking-[0.24em] text-[#8effed] backdrop-blur-md">
-                {previewImageLabel}
-              </div>
-            ) : null}
-            <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-[10px] tracking-[0.2em] text-white/40 backdrop-blur-md">
-              影界 HDDE V0.4.6 RC1 · {activeItem?.name || "等待真实上传资产"} · HD Delivery Engine
-            </div>
-          </section>
+          <aside className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1">
+            <section className="rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-5">
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">对比结论</p>
+              <h2 className="mt-2 text-xl font-semibold text-[var(--text-primary)]">{deliveryText || "等待处理结果"}</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+                重点查看文字与Logo、主体边缘、颜色和低频平滑区域。确认没有明显失真后再用于交付。
+              </p>
+            </section>
 
-          <aside className="flex h-full min-h-0 flex-col gap-4">
-            <div className="rounded-lg border border-[#132628] bg-[#091113] p-5">
-              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Physical QA</p>
-              <h2 className="mt-2 text-xl font-semibold text-slate-100">高清交付指标</h2>
-              <p className="mt-2 truncate text-xs text-slate-500">{activeItem?.name || "未选择样本"} · 1080P安全增强版 Beta</p>
-              <div className="mt-5 space-y-3">
+            <section className="rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-5">
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">核心评分</p>
+              <h2 className="mt-2 text-lg font-semibold text-[var(--text-primary)]">质量概览</h2>
+              <div className="mt-4 space-y-3">
                 {compareMetrics.map(([keyName, name, value]) => (
-                  <div key={keyName} className="rounded border border-[#193336] bg-[#0d181a] p-3">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <p className="font-mono text-[9px] uppercase tracking-[0.22em] text-[#418c80]">{keyName}</p>
-                        <p className="mt-1 text-xs text-slate-400">{name}</p>
-                      </div>
-                      <span className={`font-mono text-sm font-bold ${Number.isFinite(Number(value)) ? "text-[#8effed]" : "text-slate-500"}`}>{value}</span>
-                    </div>
-                    <div className="mt-3 h-[3px] overflow-hidden rounded-full bg-[#0e1d1f]">
-                      <div className="h-full rounded-full bg-[#3f6f68]" style={{ width: `${Number.isFinite(Number(value)) ? Math.max(4, Math.min(100, Number(value))) : 0}%` }} />
-                    </div>
-                  </div>
+                  <SafeBetaMetricBar key={keyName} keyName={keyName} label={name} value={value} active={Number.isFinite(Number(value))} />
                 ))}
               </div>
-            </div>
+            </section>
 
-            <div className="rounded-lg border border-[#132628] bg-[#091113] p-5">
-              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
-              <h2 className="mt-2 text-xl font-semibold text-slate-100">字段绑定</h2>
-              <div className="mt-4 space-y-3 font-mono text-xs text-slate-400">
-                {[
-                  ...compareStatusRows,
-                  ["输出文件", outputName || "未生成"],
-                  ["输出绑定", outputPath || "未绑定"],
-                  ["contact sheet", contactSheet || "未生成"],
-                ].map(([label, value]) => (
-                  <div key={label} className="min-w-0 overflow-hidden rounded border border-[#193336] bg-[#0d181a] p-3">
-                    <span className="text-slate-500">{label}：</span>
-                    <span className="break-words" title={String(value)}>{value}</span>
-                  </div>
-                ))}
+            <section className="mt-auto rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-5">
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">结果操作</p>
+              <h2 className="mt-2 truncate text-lg font-semibold text-[var(--text-primary)]" title={outputName}>{outputDisplayName}</h2>
+              <div className="mt-4 grid gap-2.5">
+                <button type="button" onClick={() => setActiveScreen("safe_beta_report")} className="rounded-md bg-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--brand-primary-hover)]">
+                  查看质量报告
+                </button>
+                <button type="button" onClick={handleOpenOutputDir} className="rounded-md border border-[var(--border-color)] px-4 py-2.5 text-sm text-[var(--text-primary)] transition hover:bg-[var(--brand-primary-soft)]">
+                  打开输出文件夹
+                </button>
+                <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="rounded-md border border-[var(--border-color)] px-4 py-2.5 text-sm text-[var(--text-primary)] transition hover:bg-[var(--brand-primary-soft)] disabled:cursor-not-allowed disabled:text-[var(--text-muted)]">
+                  复制成品路径
+                </button>
               </div>
-            </div>
-
-            <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-[#132628] bg-[#091113] p-5">
-              <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Manual Review</p>
-              <h2 className="mt-2 text-xl font-semibold text-slate-100">人工复核清单</h2>
-              <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-                {["文字与 Logo 是否保持可读", "边缘是否无明显光晕", "颜色是否接近原图", "是否适合交付使用"].map((item, index) => (
-                  <label key={item} className="flex items-start gap-3 rounded border border-[#193336] bg-[#0d181a] p-3 text-sm text-slate-300">
-                    <input className="mt-1 accent-[#3cb3a0]" type="checkbox" defaultChecked={index < 2} />
-                    <span>{item}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+            </section>
           </aside>
         </main>
 
-        <footer className="relative z-10 mt-3 w-full shrink-0 truncate border-t border-[#0e1d1f] px-3 pt-2 text-center font-mono text-[10px] tracking-wider text-slate-600">
-          影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
+        <footer className="relative z-10 mt-3 w-full shrink-0 truncate border-t border-[var(--divider-color)] px-3 pt-2 text-center font-mono text-xs tracking-wider text-[var(--text-muted)]">
+          {PRODUCT_BRAND_LINE}
         </footer>
       </section>
     );
@@ -2412,334 +2675,214 @@ export default function DashboardPage({ onTaskContextChange }) {
 
   if (activeScreen === "safe_beta_report") {
     const outputPath = firstSafeBetaOutputPath(activeItem, safeBetaResult);
-    const contactSheet = firstSafeBetaContactSheet(activeItem, safeBetaResult);
-    const contactSheetLight = firstSafeBetaContactSheetLight(activeItem, safeBetaResult);
     const processed = findSafeBetaProcessedRow(activeItem, safeBetaResult);
     const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
     const reasonText = safeBetaReasonText(activeItem, safeBetaResult);
     const outputName = activeItem?.output_filename || processed?.output_name || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
     const inputSizeBytes = processed?.input_size_bytes ?? activeItem?.input_size_bytes ?? safeBetaResult?.input_size_bytes ?? null;
     const outputSizeBytes = processed?.output_size_bytes ?? activeItem?.output_size_bytes ?? activeItem?.output_size ?? null;
-    const contactSheetSizeBytes = processed?.contact_sheet_size_bytes ?? activeItem?.contact_sheet_size_bytes ?? null;
-    const contactSheetLightSizeBytes = processed?.contact_sheet_light_size_bytes ?? activeItem?.contact_sheet_light_size_bytes ?? null;
-    const jpg95CandidatePath = processed?.jpg95_candidate_path || activeItem?.jpg95_candidate_path || "";
-    const jpg95CandidateSizeBytes = processed?.jpg95_candidate_size_bytes ?? activeItem?.jpg95_candidate_size_bytes ?? null;
-    const jpg95CandidateSavedRatio = processed?.jpg95_candidate_saved_ratio ?? activeItem?.jpg95_candidate_saved_ratio ?? null;
     const jpg95CandidateStatus = processed?.jpg95_candidate_status || activeItem?.jpg95_candidate_status || "not_applicable";
-    const jpg95CandidateReason = processed?.jpg95_candidate_reason || activeItem?.jpg95_candidate_reason || "-";
     const lightDeliveryPath = processed?.light_delivery_path || activeItem?.light_delivery_path || "";
     const lightDeliverySizeBytes = processed?.light_delivery_size_bytes ?? activeItem?.light_delivery_size_bytes ?? null;
     const lightDeliverySavedRatio = processed?.light_delivery_saved_ratio ?? activeItem?.light_delivery_saved_ratio ?? null;
     const lightDeliveryStatus = processed?.light_delivery_status || activeItem?.light_delivery_status || "not_applicable";
-    const lightDeliveryReason = processed?.light_delivery_reason || activeItem?.light_delivery_reason || "-";
     const lightDeliveryAvailable = lightDeliveryStatus === "available" && Boolean(lightDeliveryPath);
-    const finalOutputSource = processed?.final_output_source || activeItem?.final_output_source || "png_main";
-    const finalOutputFallbackReason = processed?.final_output_fallback_reason || activeItem?.final_output_fallback_reason || "-";
-    const jpg95ReviewStatus = processed?.jpg95_candidate_review_status || activeItem?.jpg95_candidate_review_status || (jpg95CandidateStatus === "candidate_for_review" ? "pending_review" : "not_applicable");
     const jpg95ReviewDecision = processed?.jpg95_candidate_review_decision || activeItem?.jpg95_candidate_review_decision || "";
     const jpg95ReviewOption = findJpg95ReviewOption(jpg95ReviewDecision);
     const jpg95ReviewLabel = processed?.jpg95_candidate_review_label || activeItem?.jpg95_candidate_review_label || jpg95ReviewOption?.label || (jpg95CandidateStatus === "candidate_for_review" ? "继续检查" : "-");
     const canReviewJpg95Candidate = jpg95CandidateStatus === "candidate_for_review";
-    const jpg95CandidateStatusText =
-      jpg95CandidateStatus === "candidate_for_review"
-        ? "已生成 · 待人工复核"
-        : jpg95CandidateStatus === "not_generated"
-          ? "未生成"
-          : "不适用";
-    const lightDeliveryStatusText =
-      lightDeliveryStatus === "available"
-        ? "available / direct copy"
-        : lightDeliveryStatus === "not_generated"
-          ? "not generated"
-          : "not applicable";
-    const computedSizeRatio = inputSizeBytes && outputSizeBytes ? outputSizeBytes / inputSizeBytes : null;
-    const sizeRatioValue = processed?.size_ratio ?? activeItem?.size_ratio ?? computedSizeRatio;
     const outputFormatValue = processed?.output_format || activeItem?.output_format || pathFormat(outputPath) || "-";
-    const contactSheetFormatValue = processed?.contact_sheet_format || activeItem?.contact_sheet_format || pathFormat(contactSheet) || "-";
-    const contactSheetLightFormatValue = processed?.contact_sheet_light_format || activeItem?.contact_sheet_light_format || pathFormat(contactSheetLight) || "-";
     const outputDimensions = activeItem?.output_width && activeItem?.output_height ? `${activeItem.output_width} × ${activeItem.output_height}` : processed?.output_width && processed?.output_height ? `${processed.output_width} × ${processed.output_height}` : "-";
     const inputDimensions = processed?.input_width && processed?.input_height ? `${processed.input_width} × ${processed.input_height}` : "-";
+    const sizeTreatment = resolve1080pSizeTreatment({
+      inputWidth: processed?.input_width,
+      inputHeight: processed?.input_height,
+      outputWidth: activeItem?.output_width || processed?.output_width,
+      outputHeight: activeItem?.output_height || processed?.output_height,
+      modeLabel: "1080P安全增强",
+    });
     const reportMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
-    const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
+    const visibleReportMetrics = reportMetrics.filter(([, , value]) => Number.isFinite(Number(value)));
     const isPortraitSkip = reasonText === "人物图保护跳过";
-    const reportConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "已生成" : activeItem?.status === "failed" ? "失败" : "未生成";
+    const reportConclusion = isPortraitSkip ? "已保护原图" : outputPath ? "成品已生成" : activeItem?.status === "failed" ? "未生成成品" : "等待处理";
     const deliveryAdvice = outputPath ? "建议查看后使用" : "不建议交付";
-    const limitationExplanation = isPortraitSkip
-      ? "人物图保护跳过，不放开人像增强。"
-      : outputPath
-        ? "成品已生成，建议打开输出目录查看文字、Logo、边缘和颜色后使用。"
-        : "当前未生成成品，请查看失败原因后重新选择合适的中文商业非人像图。";
-    const reportStatusSummary = isPortraitSkip
-      ? "人物图保护跳过"
-      : reasonText && reasonText !== "-"
-        ? reasonText
-        : outputPath
-          ? "1080P安全增强 Beta 已生成，建议查看后使用。"
-          : "当前未生成成品，请查看失败原因。";
-    const pathSummaryRows = [
-      { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
-      { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
-      { label: "JPG95 candidate", value: jpg95CandidatePath, status: jpg95CandidateStatusText, copyLabel: "JPG95 candidate 路径" },
-      { label: "delivery_light", value: lightDeliveryPath, status: lightDeliveryStatusText, copyLabel: "delivery_light path" },
-      { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
-    ];
-    const outputBindingRows = [
-      { label: "输入文件名", value: activeItem?.name || "未选择", status: activeItem?.name || "未选择" },
-      { label: "输出文件名", value: outputName || "未生成", status: outputName || "未生成" },
-      { label: "contact sheet", value: contactSheet, status: contactSheet ? "已生成" : "未生成", copyLabel: "contact sheet 路径" },
-      { label: "contact sheet preview", value: contactSheetLight, status: contactSheetLight ? "已生成（preview_only）" : "未生成", copyLabel: "contact sheet preview 路径" },
-      { label: "JPG95 candidate", value: jpg95CandidatePath, status: jpg95CandidateStatusText, copyLabel: "JPG95 candidate 路径" },
-      { label: "delivery_light", value: lightDeliveryPath, status: lightDeliveryStatusText, copyLabel: "delivery_light path" },
-      { label: "output path", value: outputPath, status: outputPath ? "已生成" : "未生成", copyLabel: "output path 路径" },
-      ...(outputPath
-        ? [
-            { label: "输入体积", value: formatBytesToMb(inputSizeBytes) },
-            { label: "成品体积", value: formatBytesToMb(outputSizeBytes) },
-            { label: "体积倍率", value: formatSizeRatio(sizeRatioValue) },
-            { label: "contact sheet 体积", value: formatBytesToMb(contactSheetSizeBytes) },
-            { label: "contact sheet preview 体积", value: formatBytesToMb(contactSheetLightSizeBytes) },
-            { label: "当前成品来源", value: finalOutputSource === "png_main" ? "PNG 高清主图" : finalOutputSource },
-            { label: "JPG95 候选体积", value: formatBytesToMb(jpg95CandidateSizeBytes) },
-            { label: "JPG95 节省比例", value: formatPercentValue(jpg95CandidateSavedRatio) },
-            { label: "delivery_light 体积", value: formatBytesToMb(lightDeliverySizeBytes) },
-            { label: "delivery_light 节省比例", value: formatPercentValue(lightDeliverySavedRatio) },
-            { label: "delivery_light 状态", value: lightDeliveryStatusText },
-            { label: "候选状态", value: jpg95CandidateStatusText },
-            { label: "人工建议", value: jpg95ReviewLabel },
-            { label: "candidate_is_final_output", value: "false" },
-            { label: "回退原因", value: finalOutputFallbackReason },
-            { label: "输出格式", value: outputFormatValue.toUpperCase() },
-            { label: "contact sheet 格式", value: contactSheetFormatValue.toUpperCase() },
-            { label: "preview 格式", value: contactSheetLightFormatValue.toUpperCase() },
-          ]
-        : []),
-    ];
     const reviewReasons = [
-      { label: contactSheet ? "contact sheet 已生成" : "contact sheet 未生成", detail: contactSheet ? "本地对比图已生成，完整路径可通过复制按钮获取。" : "当前样本没有可用 contact sheet。" },
-      { label: outputPath ? "output_path 已生成" : "output_path 未生成", detail: outputPath ? "本地成品路径已绑定，完整路径可通过复制按钮获取。" : "当前样本没有可复制的成品路径。" },
-      { label: jpg95CandidateStatus === "candidate_for_review" ? "JPG95 候选需人工复核" : "JPG95 候选未采用", detail: jpg95CandidateStatus === "candidate_for_review" ? "当前交付仍使用 PNG 高清主图，JPG95 仅作为体积优化候选。" : jpg95CandidateReason },
-      { label: lightDeliveryStatus === "available" ? "delivery_light 可直接取用" : "delivery_light 未生成", detail: lightDeliveryStatus === "available" ? "高质量轻量交付版来自 JPG95 候选，PNG final 与 output_path 不变。" : lightDeliveryReason },
-      { label: "当前交付仍使用 PNG 高清主图", detail: `人工建议：${jpg95ReviewLabel}` },
-      ...(isPortraitSkip ? [{ label: "人物图保护跳过", detail: "Beta 当前不放开人像增强，避免破坏面部主体。" }] : []),
-      ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [{ label: "跳过 / 失败原因", detail: reasonText }] : []),
+      "检查文字与Logo是否保持清晰、没有笔画变形",
+      "检查主体边缘是否自然、没有明显光晕",
+      "检查颜色是否接近原图、没有异常偏色",
+      ...(isPortraitSkip ? ["检测到人物主体，本次已优先保护原图"] : []),
+      ...(reasonText && reasonText !== "-" && !isPortraitSkip ? [reasonText] : []),
     ];
+    const positiveSignals = [
+      ...(outputPath ? ["1080P成品已生成并保存"] : []),
+      ...(outputDimensions !== "-" ? [`输出尺寸为 ${outputDimensions}`] : []),
+      ...(lightDeliveryAvailable ? ["已生成便于发送和上传的轻量版本"] : []),
+    ];
+    const reportMessage = isPortraitSkip
+      ? "检测到人物主体，为保护面部和关键结构，本次没有执行增强。"
+      : outputPath
+        ? "成品已经生成。请结合前后对比检查文字、Logo、边缘和颜色后再决定是否交付。"
+        : "当前没有可交付成品，请根据页面提示重新处理。";
+    const rawInputName = activeItem?.name || "";
+    const inputDisplayName = getFileDisplayName(rawInputName, "未选择图片");
+    const outputDisplayName = getFileDisplayName(outputName);
+    const dimensionSummary = [
+      inputDimensions !== "-" ? `输入 ${inputDimensions}` : "",
+      outputDimensions !== "-" ? `输出 ${outputDimensions}` : "",
+    ].filter(Boolean).join(" · ");
+    const outputFacts = [
+      outputName ? ["输出文件", outputDisplayName, outputName] : null,
+      inputDimensions !== "-" ? ["输入尺寸", inputDimensions, ""] : null,
+      outputDimensions !== "-" ? ["输出尺寸", outputDimensions, ""] : null,
+      sizeTreatment ? ["尺寸处理", sizeTreatment.label, sizeTreatment.detail] : null,
+      outputFormatValue !== "-" ? ["输出格式", outputFormatValue.toUpperCase(), ""] : null,
+      inputSizeBytes ? ["输入体积", formatBytesToMb(inputSizeBytes), ""] : null,
+      outputSizeBytes ? ["成品体积", formatBytesToMb(outputSizeBytes), ""] : null,
+      lightDeliveryAvailable
+        ? ["轻量版本", `${formatBytesToMb(lightDeliverySizeBytes)} · 节省 ${formatPercentValue(lightDeliverySavedRatio)}`, lightDeliveryPath]
+        : null,
+    ].filter(Boolean);
     return (
-      <section className="flex h-full w-full flex-row gap-4 overflow-hidden bg-[#0b0c0e] p-4 text-slate-100">
-        <div className="scrollbar-none flex h-full min-w-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
-          <header className="shrink-0 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div className="flex items-baseline justify-between gap-5">
-              <h1 className="shrink-0 text-xl font-bold tracking-wider text-white">质量报告终审</h1>
-              <span className="truncate font-mono text-[10px] uppercase tracking-widest text-[#475569]">影界 HDDE / 高清交付引擎</span>
-            </div>
-            <p className="mt-2 truncate font-mono text-[11px] text-[#475569]" title={activeItem?.name || ""}>
-              1080P安全增强版 Beta / 资产特征值：{activeItem?.name || "未选择样本"}
-            </p>
-            <button type="button" onClick={() => setActiveScreen("dashboard")} className="mt-3 rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-1.5 text-xs text-[#94a3b8] transition-colors hover:bg-[#2d3139] hover:text-white">
-              ← 返回工作台
+      <section className="hdde-report-page hdde-enhanced-page" data-testid="safe-quality-report-page">
+        <header className="hdde-report-header">
+          <div className="hdde-report-heading">
+            <p className="hdde-eyebrow">质量报告</p>
+            <h1>高清交付评估</h1>
+            <p title={rawInputName}>{inputDisplayName} · 1080P安全增强</p>
+          </div>
+          <div className="hdde-report-actions">
+            <button type="button" className="hdde-report-button hdde-report-button--secondary" onClick={() => setActiveScreen("safe_beta_compare")}>
+              返回对比结果
             </button>
-          </header>
+            <UnifiedFeedback
+              taskId={activeItem?.taskId || ""}
+              sourceFeature="enhancement_1080p"
+              stage="quality_review"
+              triggerLabel="反馈问题"
+              triggerClassName="hdde-report-button hdde-report-button--primary"
+              testId="safe-quality-report-feedback-package"
+              disabled={!safeBetaResult?.output_dir || isProcessingQueue}
+            />
+          </div>
+        </header>
 
-          <section className="shrink-0 space-y-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Score Overlay</p>
-                <h2 className="mt-2 text-lg font-semibold text-white">核心质量指标</h2>
-              </div>
-              <div className="text-right font-mono text-xs leading-6 text-white/40">
-                <p>输入：{inputDimensions === "-" ? "需重新运行生成" : inputDimensions}</p>
-                <p>输出：{outputDimensions}</p>
-              </div>
-            </div>
-            <div className="grid gap-2.5">
-              {reportMetrics.map(([keyName, label, value]) => (
-                <SafeBetaMetricBar key={keyName} label={label} keyName={keyName} value={value} active={Number.isFinite(Number(value))} />
-              ))}
-            </div>
-          </section>
-
-          <section className="shrink-0 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Output Binding</p>
-                <h2 className="mt-1 text-sm font-semibold text-white">输出绑定摘要</h2>
-              </div>
-              <span className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e] px-2 py-1 text-xs text-[#94a3b8]">{reportConclusion}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2.5 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
-              {outputBindingRows.map((item) => (
-                <div key={item.label} className="min-w-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <span className="shrink-0 text-[11px] text-[#64748b]">{item.label}</span>
-                    {item.copyLabel ? (
-                      <button type="button" disabled={!item.value} onClick={() => handleCopySafeBetaPath(item.value, item.copyLabel)} className="shrink-0 rounded border border-[#2d665f] px-2 py-0.5 text-[10px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
-                        复制路径
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="truncate font-mono text-xs text-[#00ffcc]" title={String(item.value || item.status)}>
-                    {item.copyLabel ? item.status : item.value}
-                  </div>
+        <div className="hdde-report-layout">
+          <main className="hdde-report-main">
+            <section className="hdde-report-panel">
+              <div className="hdde-report-section-heading">
+                <div>
+                  <p className="hdde-eyebrow">核心指标</p>
+                  <h2>质量评分</h2>
                 </div>
-              ))}
-            </div>
-            {!outputPath ? (
-              <p className="mt-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 px-3 py-2 text-xs text-[#64748b]">
-                成品生成后显示体积信息。
-              </p>
+                {dimensionSummary ? <span>{dimensionSummary}</span> : null}
+              </div>
+              <div className="hdde-report-score-grid">
+                {visibleReportMetrics.map(([keyName, label, value]) => (
+                  <SafeBetaMetricBar key={keyName} label={label} keyName={keyName} value={value} active={Number.isFinite(Number(value))} />
+                ))}
+              </div>
+            </section>
+
+            <section className="hdde-report-panel">
+              <div className="hdde-report-section-heading">
+                <div>
+                  <p className="hdde-eyebrow">输出结果</p>
+                  <h2>交付文件</h2>
+                </div>
+                <span>{reportConclusion}</span>
+              </div>
+              <dl className="hdde-report-facts">
+                {outputFacts.map(([label, value, title]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd title={title}>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          </main>
+
+          <aside className="hdde-report-side">
+            <section className="hdde-report-panel hdde-report-verdict">
+              <p className="hdde-eyebrow">交付结论</p>
+              <div className="hdde-report-verdict-line">
+                <h2>{deliveryAdvice}</h2>
+                <span data-tone={outputPath ? "warning" : "negative"}>{reportConclusion}</span>
+              </div>
+              <p>{reportMessage}</p>
+            </section>
+
+            <section className="hdde-report-list" data-tone="warning">
+              <h3>复核重点</h3>
+              <ul>{reviewReasons.map((item, index) => <li key={`review-${index}`}>{item}</li>)}</ul>
+            </section>
+
+            <section className="hdde-report-panel hdde-report-archive">
+              <h2>结果操作</h2>
+              <p>文件位置不会直接显示在报告中，可通过以下操作获取。</p>
+              <button type="button" className="hdde-report-button hdde-report-button--primary" onClick={handleOpenOutputDir}>打开输出文件夹</button>
+              <button type="button" className="hdde-report-button hdde-report-button--secondary" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)}>复制成品路径</button>
+              <button type="button" className="hdde-report-button hdde-report-button--secondary" onClick={() => setActiveScreen("dashboard")}>完成复核并返回</button>
+            </section>
+
+            {positiveSignals.length ? (
+              <section className="hdde-report-list" data-tone="positive">
+                <h3>正向信号</h3>
+                <ul>{positiveSignals.map((item, index) => <li key={`positive-${index}`}>{item}</li>)}</ul>
+              </section>
             ) : null}
-          </section>
-        </div>
 
-        <aside className="scrollbar-none flex h-full w-[320px] shrink-0 flex-col gap-3 overflow-y-auto pr-1">
-          <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Local Report Center</p>
-                <h2 className="mt-2 text-lg font-semibold text-white">本地报告中心</h2>
-                <p className="mt-1 text-xs leading-5 text-[#64748b]">面向人工验收的状态解释，不改变 Beta 原始结果字段。</p>
-              </div>
-              <div className="shrink-0 rounded-sm border border-[#66532d] bg-[#0b0c0e] px-2.5 py-1 text-xs font-semibold text-[#f0c36f]">
-                {deliveryAdvice}
-              </div>
-            </div>
+            <section className="hdde-report-panel">
+              <p className="hdde-eyebrow">建议用途</p>
+              <h2>交付建议</h2>
+              <p className="hdde-report-usage">
+                {outputPath ? "适合本地预览、演示稿和方案初稿；正式使用前请完成前后对比复核。" : "当前不建议用于正式交付。"}
+              </p>
+            </section>
 
-            <div className="mt-4 grid gap-2.5">
-              <div className="grid gap-1.5 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
-                {[
-                  ["图像类型", "1080P安全增强版 Beta"],
-                  ["处理结论", reportConclusion],
-                  ["交付建议", deliveryAdvice],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-3 text-xs">
-                    <span className="shrink-0 text-[#64748b]">{label}</span>
-                    <span className="truncate text-right font-medium text-[#e2e8f0]" title={value}>{value}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="grid gap-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
-                {pathSummaryRows.map((item) => (
-                  <div key={item.label} className="min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-[#94a3b8]">{item.label}：{item.status}</span>
-                      <button type="button" disabled={!item.value} onClick={() => handleCopySafeBetaPath(item.value, item.copyLabel)} className="shrink-0 rounded border border-[#2d665f] px-2 py-0.5 text-[10px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
-                        复制路径
-                      </button>
-                    </div>
-                    <div className="mt-1 truncate font-mono text-[10px] text-[#475569]" title={item.value || item.status}>{item.value || item.status}</div>
-                  </div>
-                ))}
-              </div>
-              <div className={`rounded-sm border px-3 py-2 ${lightDeliveryAvailable ? "border-[#2d665f] bg-[#0d181a]" : "border-[#1c1f26] bg-[#0b0c0e]/45"}`}>
-                <div className="flex items-center justify-between gap-3">
-                  <span className={`text-xs font-medium ${lightDeliveryAvailable ? "text-[#5bf5dc]" : "text-[#94a3b8]"}`}>
-                    {lightDeliveryAvailable ? "高质量轻量交付版 JPG 已生成" : "高质量轻量交付版 JPG 未生成"}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-[#64748b]">{lightDeliveryStatusText}</span>
-                </div>
-                <p className="mt-1 text-[11px] leading-5 text-[#94a3b8]">
-                  {lightDeliveryAvailable ? "在保持画面清晰度和商业质感的前提下减小体积，适合发送、上传、PPT 插入。PNG final 仍为正式高清主图。" : lightDeliveryReason}
-                </p>
-                <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-[#94a3b8]">
-                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
-                    <span className="text-[#64748b]">PNG final：</span>{formatBytesToMb(outputSizeBytes)}
-                  </div>
-                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
-                    <span className="text-[#64748b]">delivery_light：</span>{formatBytesToMb(lightDeliverySizeBytes)}
-                  </div>
-                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
-                    <span className="text-[#64748b]">节省比例：</span>{formatPercentValue(lightDeliverySavedRatio)}
-                  </div>
-                  <div className="rounded border border-[#1c1f26] bg-[#0b0c0e]/45 px-2 py-1">
-                    <span className="text-[#64748b]">final source：</span>{finalOutputSource}
-                  </div>
-                </div>
-                <div className="mt-2 flex gap-2">
-                  <button type="button" disabled={!lightDeliveryPath} onClick={() => handleCopySafeBetaPath(lightDeliveryPath, "delivery_light path")} className="flex-1 rounded border border-[#2d665f] px-2 py-1 text-[11px] text-[#5bf5dc] transition hover:bg-[#12312d] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]">
-                    复制轻量版路径
-                  </button>
-                  <button type="button" disabled={!lightDeliveryPath} onClick={() => handleOpenSafeBetaPathDir(lightDeliveryPath, "delivery_light")} className="flex-1 rounded border border-[#333] px-2 py-1 text-[11px] text-[#cbd5e1] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">
-                    打开所在文件夹
-                  </button>
-                </div>
-              </div>
-              <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium text-[#f0c36f]">{canReviewJpg95Candidate ? "JPG95 候选需人工复核" : "JPG95 候选未采用"}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-[#64748b]">{jpg95ReviewStatus}</span>
-                </div>
-                <p className="mt-1 text-[11px] text-[#94a3b8]">当前交付仍使用 PNG 高清主图</p>
-                <div className="mt-2 grid grid-cols-2 gap-2">
+            {canReviewJpg95Candidate ? (
+              <section className="hdde-report-panel">
+                <p className="hdde-eyebrow">轻量版候选</p>
+                <h2>选择使用建议</h2>
+                <p className="hdde-report-usage">高清主图保持不变；可为便于发送和上传的轻量版本记录建议。</p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
                   {JPG95_REVIEW_OPTIONS.map((option) => (
                     <button
                       key={option.decision}
                       type="button"
-                      disabled={!canReviewJpg95Candidate}
                       onClick={() => handleSetJpg95CandidateReview(option.decision)}
-                      className={`rounded-sm border px-2 py-1 text-[11px] transition disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569] ${
+                      className={`rounded-md border px-3 py-2 text-xs transition ${
                         jpg95ReviewDecision === option.decision
-                          ? "border-[#5bf5dc] bg-[#12312d] text-[#5bf5dc]"
-                          : "border-[#333] text-[#cbd5e1] hover:bg-[#1c1f26]"
+                          ? "border-[var(--brand-primary)] bg-[var(--brand-primary-soft)] text-[var(--brand-primary)]"
+                          : "border-[var(--border-color)] text-[var(--text-primary)] hover:bg-[var(--brand-primary-soft)]"
                       }`}
                     >
                       {option.label}
                     </button>
                   ))}
                 </div>
-                <div className="mt-2 truncate text-[11px] text-[#94a3b8]" title={jpg95ReviewLabel}>当前建议：{jpg95ReviewLabel}</div>
-              </div>
-              <div className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-2">
-                <div className="text-xs font-medium text-[#f0c36f]">状态说明</div>
-                <div className="mt-1 truncate text-[11px] text-[#94a3b8]" title={reportStatusSummary}>{reportStatusSummary}</div>
-              </div>
-            </div>
+                <p className="mt-2 text-xs text-[var(--text-secondary)]">当前建议：{jpg95ReviewLabel}</p>
+              </section>
+            ) : null}
 
-            <div className="mt-4 rounded-sm border border-[#66532d]/45 bg-[#100d06]/55 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xs font-medium text-[#f0c36f]">PASS_WITH_LIMITATION 解释</h3>
-                <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.18em] text-[#856404]">Manual Review</span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-[#d8c28c]">{limitationExplanation}</p>
-            </div>
-
-            <div className="mt-4">
-              <h3 className="mb-2 text-xs font-medium text-[#94a3b8]">复核原因标签</h3>
-              <div className="grid gap-2">
-                {reviewReasons.map((item, index) => (
-                  <div key={`${item.label}-${index}`} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/45 px-3 py-1.5">
-                    <div className="truncate text-xs font-medium text-[#f0c36f]" title={item.label}>{item.label}</div>
-                    <div className="mt-0.5 truncate text-[11px] text-[#94a3b8]" title={item.detail}>{item.detail}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-
-          <section className="rounded-sm border border-[#1c1f26] bg-[#121418] p-4 text-xs leading-6 text-[#94a3b8]">
-            <p className="font-mono text-[10px] uppercase tracking-[0.28em] text-[#418c80]">Feedback Package</p>
-            <p className="mt-3 text-[#64748b]">反馈包路径</p>
-            <p className="truncate font-mono text-[#8be6b1]" title={safeBetaFeedbackResult?.feedback_zip_path || "尚未导出"}>{safeBetaFeedbackResult?.feedback_zip_path || "尚未导出"}</p>
-          </section>
-
-          <section className="mt-auto flex shrink-0 flex-col gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div>
-              <span className="block font-mono text-[10px] uppercase tracking-wider text-[#64748b]">Final Signature</span>
-              <h2 className="mt-1 text-sm font-medium text-white">终审操作</h2>
-              <p className="mt-1 text-xs leading-relaxed text-[#94a3b8]">导出反馈包或打开本地输出目录后，返回工作台继续验收。</p>
-            </div>
-            <button type="button" onClick={exportSafeBetaFeedbackPackage} disabled={!safeBetaResult?.output_dir || isProcessingQueue} className="w-full rounded-sm bg-[#10b981] py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569]">
-              导出测试反馈包
-            </button>
-            <button type="button" onClick={handleOpenOutputDir} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26]">打开输出目录</button>
-            <button type="button" disabled={!outputPath} onClick={() => handleCopyFinalOutputUrl(activeItem)} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#1c1f26] disabled:cursor-not-allowed disabled:text-[#475569]">复制成品路径</button>
-            <button type="button" onClick={() => setActiveScreen("dashboard")} className="w-full rounded-sm border border-[#333] px-4 py-2 text-xs text-[#94a3b8] transition hover:bg-[#1c1f26]">返回工作台</button>
-          </section>
-        </aside>
+          </aside>
+        </div>
       </section>
     );
   }
 
-  const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA ? "当前状态：Beta输出目录" : appliedOutputDir.trim() ? "当前状态：自定义目录" : "当前状态：默认目录";
-  const currentOutputDir = processingMode === PROCESSING_MODE_SAFE_BETA ? appliedOutputDir.trim() || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录" : appliedOutputDir.trim() || defaultOutputDir || workdirError || "正在初始化工作目录";
+  const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA
+    ? "当前状态：安全增强输出目录"
+    : processingMode === PROCESSING_MODE_FOUR_K
+      ? "当前状态：固定4K输出目录"
+      : appliedOutputDir.trim()
+        ? "当前状态：自定义目录"
+        : "当前状态：默认目录";
+  const currentOutputDir = directoryReady
+    ? appliedOutputDir.trim() || resolveProcessingOutputDirectory(workdirInfo, processingMode)
+    : workdirInfo || workdirError
+      ? directoryMessage
+      : "正在初始化工作目录";
   const safeBetaElapsedSeconds =
     safeBetaResult?.status === "RUNNING" && safeBetaStartedAt
       ? Math.max(0, Math.round((Date.now() - safeBetaStartedAt) / 1000) + safeBetaTick * 0)
@@ -2784,7 +2927,7 @@ export default function DashboardPage({ onTaskContextChange }) {
           : "等待生成";
   const safeBetaCurrentState =
     activeSafeBetaStatusText || (safeBetaResult?.status === "RUNNING"
-      ? "Beta 处理中"
+      ? "安全增强处理中"
       : safeBetaResult?.status === "NEED_RESELECT"
         ? safeBetaResult?.message || "本地文件访问已失效"
       : safeBetaResult?.status === "BLOCKED"
@@ -2792,662 +2935,403 @@ export default function DashboardPage({ onTaskContextChange }) {
         : safeBetaResult?.status
           ? "处理完成"
           : "等待任务");
-  const deliveryActionItem = activeItem?.status === "completed" ? activeItem : completedItems[completedItems.length - 1] || null;
+  const isDiagnosisActive = activeItem?.taskFamily === "image_diagnosis";
+  const deliveryActionItem = activeItem?.status === "completed" && !isDiagnosisActive
+    ? activeItem
+    : completedItems[completedItems.length - 1] || null;
   const betaActionItem = isSafeBetaSelected ? deliveryActionItem || activeItem : null;
   const safeBetaPrimaryOutputPath = isSafeBetaSelected ? firstSafeBetaOutputPath(betaActionItem, safeBetaResult) : "";
   const canCopyDeliveryPath = isSafeBetaSelected ? Boolean(safeBetaPrimaryOutputPath) : Boolean(deliveryActionItem?.final_output_url);
 
+  const queueCompletedCount = fileQueue.filter((item) => item.status === "completed" && item.taskFamily !== "image_diagnosis").length;
+  const queueFailedCount = fileQueue.filter((item) => (item.status === "failed" || item.status === "blocked") && item.taskFamily !== "image_diagnosis").length;
+  const currentProgress = isProcessingQueue
+    ? Math.max(0, Math.min(100, Number(activeItem?.progress || safeBetaResult?.progress || 0)))
+    : activeItem?.status === "completed"
+      ? 100
+      : Math.max(0, Math.min(100, Number(activeItem?.progress || 0)));
+  const currentStageLabel = !directoryReady
+    ? "正式目录阻断"
+    : isProcessingQueue
+      ? currentIndex
+        ? `正在处理第 ${currentIndex} 张`
+        : "正在处理"
+      : isDiagnosisActive && activeItem?.status === "completed"
+        ? "诊断完成"
+      : activeItem?.status === "processing"
+        ? "正在处理图片"
+        : activeItem?.status === "pending"
+          ? "等待队列处理"
+      : activeItem?.status === "completed"
+        ? "处理完成"
+        : activeItem?.status === "failed"
+          ? "处理失败"
+          : fileQueue.length
+            ? "等待开始"
+            : "等待导入";
+  const currentNextAction = !directoryReady
+    ? "前往系统设置恢复或重新选择正式目录"
+    : isProcessingQueue
+      ? "请保持应用运行，等待当前任务完成"
+      : isDiagnosisActive && activeItem?.status === "completed"
+        ? "打开图片诊断记录查看结论与推荐"
+      : activeItem?.status === "processing" || activeItem?.status === "pending"
+        ? "请保持应用运行，队列会逐张完成处理"
+      : activeItem?.status === "completed"
+        ? "查看结果并确认交付信息"
+        : activeItem?.status === "failed"
+          ? "查看失败原因后重新处理"
+          : fileQueue.length
+            ? "确认模式和输出目录后开始处理"
+            : "选择或拖入一张图片";
+  const blockedFormalPath = workdirInfo?.app_data_root || workdirInfo?.failed_path || "";
+  const blockedFormalReason = workdirInfo?.failure_reason || directoryMessage;
+  const noticeIsError =
+    !directoryReady ||
+    activeItem?.status === "failed" ||
+    activeItem?.status === "blocked" ||
+    safeBetaResult?.status === "BLOCKED" ||
+    safeBetaResult?.status === "NEED_RESELECT";
+  const deliveryOutputPath = isSafeBetaSelected
+    ? safeBetaPrimaryOutputPath || safeBetaResult?.output_dir || currentOutputDir
+    : activeItem?.taskFamily === "color_correction" && !deliveryActionItem?.output_path
+      ? activeItem.output_path || activeItem.output_dir || currentOutputDir
+    : deliveryActionItem?.taskFamily === "color_correction"
+      ? deliveryActionItem.output_path || deliveryActionItem.output_dir || currentOutputDir
+      : deliveryActionItem?.final_output_url || currentOutputDir;
+  const deliveryOutputDirectory = activeItem?.taskFamily === "color_correction"
+    ? activeItem.output_dir || currentOutputDir
+    : deliveryActionItem?.taskFamily === "color_correction"
+    ? deliveryActionItem.output_dir || currentOutputDir
+    : currentOutputDir;
+  const handleOpenDeliveryOutputDirectory = () => {
+    if (deliveryActionItem?.taskFamily === "color_correction") {
+      handleOpenItemOutputFolder(deliveryActionItem);
+      return;
+    }
+    handleOpenOutputDir();
+  };
+  const batchStatusLabel = activeColorBatch?.status === "processing"
+    ? "处理中"
+    : activeColorBatch?.status === "completed"
+      ? "已完成"
+      : activeColorBatch?.status === "failed"
+        ? "处理失败"
+        : "等待处理";
+
   return (
     <section
-      className="vmp-main-viewport text-[#f4f7f8]"
+      className={`hdde-processing-page hdde-page-frame ${isDragging ? "is-dragging" : ""}`}
+      data-testid="processing-center"
       onDragOver={(event) => {
         event.preventDefault();
         setIsDragging(true);
       }}
-      onDragLeave={() => setIsDragging(false)}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setIsDragging(false);
+      }}
       onDrop={(event) => {
         event.preventDefault();
         setIsDragging(false);
         addFiles(event.dataTransfer.files);
       }}
     >
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#1c1f26] bg-[#0b0c0e] px-4">
-        <div className="min-w-0">
-          <p style={DECOR_LABEL}>HD Delivery Engine</p>
-          <h1 className="truncate text-base font-semibold tracking-[0.08em]" style={TITLE_STYLE}>影界 HDDE · 画质核心工作台</h1>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-[#6feaf0]" />
-          <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>Python Runtime 8787</span>
-        </div>
-      </header>
+      <input
+        ref={fileInputRef}
+        data-testid="processing-file-input"
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={handleFileChange}
+      />
 
-      <div className="vmp-workspace-container">
-        <section className="scrollbar-none flex h-full w-[280px] shrink-0 flex-col gap-2.5 overflow-y-auto border-r border-[#1c1f26] bg-[#121418] p-3">
-          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
-            <section>
-              <p style={DECOR_LABEL}>Input Field</p>
-              <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>图片导入</h2>
-              <div
-                style={{
-                  marginTop: "12px",
-                  border: isDragging ? "1px dashed #6feaf0" : "1px dashed #263738",
-                  borderRadius: "8px",
-                  backgroundColor: isDragging ? "#0d181a" : "#05090a",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  textAlign: "center",
-                  padding: "18px 12px",
-                  boxSizing: "border-box",
-                }}
-              >
-                <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={handleFileChange} style={{ display: "none" }} />
-                <button type="button" onClick={() => fileInputRef.current?.click()} style={{ backgroundColor: "#132f33", border: "1px solid #6feaf0", borderRadius: "6px", color: "#6feaf0", cursor: "pointer", padding: "10px 14px", fontSize: "12px", fontWeight: 700 }}>
-                  选择本地影像资产
-                </button>
-                <p style={{ margin: "12px 0 0", color: fileQueue.length ? "#6feaf0" : "#6e7d80", fontSize: "12px" }}>已选择 {fileQueue.length} 张</p>
-                <p style={{ margin: "6px 0 0", color: "#6e7d80", fontSize: "11px" }}>支持多选和多图拖拽导入</p>
-              </div>
-            </section>
-          </div>
+      <div className="hdde-processing-stack hdde-page-stack">
+        <HddePageHeader
+          title="处理中心"
+          description="集中创建与查看当前任务，已结束记录继续保留在同一处理中心的历史任务中。"
+        />
+        <section className="hdde-processing-panel hdde-processing-prepare" aria-labelledby="processing-prepare-title">
+          <header className="hdde-processing-section-heading">
+            <div>
+              <p className="hdde-eyebrow">任务准备</p>
+              <h2 id="processing-prepare-title">准备新任务</h2>
+              <p>依次确认图片、处理模式与输出目录，然后开始处理。</p>
+            </div>
+            <span
+              className="hdde-processing-readiness"
+              data-tone={directoryReady ? "positive" : "negative"}
+              data-testid="processing-directory-status"
+            >
+              {directoryReady ? "正式目录可用" : "正式目录不可用"}
+            </span>
+          </header>
 
-          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 p-3">
-            <section style={{ display: "flex", flexDirection: "column" }}>
-              <p style={DECOR_LABEL}>Processing Mode</p>
-              <h2 style={{ ...TITLE_STYLE, marginTop: "8px", fontSize: "18px", fontWeight: 600 }}>处理模式</h2>
-              <select
-                value={processingMode}
-                onChange={(event) => setProcessingMode(event.target.value)}
-                style={{
-                  marginTop: "12px",
-                  width: "100%",
-                  backgroundColor: "#05090a",
-                  border: "1px solid #263738",
-                  borderRadius: "6px",
-                  color: "#e2e8f0",
-                  padding: "9px 10px",
-                  fontSize: "12px",
-                  outline: "none",
-                }}
-              >
-                {processingModeOptions.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-              <p style={{ margin: "10px 0 0", color: "#7f8f91", fontSize: "12px", lineHeight: 1.7 }}>
-                {processingMode === PROCESSING_MODE_SAFE_BETA ? "适用：中文商业非人像图｜产品图｜PPT封面｜信息图" : getProcessingModeDisplay(processingMode).desc}
-              </p>
-              {processingMode === PROCESSING_MODE_SAFE_BETA ? (
-                <details className="mt-2 rounded-sm border border-[#1c1f26] bg-[#05090a]/45 px-2 py-1.5 text-[11px] leading-5 text-[#94a3b8]">
-                  <summary className="cursor-pointer select-none text-[#6feaf0]">查看使用边界</summary>
-                  <ul className="mt-2 space-y-1 text-[#7f8f91]">
-                    {safeBetaBoundaryItems.map((item) => (
-                      <li key={item}>- {item}</li>
-                    ))}
-                  </ul>
-                </details>
-              ) : null}
-            </section>
-          </div>
-
-          {processingMode === PROCESSING_MODE_SAFE_BETA ? (
-            <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
-              <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
-                1080P安全增强 Beta
-              </h3>
-              <div className="space-y-2 text-xs text-[#94a3b8]">
-                <div className="flex items-center justify-between gap-3">
-                  <span>当前状态</span>
-                  <span className="font-semibold text-[#6feaf0]">{safeBetaUserStatus}</span>
-                </div>
-                <div className="rounded-sm border border-[#1c1f26] bg-[#05090a]/55 p-2">
-                  <div className="mb-1 flex items-center justify-between gap-3">
-                    <span className="shrink-0 text-[#94a3b8]">当前工作目录</span>
-                    <span className={currentWorkdirWritable ? "text-[#8be6b1]" : "text-[#ff8a8a]"}>
-                      {workdirError ? "未接入" : currentWorkdirWritable ? "可写" : "不可写"}
-                    </span>
-                  </div>
-                  <p className="break-all font-mono text-[11px] leading-5 text-[#64748b]">{currentWorkdirRoot || workdirError || "等待后端返回工作目录"}</p>
-                  <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-[#64748b]">
-                    <span>来源：{currentWorkdirSource || "-"}</span>
-                    <span>存在：{workdirInfo?.app_data_root_exists ? "是" : "否"}</span>
-                  </div>
-                  {workdirInfo?.switched_from_d_drive ? (
-                    <p className="mt-1 text-[11px] leading-5 text-[#f0c36f]">D 盘不可用，已自动切换到 Documents\\影界HDDE。</p>
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={handleOpenWorkdir}
-                    disabled={!currentWorkdirRoot}
-                    className="mt-2 w-full rounded-sm border border-[#6feaf0]/35 px-3 py-1.5 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
-                  >
-                    打开当前工作目录
-                  </button>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">当前文件</span>
-                  <span className="min-w-0 max-w-[150px] truncate text-right font-mono text-[#e2e8f0]" title={safeBetaCurrentFile}>{safeBetaCurrentFile}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>处理进度</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.progress ?? 0}%</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>生成结果</span>
-                  <span className="font-mono text-[#e2e8f0]">已生成 {safeBetaGeneratedCount} 张</span>
-                </div>
-                {safeBetaSkippedCount > 0 ? (
-                  <div className="flex items-center justify-between gap-3">
-                    <span>跳过图片</span>
-                    <span className="font-mono text-[#f0c36f]">跳过 {safeBetaSkippedCount} 张</span>
-                  </div>
-                ) : null}
-                <div className="flex items-center justify-between gap-3">
-                  <span>耗时</span>
-                  <span className="font-mono text-[#e2e8f0]">{formatSafeBetaDuration(safeBetaElapsedSeconds)}</span>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">输出目录</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录"}</span>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">输入目录</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.input_dir || "等待当前队列图片"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="shrink-0">输入文件数</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.input_file_count ?? 0}</span>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">输入文件</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">
-                    {Array.isArray(safeBetaResult?.input_file_names) && safeBetaResult.input_file_names.length > 0
-                      ? safeBetaResult.input_file_names.join(" / ")
-                      : "--"}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleOpenSafeBetaInputDir}
-                  disabled={!safeBetaResult?.input_dir || Number(safeBetaResult?.input_file_count ?? 0) <= 0}
-                  className="w-full rounded-sm border border-[#6feaf0]/40 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
-                >
-                  打开本次输入目录
-                </button>
-                {safeBetaFailureSummary ? (
-                  <div className="rounded-sm border border-[#4b1f2a] bg-[#1b0b10] px-2 py-1.5 text-[11px] leading-5 text-[#ff8a8a]">
-                    {safeBetaFailureSummary}
-                  </div>
-                ) : null}
+          {!directoryReady && (workdirInfo || workdirError) ? (
+            <div className="hdde-processing-blocked" role="alert" data-testid="processing-blocked-message">
+              <div>
+                <strong>正式目录当前不可用，图片处理已暂停。</strong>
+                <p>{blockedFormalReason}</p>
+                {blockedFormalPath ? <code>{blockedFormalPath}</code> : null}
               </div>
-              <details className="mt-3 rounded-sm border border-[#1c1f26] bg-[#05090a]/45 px-2 py-1.5 text-[11px] leading-5 text-[#64748b]">
-                <summary className="cursor-pointer select-none text-[#94a3b8]">查看技术详情</summary>
-                <div className="mt-2 space-y-1.5">
-                  <div className="flex justify-between gap-3"><span>raw status</span><span className="font-mono">{safeBetaResult?.status || "WAITING"}</span></div>
-                  <div className="flex justify-between gap-3"><span>enhanced</span><span className="font-mono">{safeBetaResult?.has_enhanced ? "true" : "false"}</span></div>
-                  <div className="flex justify-between gap-3"><span>contact_sheet</span><span className="font-mono">{safeBetaResult?.has_contact_sheet ? "true" : "false"}</span></div>
-                  <div className="flex justify-between gap-3"><span>enhanced_count</span><span className="font-mono">{safeBetaResult?.enhanced_count ?? 0}</span></div>
-                  <div className="flex justify-between gap-3"><span>contact_sheet_count</span><span className="font-mono">{safeBetaResult?.contact_sheet_count ?? 0}</span></div>
-                  <div className="flex justify-between gap-3"><span>elapsed_seconds</span><span className="font-mono">{safeBetaElapsedSeconds}</span></div>
-                  <div className="flex justify-between gap-3"><span>beta_run_id</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.beta_run_id || ""}>{safeBetaResult?.beta_run_id || "-"}</span></div>
-                  <div className="flex justify-between gap-3"><span>stage</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.stage || ""}>{safeBetaResult?.stage || "-"}</span></div>
-                  <div className="flex justify-between gap-3"><span>error</span><span className="min-w-0 truncate text-right font-mono" title={safeBetaResult?.message || ""}>{safeBetaResult?.message || "-"}</span></div>
-                  <pre className="max-h-24 overflow-auto rounded bg-black/25 p-2 font-mono text-[10px] leading-4 text-[#475569]">
-                    {JSON.stringify({
-                      status: safeBetaResult?.status || "",
-                      processed_count: safeBetaResult?.processed_count || 0,
-                      skipped_count: safeBetaResult?.skipped_count || 0,
-                      input_dir: safeBetaResult?.input_dir || "",
-                      input_file_count: safeBetaResult?.input_file_count || 0,
-                      input_dir_files: safeBetaResult?.input_file_names || [],
-                      output_dir: safeBetaResult?.output_dir || safeBetaDefaultOutputDir,
-                    }, null, 2)}
-                  </pre>
-                  <button
-                    type="button"
-                    onClick={exportSafeBetaFeedbackPackage}
-                    disabled={!safeBetaResult?.output_dir || isProcessingQueue}
-                    className="w-full rounded border border-[#6feaf0]/40 px-3 py-1.5 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
-                  >
-                    导出测试反馈包
-                  </button>
-                  {safeBetaFeedbackResult?.feedback_zip_path ? (
-                    <p className="break-all font-mono text-[11px] leading-5 text-[#64748b]">
-                      {safeBetaFeedbackResult.feedback_zip_path}
-                    </p>
-                  ) : null}
-                </div>
-              </details>
-              <div className="hidden space-y-2 text-xs text-[#94a3b8]">
-                <div className="flex items-center justify-between gap-3">
-                  <span>运行状态:</span>
-                  <span className="font-mono text-[#6feaf0]">{safeBetaResult?.status || "WAITING"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>enhanced:</span>
-                  <span className={safeBetaResult?.has_enhanced || safeBetaResult?.status === "RUNNING" ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.status === "RUNNING" ? "处理中" : safeBetaResult?.has_enhanced ? "是" : "否"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>contact sheet:</span>
-                  <span className={safeBetaResult?.has_contact_sheet || safeBetaResult?.status === "RUNNING" ? "text-[#8be6b1]" : "text-[#64748b]"}>{safeBetaResult?.status === "RUNNING" ? "生成中" : safeBetaResult?.has_contact_sheet ? "是" : "否"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>跳过图片:</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.skipped_count ?? 0}</span>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">输出目录:</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.output_dir || safeBetaDefaultOutputDir || workdirError || "正在初始化工作目录"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>progress:</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.progress ?? 0}%</span>
-                </div>
-                <div className="flex items-start justify-between gap-3">
-                  <span className="shrink-0">current file:</span>
-                  <span className="min-w-0 break-all text-right font-mono text-[#64748b]">{safeBetaResult?.current_file || "WAITING"}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>enhanced count:</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.status === "RUNNING" ? "处理中" : safeBetaResult?.enhanced_count ?? 0}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>contact sheet count:</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaResult?.status === "RUNNING" ? "生成中" : safeBetaResult?.contact_sheet_count ?? 0}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span>elapsed:</span>
-                  <span className="font-mono text-[#e2e8f0]">{safeBetaElapsedSeconds}s</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={exportSafeBetaFeedbackPackage}
-                disabled={!safeBetaResult?.output_dir || isProcessingQueue}
-                className="hidden mt-3 w-full rounded border border-[#6feaf0]/50 px-3 py-2 text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-white/10 disabled:text-white/30"
-              >
-                导出测试反馈包
-              </button>
-              <p className="hidden mt-2 text-[11px] leading-5 text-white/42">
-                生成本次测试的运行报告、错误日志、系统环境和对比图，用于发送给开发者定位问题。
-              </p>
-              {safeBetaFeedbackResult?.feedback_zip_path ? (
-                <p className="hidden mt-2 break-all font-mono text-[11px] leading-5 text-[#64748b]">
-                  {safeBetaFeedbackResult.feedback_zip_path}
-                </p>
-              ) : null}
-              <div className="hidden mt-3 space-y-1.5">
-                {safeBetaBoundaryItems.map((item) => (
-                  <div key={item} className="rounded border border-white/8 bg-black/15 px-2 py-1.5 text-[11px] leading-5 text-white/52">
-                    {item}
-                  </div>
-                ))}
-              </div>
+              <a href="/settings">前往系统设置修复</a>
             </div>
           ) : null}
 
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
-            <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
-              输出图片参数
-            </h3>
-            <ul className="space-y-2 font-sans text-xs">
-              {[
-                { label: "交付方案", value: "高清交付 1080P", color: "text-white" },
-                { label: "目标格式", value: getOutputFormatDisplay(outputFormat), color: "text-[#94a3b8]" },
-                { label: "核心总线", value: "1080P 高清稳定交付", color: "text-white font-mono" },
-                { label: "尺寸策略", value: "智能无损自适应缩放", color: "text-[#94a3b8]" },
-              ].map((item) => (
-                <li key={item.label} className="flex w-full items-center">
-                  <span className="w-16 shrink-0 text-left text-[#64748b]">{item.label}</span>
-                  <div className="mx-2 h-2 flex-1 border-b border-dashed border-[#1c1f26]" />
-                  <span className={`shrink-0 text-right ${item.color}`} title={item.value}>
-                    {item.value}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-
-        <section className="flex h-full flex-1 flex-col overflow-hidden bg-[#0b0c0e] p-4">
-          <div className="mb-4 grid shrink-0 grid-cols-[minmax(180px,1.1fr)_minmax(180px,1fr)_minmax(220px,1.4fr)_160px] gap-3 rounded-sm border border-[#1c1f26] bg-[#121418] p-3">
-            <div className="min-w-0">
-              <p style={DECOR_LABEL}>Input</p>
-              <button type="button" onClick={() => fileInputRef.current?.click()} className="mt-2 w-full rounded-sm border border-[#6feaf0]/50 bg-[#132f33] px-3 py-2.5 text-left text-xs font-semibold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef]">
-                图片导入 · 已选择 {fileQueue.length} 张
-              </button>
-            </div>
-            <div className="min-w-0">
-              <p style={DECOR_LABEL}>Mode</p>
-              <select
-                value={processingMode}
-                onChange={(event) => setProcessingMode(event.target.value)}
-                className="mt-2 w-full rounded-sm border border-[#263738] bg-[#05090a] px-3 py-2.5 text-xs text-[#e2e8f0] outline-none"
-              >
-                {processingModeOptions.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-            </div>
-            <div className="min-w-0">
-              <p style={DECOR_LABEL}>Output Folder</p>
-              <div className="mt-2 flex min-w-0 gap-2">
-                <div className="min-w-0 flex-1 truncate rounded-sm border border-[#1c1f26] bg-[#0b0c0e] px-3 py-2.5 font-mono text-xs text-[#94a3b8]" title={currentOutputDir}>
-                  {currentOutputDir}
-                </div>
-                <button type="button" onClick={handleSelectOutputDir} className="shrink-0 rounded-sm border border-[#333] bg-[#1c1f26] px-3 py-2 text-xs text-[#e2e8f0] transition hover:bg-[#2d3139]">更换</button>
-              </div>
-            </div>
-            <div className="flex min-w-0 items-end">
-              <button type="button" onClick={handleStartQueue} disabled={!canStartExecution} className="w-full rounded-sm border border-[#6feaf0]/50 bg-[#132f33] px-4 py-2.5 text-xs font-bold text-[#6feaf0] transition hover:border-[#9cffef] hover:text-[#9cffef] disabled:cursor-not-allowed disabled:border-[#263738] disabled:bg-[#0d181a] disabled:text-[#6e7d80]">
-                {processingMode === PROCESSING_MODE_SAFE_BETA ? (isProcessingQueue ? "安全增强处理中..." : "开始安全增强 Beta") : "开始处理"}
-              </button>
-            </div>
-          </div>
-          <div className="mb-4 flex w-full flex-1 flex-col overflow-hidden rounded-sm border border-[#1c1f26] bg-[#121418] p-4">
-            <div className="mb-2 flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p style={DECOR_LABEL}>Queue</p>
-                <h3 className="truncate text-xs font-medium text-[#94a3b8]">多图处理队列</h3>
-              </div>
-              <span style={{ ...DECOR_LABEL, color: "#6feaf0" }}>{fileQueue.length} 张</span>
-            </div>
-            <div className="scrollbar-thin w-full flex-1 overflow-auto border border-[#263738] bg-[#05090a]">
-              <table className="w-full text-left font-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "980px" }}>
-                <thead style={{ position: "sticky", top: 0, backgroundColor: "#0d181a", color: "#6e7d80", zIndex: 1 }}>
-                  <tr className="border-b border-[#1c1f26] text-[#64748b]">
-                    <th className="px-3 py-2 text-left font-medium">文件名</th>
-                    <th className="px-3 py-2 text-left font-medium">处理模式</th>
-                    <th className="px-3 py-2 text-left font-medium">目标规格</th>
-                    <th className="px-3 py-2 text-left font-medium">输出尺寸</th>
-                    <th className="px-3 py-2 text-left font-medium">输出体积</th>
-                    <th className="px-3 py-2 text-left font-medium">当前状态</th>
-                    <th className="px-3 py-2 text-left font-medium">交付状态</th>
-                    <th className="px-3 py-2 text-left font-medium">输出文件名</th>
-                    <th className="px-3 py-2 text-center font-medium">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {!fileQueue.length ? (
-                    <tr>
-                      <td colSpan={9} style={{ padding: "80px 16px", textAlign: "center", color: "#6e7d80" }}>等待投喂本地影像资产</td>
-                    </tr>
-                  ) : (
-                    fileQueue.map((item) => {
-                      const isSafeBetaRow = item.mode === PROCESSING_MODE_SAFE_BETA;
-                      const compareDisabled = isSafeBetaRow ? item.status !== "completed" : item.status !== "completed" || !item.final_output_url;
-                      const reportDisabled = isSafeBetaRow ? item.status === "queued" || item.status === "processing" : item.status !== "completed" || (!item.task_report && !item.debug_quality);
-                      const outputSizeBytes = isSafeBetaRow
-                        ? item.beta_processed?.output_size_bytes ?? item.output_size_bytes ?? item.output_size
-                        : item.output_size ?? item.final_size_bytes ?? item.debug_quality?.final_size_bytes;
-                      const outputSize = formatBytesToMb(outputSizeBytes, isSafeBetaRow ? (item.status === "completed" ? "-" : "待生成") : "待接入");
-                      return (
-                      <tr key={item.id} className={`border-b border-[#1c1f26]/50 transition-colors hover:bg-[#121418]/50 ${activeItemId === item.id ? "bg-[#0d181a]" : ""}`}>
-                        <td className="max-w-[180px] truncate px-3 py-2 font-mono text-[#e2e8f0]" title={item.name}>{item.name}</td>
-                        <td className="px-3 py-2 font-sans">
-                          {(() => {
-                            const display = getModeDisplay(item.mode || activeMode);
-                            return <span className={display.className}>{display.label}</span>;
-                          })()}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-[#64748b]">
-                          <span className="text-[#94a3b8]">1080P</span>
-                        </td>
-                        <td className="px-3 py-2 font-mono font-medium text-[#00ffcc]">{item.output_width && item.output_height ? `${item.output_width} × ${item.output_height}` : "待生成"}</td>
-                        <td className="px-3 py-2 font-mono text-[#64748b]">{outputSize}</td>
-                        <td className="px-3 py-2"><StatusPill status={item.status} /></td>
-                        <td className="px-3 py-2"><DeliveryPill status={item.final_delivery_status} item={item} /></td>
-                        <td className={`max-w-[150px] truncate px-3 py-2 font-mono ${item.error ? "text-[#ff8a8a]" : "text-[#64748b]"}`} title={item.output_filename || item.error || ""}>
-                          {item.output_filename || (item.status === "failed" && item.mode === PROCESSING_MODE_SAFE_BETA ? "未生成" : item.error || "等待输出")}
-                        </td>
-                        <td className="space-x-2 px-3 py-2 text-center">
-                          <button type="button" onClick={() => locateQueueItem(item)} className="text-[11px] text-[#00ffcc] hover:underline">定位</button>
-                          <button
-                            type="button"
-                            disabled={compareDisabled}
-                            title={compareDisabled ? "当前图片尚未生成可用对比结果，请先运行处理。" : isSafeBetaRow ? "打开 Beta contact sheet / 对比结果视图。" : ""}
-                            onClick={() => selectForCompare(item)}
-                            className="text-[11px] text-[#94a3b8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:text-[#475569]"
-                          >
-                            查看对比
-                          </button>
-                          <button
-                            type="button"
-                            disabled={reportDisabled}
-                            title={reportDisabled ? "当前图片尚未形成可用报告，请先运行处理。" : isSafeBetaRow ? "打开 1080P安全增强版 Beta 交付报告。" : ""}
-                            onClick={() => selectForReport(item)}
-                            className="text-[11px] text-[#64748b] transition-colors hover:text-[#94a3b8] disabled:cursor-not-allowed disabled:text-[#475569]"
-                          >
-                            报告
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <details className="shrink-0" style={{ marginTop: "10px", color: "#6e7d80", fontSize: "11px" }}>
-              <summary style={{ cursor: "pointer", color: "#6feaf0" }}>Debug Runtime Monitor</summary>
-              <p style={{ margin: "8px 0 0", color: "#7f8c8d", fontSize: "11px", lineHeight: 1.6 }}>
-                技术详情：下方为后端原始运行字段，不代表面向用户的最终交付结论。用户交付口径以队列表格、交付质检看板、任务详情和质量报告中的“建议人工复核 / 可交付 / 不建议交付”为准。
-              </p>
-              <pre className="scrollbar-thin" style={{ margin: "8px 0 0", overflow: "auto", backgroundColor: "#040708", border: "1px solid #132628", borderRadius: "4px", padding: "10px", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                {debugItem ? JSON.stringify({
-                  task_id: debugItem.taskId,
-                  raw_delivery_status: buildQualityPayload(debugItem).final_delivery_status || debugItem.final_delivery_status,
-                  resolved_delivery_status: resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.status,
-                  user_status_label: resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.status === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : resolveReportCenterMeta(buildQualityPayload(debugItem)).delivery.label,
-                  image_type: buildQualityPayload(debugItem).image_type || "",
-                  image_type_label: resolveReportCenterMeta(buildQualityPayload(debugItem)).imageType.label,
-                  review_type: resolveReviewType(resolveReportCenterMeta(buildQualityPayload(debugItem))),
-                  review_reasons: resolveReportCenterMeta(buildQualityPayload(debugItem)).reviewReasons,
-                  delivery_score: readScore(buildQualityPayload(debugItem), "delivery_score"),
-                  metrics: {
-                    clarity_score: readScore(buildQualityPayload(debugItem), "clarity_score"),
-                    text_clarity_score: readScore(buildQualityPayload(debugItem), "text_clarity_score"),
-                    edge_quality_score: readScore(buildQualityPayload(debugItem), "edge_quality_score"),
-                    texture_score: readScore(buildQualityPayload(debugItem), "texture_score"),
-                    color_fidelity_score: readScore(buildQualityPayload(debugItem), "color_fidelity_score"),
-                  },
-                  final_delivery_reason: debugItem.final_delivery_reason,
-                  final_delivery_risk_level: debugItem.final_delivery_risk_level,
-                  final_output_url: debugItem.final_output_url,
-                  preview_output_url: debugItem.preview_output_url,
-                  feedback_bundle_status: debugItem.feedback_bundle_status,
-                }, null, 2) : "请选择一张队列图片查看运行时字段。"}
-              </pre>
-            </details>
-          </div>
-
-          <div className="flex h-16 w-full shrink-0 items-center justify-between rounded-sm border border-[#1c1f26] bg-[#121418] p-3">
-            <div className="min-w-0">
-              <p style={DECOR_LABEL}>Execution</p>
-              <p style={{ margin: "4px 0 0", color: notice.includes("失败") || notice.includes("不是目录") ? "#f0c36f" : "#9ba9ab", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {isProcessingQueue && currentIndex ? `逐张高清处理 · 当前处理：第 ${currentIndex} / ${fileQueue.length} 张 · ` : ""}
-                {notice}
-              </p>
-            </div>
-            <button type="button" className="hidden" onClick={handleStartQueue} disabled={!canStartExecution} style={{ backgroundColor: canStartExecution ? "#132f33" : "#0d181a", border: canStartExecution ? "1px solid #6feaf0" : "1px solid #263738", borderRadius: "6px", color: canStartExecution ? "#6feaf0" : "#6e7d80", padding: "10px 20px", cursor: canStartExecution ? "pointer" : "not-allowed", fontSize: "13px", fontWeight: 700, whiteSpace: "nowrap" }}>
-              {processingMode === PROCESSING_MODE_SAFE_BETA ? (isProcessingQueue ? "安全增强处理中..." : "开始安全增强 Beta") : "开启核心修复管线"}
-            </button>
-          </div>
-        </section>
-
-        <section className="scrollbar-none flex h-full w-[320px] shrink-0 flex-col gap-2.5 overflow-y-auto border-l border-[#1c1f26] bg-[#121418] p-3">
-          <div className="w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
-              <h3 className="mb-3 border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
-                交付质检看板
-              </h3>
-              <div className="space-y-2 text-xs">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">当前样本:</span>
-                  <span className="min-w-0 truncate text-right font-mono text-[#e2e8f0]" title={isSafeBetaSelected ? safeBetaResult?.current_file || activeItem?.name || "等待任务" : activeItem?.name || "等待任务"}>
-                    {isSafeBetaSelected ? safeBetaResult?.current_file || activeItem?.name || "等待任务" : activeItem?.name || "等待任务"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">处理模式:</span>
-                  <span className="min-w-0 truncate text-right font-mono text-[11px] text-[#e2e8f0]">
-                    {isSafeBetaSelected ? "1080P安全增强版 Beta" : "1080P标准版"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">交付结论:</span>
-                  {isSafeBetaSelected ? (
-                    <span className="rounded border border-[#263738] bg-[#0d181a] px-2 py-1 font-mono text-[10px] text-[#6feaf0]">
-                      {safeBetaDeliveryConclusion}
-                    </span>
-                  ) : (
-                    <DeliveryPill status={activeItem?.final_delivery_status} item={activeItem} />
-                  )}
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">输出路径:</span>
-                  <span className="block max-w-[180px] truncate font-mono text-[11px] text-[#10b981]" title={isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}>
-                    {isSafeBetaSelected ? safeBetaOutputUrlText : activeItem?.final_output_url || "等待成品"}
-                  </span>
-                </div>
-                {isSafeBetaSelected ? (
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-[#94a3b8]">当前状态:</span>
-                    <span className="block max-w-[180px] truncate text-right font-mono text-[11px] text-[#6feaf0]" title={safeBetaCurrentState}>
-                      {safeBetaCurrentState}
-                    </span>
-                  </div>
-                ) : null}
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">输出尺寸:</span>
-                  <span className="font-mono text-[11px] text-[#e2e8f0]">
-                    {activeItem?.output_width && activeItem?.output_height ? `${activeItem.output_width} × ${activeItem.output_height}` : "待接入"}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[#94a3b8]">输出体积:</span>
-                  <span className="font-mono text-[11px] text-[#e2e8f0]">
-                    {formatBytesToMb(activeItem?.beta_processed?.output_size_bytes ?? activeItem?.output_size_bytes ?? activeItem?.output_size ?? activeItem?.debug_quality?.final_size_bytes, "待接入")}
-                  </span>
-                </div>
-                {isSafeBetaSelected ? (
-                  <div className="flex items-start justify-between gap-3">
-                    <span className="shrink-0 text-[#94a3b8]">跳过原因:</span>
-                    <span className="min-w-0 truncate text-right font-mono text-[11px] text-[#f0c36f]" title={safeBetaReasonText(activeItem, safeBetaResult)}>
-                      {safeBetaReasonText(activeItem, safeBetaResult)}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-          </div>
-
-          <div className="hidden w-full flex-shrink-0 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/40 p-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-xs font-medium text-[#94a3b8]">输出文件夹</h3>
-              <span className="rounded-sm border border-[#333] bg-[#1c1f26] px-2 py-0.5 text-[10px] text-[#10b981]">
-                {outputLocationLabel}
-              </span>
-            </div>
-            <div className="scrollbar-none vmp-path-scroll-container mb-3 rounded-sm border border-[#1c1f26] bg-[#0b0c0e] p-2.5 font-mono text-xs text-[#e2e8f0]">
-              {currentOutputDir}
-            </div>
-            <button
-              type="button"
-              onClick={handleSelectOutputDir}
-              className="w-full rounded-sm border border-[#00ffcc]/30 bg-[#1c1f26] px-4 py-2.5 text-xs font-medium tracking-wide text-[#00ffcc] transition-colors hover:bg-[#20242c]"
-            >
-              更换文件夹
-            </button>
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <button type="button" onClick={handleOpenOutputDir} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 py-1.5 text-[11px] text-[#94a3b8] transition-colors hover:bg-[#1c1f26] hover:text-white">
-                📂 打开当前目录
-              </button>
-              <button type="button" onClick={handleResetOutputDir} className="rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/30 py-1.5 text-[11px] text-[#64748b] transition-colors hover:bg-[#1c1f26] hover:text-[#94a3b8]">
-                🔄 重置默认路径
-              </button>
-            </div>
-            {outputDirSuccess ? <p className="mt-2 text-xs text-[#8be6b1]">{outputDirSuccess}</p> : null}
-            {outputDirError ? <p className="mt-2 text-xs text-[#ff8a8a]">路径不可用，请检查权限。</p> : null}
-          </div>
-
-          <div className="mt-auto w-full flex-shrink-0 space-y-2 rounded-sm border border-[#1c1f26] bg-[#0b0c0e]/80 p-3">
-            <h3 className="border-b border-[#1c1f26] pb-1.5 text-xs font-medium uppercase tracking-wide text-[#94a3b8]">
-              Pipeline 状态映射
-            </h3>
-            <div className="space-y-1.5 border-b border-[#1c1f26]/50 pb-1.5 font-mono text-[11px]">
-              <div className="flex items-center justify-between gap-3">
-                <span className="shrink-0 text-[#475569]">前台连接:</span>
-                <span className="max-w-[180px] truncate text-[#10b981]" title="http://localhost:5173">http://localhost:5173</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="shrink-0 text-[#475569]">后台运行:</span>
-                <span className="max-w-[180px] truncate text-[#10b981]" title="http://localhost:8787">http://localhost:8787</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="shrink-0 text-[#475569]">交付方案:</span>
-                <span className="min-w-0 truncate text-[#94a3b8]" title="高清交付 1080P">高清交付 1080P</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="shrink-0 text-[#475569]">目标规格:</span>
-                <span className="min-w-0 truncate text-[#f59e0b]" title="1080P 稳定基线">1080P 稳定基线</span>
-              </div>
-            </div>
-            <div className="space-y-0.5 pt-1.5 text-xs font-medium">
-              <div className="flex items-center justify-between text-[#94a3b8]">
-                <span>已完成任务:</span>
-                <span className="font-mono">{completedItems.length} / {fileQueue.length} 张</span>
-              </div>
-              <div className="flex items-center justify-between text-[#f59e0b]">
-                <span>已生成｜建议查看后使用:</span>
-                <span className="rounded-sm bg-[#f59e0b]/10 px-1.5 font-mono">{fileQueue.filter((item) => resolveQueueDelivery(item).status === "PASS_WITH_LIMITATION").length} 张</span>
-              </div>
-              <div className="flex items-center justify-between text-[#f43f5e]">
-                <span>不建议交付状态:</span>
-                <span className="rounded-sm bg-[#f43f5e]/10 px-1.5 font-mono">{fileQueue.filter((item) => resolveQueueDelivery(item).status === "FAIL").length} 张</span>
-              </div>
-            </div>
-            <div className="space-y-2 border-t border-[#1c1f26]/30 pt-2">
-              {!isSafeBetaSelected ? (
-                <button type="button" disabled={!deliveryActionItem?.final_output_url} onClick={() => handleOpenFinalOutput(deliveryActionItem)} className="flex w-full items-center justify-center gap-2 rounded-sm bg-[#10b981] px-4 py-2.5 text-xs font-bold tracking-wider text-[#0b0c0e] shadow-md transition-colors hover:bg-[#059669] disabled:cursor-not-allowed disabled:bg-[#1c1f26] disabled:text-[#475569] disabled:shadow-none">
-                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
-                    <path d="M12 5v13M5 12l7 7 7-7" />
-                  </svg>
-                  <span>下载成品高清图片</span>
+          <div className="hdde-processing-steps">
+            <article className="hdde-processing-step">
+              <span className="hdde-processing-step-index">1</span>
+              <div className="hdde-processing-step-body">
+                <label>图片导入</label>
+                <button
+                  type="button"
+                  className="hdde-processing-secondary-action"
+                  data-testid="processing-select-image"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isProcessingQueue}
+                >
+                  选择本地图片
                 </button>
-              ) : null}
-              <button
-                type="button"
-                disabled={!canCopyDeliveryPath}
-                title={isSafeBetaSelected && !safeBetaPrimaryOutputPath ? "Beta 尚未生成可复制的本地成品路径。" : ""}
-                onClick={() => handleCopyFinalOutputUrl(isSafeBetaSelected ? betaActionItem : deliveryActionItem)}
-                className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#333] bg-[#1c1f26] px-4 py-2 text-xs text-[#e2e8f0] transition-colors hover:bg-[#2d3139] disabled:cursor-not-allowed disabled:text-[#475569]"
-              >
-                <svg className="h-3.5 w-3.5 text-[#64748b] transition-colors group-hover:text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" strokeLinejoin="miter" aria-hidden="true">
-                  <rect x="9" y="9" width="13" height="13" rx="1" />
-                  <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
-                </svg>
-                <span>{isSafeBetaSelected ? "复制 Beta 成品路径" : "复制成品映射路径"}</span>
-              </button>
-              <button
-                type="button"
-                disabled={isSafeBetaSelected ? !safeBetaResult?.output_dir || isProcessingQueue : !deliveryActionItem?.taskId}
-                onClick={() => (isSafeBetaSelected ? exportSafeBetaFeedbackPackage() : handleCreateFeedbackBundle(deliveryActionItem))}
-                className="group flex w-full items-center justify-center gap-2 rounded-sm border border-[#856404]/30 bg-[#0b0c0e]/40 px-4 py-2 font-mono text-[11px] text-[#856404] transition-colors hover:border-[#ffc107]/50 hover:bg-[#1c1f26] hover:text-[#ffc107] disabled:cursor-not-allowed disabled:border-[#1c1f26] disabled:text-[#475569]"
-              >
-                <span>导出测试反馈包 / 反馈包中心</span>
-              </button>
+                <p>{localQueueItems.length ? `已选择 ${localQueueItems.length} 张：${localQueueItems.slice(0, 2).map((item) => item.name).join("、")}${localQueueItems.length > 2 ? "…" : ""}` : "也可将图片拖入当前页面"}</p>
+              </div>
+            </article>
+
+            <article className="hdde-processing-step">
+              <span className="hdde-processing-step-index">2</span>
+              <div className="hdde-processing-step-body">
+                <label htmlFor="processing-mode">处理模式</label>
+                <select
+                  id="processing-mode"
+                  data-testid="processing-mode"
+                  value={processingMode}
+                  onChange={(event) => setProcessingMode(event.target.value)}
+                  disabled={isProcessingQueue}
+                >
+                  {processingModeOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <p>{processingMode === PROCESSING_MODE_SAFE_BETA ? "适用于当前已证明范围内的中文商业非人像图。" : getProcessingModeDisplay(processingMode).desc}</p>
+              </div>
+            </article>
+
+            <article className="hdde-processing-step">
+              <span className="hdde-processing-step-index">3</span>
+              <div className="hdde-processing-step-body">
+                <label>输出目录</label>
+                <code className="hdde-processing-path" title={currentOutputDir}>{currentOutputDir}</code>
+                <button
+                  type="button"
+                  className="hdde-processing-tertiary-action"
+                  onClick={handleSelectOutputDir}
+                  disabled={!directoryReady || isProcessingQueue || processingMode === PROCESSING_MODE_FOUR_K}
+                >
+                  {processingMode === PROCESSING_MODE_FOUR_K ? "4K输出目录由合同固定" : "更换输出目录"}
+                </button>
+              </div>
+            </article>
+
+            <article className="hdde-processing-step hdde-processing-step--action">
+              <span className="hdde-processing-step-index">4</span>
+              <div className="hdde-processing-step-body">
+                <label>开始处理</label>
+                <button
+                  type="button"
+                  className="hdde-processing-primary-action"
+                  data-testid="processing-start"
+                  onClick={handleStartQueue}
+                  disabled={!canStartExecution}
+                >
+                  {isProcessingQueue ? "正在处理…" : "开始处理"}
+                </button>
+                <p>{!directoryReady ? "请先修复正式目录" : !localQueueItems.length && processingMode !== PROCESSING_MODE_SAFE_BETA ? "请先选择图片" : isProcessingQueue ? "任务执行期间不可重复提交" : "所有必要条件已满足"}</p>
+              </div>
+            </article>
+          </div>
+
+          {processingMode === PROCESSING_MODE_SAFE_BETA ? (
+            <details className="hdde-processing-boundary">
+              <summary>查看1080P安全增强使用边界</summary>
+              <ul>
+                {safeBetaBoundaryItems.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </details>
+          ) : null}
+          {outputDirSuccess ? <p className="hdde-processing-inline-feedback" data-tone="positive">{outputDirSuccess}</p> : null}
+          {outputDirError ? <p className="hdde-processing-inline-feedback" data-tone="negative">{outputDirError}</p> : null}
+        </section>
+
+        {activeColorBatch ? (
+          <section className="hdde-processing-panel hdde-processing-batch-summary" aria-labelledby="color-batch-summary-title" data-testid="color-batch-summary">
+            <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
+              <div>
+                <p className="hdde-eyebrow">批量颜色校正</p>
+                <h2 id="color-batch-summary-title">{batchStatusLabel}</h2>
+                <p>每张图片独立分析与处理；单张失败不会中断其他图片。</p>
+              </div>
+              <StatusPill status={activeColorBatch.status} />
+            </header>
+            <div className="hdde-processing-batch-facts">
+              <div><span>总数</span><strong>{activeColorBatch.total_count}</strong></div>
+              <div><span>已完成</span><strong>{activeColorBatch.completed_count}</strong></div>
+              <div><span>失败</span><strong>{activeColorBatch.failed_count}</strong></div>
+              <div><span>待确认</span><strong>{activeColorBatch.pending_review_count || 0}</strong></div>
+              <div><span>已确认</span><strong>{activeColorBatch.confirmed_count || 0}</strong></div>
+              <div><span>整体进度</span><strong>{activeColorBatch.progress}%</strong></div>
             </div>
-            <p className="border-t border-[#1c1f26]/30 pt-2 text-[10px] leading-relaxed text-[#475569]">
-              {isSafeBetaSelected ? "Beta 成品使用本地 output_path / output_dir，不依赖普通任务映射 URL。" : "成品质检仅依据后端解算映射 URL，不读取本地物理路径。"}
-            </p>
+            <div className="hdde-processing-progress hdde-processing-progress--large" aria-label={`批量颜色校正整体进度 ${activeColorBatch.progress}%`}>
+              <span style={{ width: `${Math.max(0, Math.min(100, Number(activeColorBatch.progress || 0)))}%` }} />
+            </div>
+            <p className="hdde-processing-batch-output" title={activeColorBatch.output_directory}>成功结果保存到颜色校正正式输出目录；可在下方逐图打开结果或文件夹。</p>
+          </section>
+        ) : null}
+
+        <section className="hdde-processing-panel hdde-processing-queue" aria-labelledby="processing-queue-title">
+          <div className="hdde-processing-task-tabs" role="tablist" aria-label="处理中心任务范围">
+            <button type="button" role="tab" aria-selected={taskView === "current"} onClick={() => setTaskView("current")}>当前任务</button>
+            <button type="button" role="tab" aria-selected={taskView === "history"} onClick={() => setTaskView("history")}>历史任务</button>
+          </div>
+          <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
+            <div>
+              <h2 id="processing-queue-title">任务列表</h2>
+            </div>
+            <span className="hdde-processing-count">{visibleTaskItems.length} 条</span>
+          </header>
+
+          <div className="hdde-processing-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>文件名称</th>
+                  <th>处理模式</th>
+                  <th>状态与进度</th>
+                  <th>结果与交付</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!visibleTaskItems.length ? (
+                  <tr>
+                    <td colSpan={5}>
+                      <div className="hdde-processing-empty">
+                        <strong>{taskView === "history" ? "暂无历史任务" : "暂无当前任务"}</strong>
+                        <span>{taskView === "history" ? "已结束的真实任务会从统一任务事实源显示在这里。" : "选择或拖入图片后，进行中的任务会在这里显示。"}</span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : visibleTaskItems.map((item) => {
+                  const isSafeBetaRow = item.mode === PROCESSING_MODE_SAFE_BETA;
+                  const compareDisabled = isSafeBetaRow ? item.status !== "completed" : item.status !== "completed" || !item.final_output_url;
+                  const itemProgress = Math.max(0, Math.min(100, Number(item.progress || 0)));
+                  const resultText = item.output_filename || item.error || (
+                    item.status === "completed"
+                      ? item.taskFamily === "image_diagnosis" ? "诊断结果已记录" : "已生成结果"
+                      : "等待输出"
+                  );
+                  return (
+                    <tr key={item.id} data-status={item.status}>
+                      <td>
+                        <strong title={item.name}>{item.name}</strong>
+                        <span>
+                          {item.input_width && item.input_height ? `${item.input_width} × ${item.input_height}` : item.size}
+                          {item.created_at ? ` · ${new Date(item.created_at).toLocaleString("zh-CN")}` : ""}
+                        </span>
+                        {taskView === "history" ? <small className="hdde-processing-trace">功能：{item.featureKey || "未记录"}<br />TASK_ID：{item.taskId}</small> : null}
+                      </td>
+                      <td>{getModeDisplay(item.mode || activeMode).label}</td>
+                      <td>
+                        <div className="hdde-processing-status-cell">
+                          <StatusPill status={item.status} />
+                          <span>{itemProgress}%</span>
+                        </div>
+                        {processingStageLabel(item.processing_stage, item.status) ? (
+                          <small>{processingStageLabel(item.processing_stage, item.status)}</small>
+                        ) : null}
+                        <div className="hdde-processing-progress" aria-label={`${item.name} 处理进度 ${itemProgress}%`}>
+                          <span style={{ width: `${itemProgress}%` }} />
+                        </div>
+                      </td>
+                      <td>
+                        <span className={item.error ? "hdde-processing-result is-error" : "hdde-processing-result"} title={resultText}>{resultText}</span>
+                        <small>
+                          {item.output_width && item.output_height
+                            ? `${item.output_width} × ${item.output_height} · ${String(item.output_format || "PNG").toUpperCase()}`
+                            : item.status === "completed" ? "未生成新的输出文件" : "等待输出"}
+                          {item.completed_at ? ` · ${new Date(item.completed_at).toLocaleString("zh-CN")}` : ""}
+                        </small>
+                        <DeliveryPill status={item.final_delivery_status} item={item} />
+                        {item.taskFamily === "color_correction" && item.status === "completed" ? (
+                          <span className="hdde-processing-review-state" data-status={item.review_status}>{item.review_status === "confirmed" ? "已确认" : "待确认"}</span>
+                        ) : null}
+                        {taskView === "history" ? (
+                          <small className="hdde-processing-trace">RESULT_ID：{item.resultId || "无"}<br />DELIVERY_ID：{item.deliveryId || "无"}</small>
+                        ) : null}
+                      </td>
+                      <td>
+                        <div className="hdde-processing-row-actions">
+                          <button type="button" disabled={!item.taskId} onClick={() => locateQueueItem(item)}>{item.taskFamily === "color_correction" ? "复核结果" : item.taskFamily === "image_diagnosis" ? "查看诊断" : "查看详情"}</button>
+                          <button type="button" disabled={compareDisabled} onClick={() => handleOpenFinalOutput(item)}>打开成品</button>
+                          <button type="button" disabled={!item.output_path && !isSafeBetaRow} onClick={() => handleOpenItemOutputFolder(item)}>打开文件夹</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </section>
-      </div>
 
-      <footer className="flex h-6 w-full shrink-0 items-center justify-center overflow-hidden border-t border-[#1c1f26] bg-[#0b0c0e] px-3 text-center font-mono text-[10px] tracking-[0.16em] text-[#6e7d80]">
-        影界 HDDE V0.4.6 RC1 · HD Delivery Engine · 中文视觉高清交付引擎
-      </footer>
+        <div className="hdde-processing-summary-grid">
+          <section className="hdde-processing-panel hdde-processing-summary" aria-labelledby="processing-status-title">
+            <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
+              <div>
+                <p className="hdde-eyebrow">任务进度</p>
+                <h2 id="processing-status-title">进度与下一步</h2>
+              </div>
+              <span className="hdde-processing-readiness" data-tone={directoryReady ? "positive" : "negative"}>
+                {directoryReady ? "允许处理" : "禁止处理"}
+              </span>
+            </header>
+            <dl>
+              <div><dt>当前任务</dt><dd>{activeItem?.name || "尚未选择图片"}</dd></div>
+              <div><dt>当前阶段</dt><dd>{currentStageLabel}</dd></div>
+              <div><dt>整体进度</dt><dd>{currentProgress}%</dd></div>
+              <div><dt>下一步</dt><dd>{currentNextAction}</dd></div>
+            </dl>
+            <div className="hdde-processing-progress hdde-processing-progress--large" aria-label={`当前任务进度 ${currentProgress}%`}>
+              <span style={{ width: `${currentProgress}%` }} />
+            </div>
+            <p className={noticeIsError ? "hdde-processing-notice is-error" : "hdde-processing-notice"} aria-live="polite">
+              {activeColorBatch && ["pending", "processing"].includes(activeColorBatch.status)
+                ? `批量颜色校正正在逐张处理 · ${activeColorBatch.completed_count + activeColorBatch.failed_count} / ${activeColorBatch.total_count} 张已结束`
+                : <>{isProcessingQueue && currentIndex ? `逐张处理 · 第 ${currentIndex} / ${fileQueue.length} 张 · ` : ""}{notice}</>}
+            </p>
+          </section>
+
+          <section className="hdde-processing-panel hdde-processing-summary" aria-labelledby="processing-delivery-title">
+            <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
+              <div>
+                <p className="hdde-eyebrow">交付信息</p>
+                <h2 id="processing-delivery-title">真实输出与结果</h2>
+              </div>
+              <span className="hdde-processing-count">{queueCompletedCount} 已完成</span>
+            </header>
+            <dl>
+              <div><dt>输出目录</dt><dd><code title={deliveryOutputDirectory}>{deliveryOutputDirectory}</code></dd></div>
+              <div><dt>结果数量</dt><dd>{queueCompletedCount} 成功 / {queueFailedCount} 失败</dd></div>
+              <div><dt>当前结果</dt><dd><code title={deliveryOutputPath}>{deliveryOutputPath || "尚未生成"}</code></dd></div>
+              <div><dt>交付状态</dt><dd>{deliveryActionItem ? <DeliveryPill status={deliveryActionItem.final_delivery_status} item={deliveryActionItem} /> : "等待结果"}</dd></div>
+            </dl>
+            <div className="hdde-processing-delivery-actions">
+              <button type="button" onClick={handleOpenDeliveryOutputDirectory} disabled={!directoryReady}>打开输出目录</button>
+              <button type="button" onClick={() => handleOpenFinalOutput(deliveryActionItem)} disabled={!deliveryActionItem?.final_output_url}>打开结果</button>
+              <button type="button" onClick={() => handleCopyFinalOutputUrl(isSafeBetaSelected ? betaActionItem : deliveryActionItem)} disabled={!canCopyDeliveryPath}>复制成品路径</button>
+              <button type="button" onClick={() => selectForReport(deliveryActionItem)} disabled={!deliveryActionItem || deliveryActionItem.taskFamily === "color_correction"}>查看交付报告</button>
+            </div>
+          </section>
+        </div>
+      </div>
     </section>
   );
 }

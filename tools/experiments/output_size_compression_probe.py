@@ -14,7 +14,7 @@ from PIL import Image
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
-DEFAULT_OUTPUT_DIR = Path("D:/影界文件/影界测试反馈包/compression_trials")
+DEFAULT_OUTPUT_DIR = Path("D:/影界文件/诊断/反馈包/compression_trials")
 
 
 @dataclass(frozen=True)

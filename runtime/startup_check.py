@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .dependency_check import check_dependencies, missing_required_dependencies
 from .error_dialog import show_info_dialog
-from .system_info import app_root, resource_root
+from .system_info import resource_root
 
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -99,6 +99,37 @@ def run_startup_check(input_path: Path, output_dir: Path, show_no_image_dialog: 
     )
 
 
-def default_project_dirs() -> tuple[Path, Path]:
-    root = app_root()
-    return root / "输入图片", root / "输出成品"
+def resolve_default_project_dirs(settings: dict | None = None) -> dict:
+    # 延迟导入，避免 main 导入 runtime.startup_check 时形成循环依赖。
+    from main import resolve_hdde_user_dirs
+
+    resolved = resolve_hdde_user_dirs(settings)
+    if not resolved.get("directory_ready"):
+        return {
+            "status": "BLOCKED",
+            "formal_root": Path(resolved["app_data_root"]),
+            "input_path": Path(resolved["normal_input_dir"]),
+            "output_dir": Path(resolved["normal_output_dir"]),
+            "error_code": resolved.get("directory_error_code") or "FORMAL_DIRECTORY_NOT_READY",
+            "reason": (
+                resolved.get("failure_reason")
+                or resolved.get("directory_message")
+                or resolved.get("directory_error")
+                or "正式目录不可用。"
+            ),
+        }
+    return {
+        "status": "READY",
+        "formal_root": Path(resolved["app_data_root"]),
+        "input_path": Path(resolved["normal_input_dir"]),
+        "output_dir": Path(resolved["normal_output_dir"]),
+        "error_code": "",
+        "reason": "",
+    }
+
+
+def default_project_dirs(settings: dict | None = None) -> tuple[Path, Path]:
+    resolved = resolve_default_project_dirs(settings)
+    if resolved["status"] != "READY":
+        raise StartupError(f"{resolved['error_code']}: {resolved['reason']}")
+    return resolved["input_path"], resolved["output_dir"]
