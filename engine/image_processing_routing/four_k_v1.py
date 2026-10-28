@@ -42,6 +42,23 @@ FOUR_K_V1_FUSION_SIGMA = 2.0
 FOUR_K_V1_TEXTURE_RESTORE = 0.35
 FOUR_K_V1_FINE_DETAIL_GAIN = 0.6
 FOUR_K_V1_HALO_CLAMP = 0.01
+# Region-aware strength (measured on the source): flat areas such as skin get less
+# SR high-frequency and fine lift (no SR grain), hard contours such as hair get a
+# soft cap on SR high-frequency and a reduced lift (no wiry hard lines).
+FOUR_K_V1_FLAT_STD_RANGE = (0.015, 0.07)
+FOUR_K_V1_FLAT_SR_GAIN = 0.45
+FOUR_K_V1_FLAT_DETAIL_GAIN = 0.15
+FOUR_K_V1_HF_SOFT_CAP = 0.30
+FOUR_K_V1_EDGE_RANGE = (0.18, 0.45)
+FOUR_K_V1_EDGE_DETAIL_GAIN = 0.40
+# Tiny text: dense clusters of thin high-contrast strokes. They are lightly smoothed
+# so stroke pieces join and source jaggies are not emphasised, then re-sharpened
+# with a wider, locally bounded unsharp mask.
+FOUR_K_V1_STROKE_HAT = 0.20
+FOUR_K_V1_STROKE_DENSITY_RANGE = (0.18, 0.30)
+FOUR_K_V1_STROKE_SMOOTH_SIGMA = 0.6
+FOUR_K_V1_STROKE_SHARPEN = 1.0
+FOUR_K_V1_STROKE_SHARPEN_SIGMA = 1.6
 # Back-projection: the fused result is iteratively corrected so that, scaled back
 # to the source grid, it matches the original. This pulls SR-distorted small-text
 # strokes back to the source glyph structure and removes residual tone drift.
@@ -123,6 +140,12 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
             "texture_restore": FOUR_K_V1_TEXTURE_RESTORE,
             "fine_detail_gain": FOUR_K_V1_FINE_DETAIL_GAIN,
             "halo_clamp": FOUR_K_V1_HALO_CLAMP,
+            "flat_sr_gain": FOUR_K_V1_FLAT_SR_GAIN,
+            "flat_detail_gain": FOUR_K_V1_FLAT_DETAIL_GAIN,
+            "hf_soft_cap": FOUR_K_V1_HF_SOFT_CAP,
+            "edge_detail_gain": FOUR_K_V1_EDGE_DETAIL_GAIN,
+            "tiny_stroke_smooth_sigma": FOUR_K_V1_STROKE_SMOOTH_SIGMA,
+            "tiny_stroke_sharpen": FOUR_K_V1_STROKE_SHARPEN,
             "back_projection_iterations": FOUR_K_V1_BACK_PROJECTION_ITERATIONS,
         },
         "resample": "Pillow.Image.Resampling.LANCZOS",
@@ -428,9 +451,42 @@ def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None)
         sr_output.unlink(missing_ok=True)
 
 
-def _fuse_detail(sr_x4: np.ndarray, rgb: Image.Image, target_size: tuple[int, int]) -> np.ndarray:
-    """Fuse SR detail onto the LANCZOS base of the original; returns uint8 RGB at target size."""
+def _luma(image: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(image, cv2.COLOR_RGB2YCrCb)[..., 0]
 
+
+def _ramp(values: np.ndarray, bounds: tuple[float, float]) -> np.ndarray:
+    low, high = bounds
+    return np.clip((values - low) / (high - low), 0.0, 1.0)
+
+
+def _structure_maps(rgb: Image.Image, target_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Measure on the source where it is textured, where hard contours and where tiny strokes are."""
+
+    luma = _luma(np.asarray(rgb, dtype=np.float32) / 255.0)
+    upscale = lambda values: cv2.resize(values, target_size, interpolation=cv2.INTER_LINEAR)
+    k3 = np.ones((3, 3), np.uint8)
+    mean = cv2.blur(luma, (5, 5))
+    std = np.sqrt(np.clip(cv2.blur(luma * luma, (5, 5)) - mean * mean, 0.0, None))
+    texture = upscale(_ramp(std, FOUR_K_V1_FLAT_STD_RANGE))
+    edge = _ramp(upscale(cv2.dilate(luma, k3) - cv2.erode(luma, k3)), FOUR_K_V1_EDGE_RANGE)
+    k5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    hat = np.maximum(cv2.morphologyEx(luma, cv2.MORPH_BLACKHAT, k5), cv2.morphologyEx(luma, cv2.MORPH_TOPHAT, k5))
+    strong = (hat > FOUR_K_V1_STROKE_HAT).astype(np.float32)
+    stroke = cv2.morphologyEx(strong, cv2.MORPH_CLOSE, k3) * _ramp(cv2.blur(strong, (7, 7)), FOUR_K_V1_STROKE_DENSITY_RANGE)
+    stroke = upscale(cv2.GaussianBlur(cv2.dilate(stroke, k3), (0, 0), 1.0))
+    return texture, edge, stroke
+
+
+def _fuse_detail(
+    sr_x4: np.ndarray,
+    rgb: Image.Image,
+    target_size: tuple[int, int],
+    maps: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> np.ndarray:
+    """Fuse SR detail onto the LANCZOS base of the original; returns float RGB at target size."""
+
+    texture, edge, stroke = maps
     base = np.asarray(rgb.resize(target_size, Image.Resampling.LANCZOS), dtype=np.float32) / 255.0
     sr = cv2.resize(sr_x4, target_size, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
     sigma = FOUR_K_V1_FUSION_SIGMA
@@ -441,34 +497,55 @@ def _fuse_detail(sr_x4: np.ndarray, rgb: Image.Image, target_size: tuple[int, in
     del base
     # Original texture the SR flattened (fabric, food, skin) is partially restored.
     lost = np.clip(np.abs(base_high) - np.abs(sr_high), 0.0, None) * np.sign(base_high)
-    fused = np.clip(base_low + sr_high + FOUR_K_V1_TEXTURE_RESTORE * lost, 0.0, 1.0)
-    del base_low, sr_high, base_high, lost
+    sr_high = FOUR_K_V1_HF_SOFT_CAP * np.tanh(sr_high / FOUR_K_V1_HF_SOFT_CAP)
+    sr_gain = (FOUR_K_V1_FLAT_SR_GAIN + (1.0 - FOUR_K_V1_FLAT_SR_GAIN) * texture)[..., None]
+    fused = np.clip(base_low + sr_gain * sr_high + FOUR_K_V1_TEXTURE_RESTORE * lost, 0.0, 1.0)
+    del base_low, sr_high, base_high, lost, sr_gain
 
-    # Fine-scale luminance lift for small text and thin lines, clamped to the local
-    # 3x3 range so it cannot create halos or ringing.
+    stroke3 = stroke[..., None]
+    soft = cv2.GaussianBlur(fused, (0, 0), FOUR_K_V1_STROKE_SMOOTH_SIGMA)
+    soft_luma = _luma(soft)
+    k5 = np.ones((5, 5), np.uint8)
+    sharpened = np.clip(
+        soft_luma + FOUR_K_V1_STROKE_SHARPEN * (soft_luma - cv2.GaussianBlur(soft_luma, (0, 0), FOUR_K_V1_STROKE_SHARPEN_SIGMA)),
+        cv2.erode(soft_luma, k5),
+        cv2.dilate(soft_luma, k5),
+    )
+    strokes = np.clip(soft + (sharpened - soft_luma)[..., None], 0.0, 1.0)
+    fused = stroke3 * strokes + (1.0 - stroke3) * fused
+    del soft, soft_luma, sharpened, strokes
+
+    # Fine-scale luminance lift, weaker on flat areas and hard contours, off on tiny
+    # strokes, and clamped to the local 3x3 range so it cannot create halos or ringing.
     ycc = cv2.cvtColor(fused, cv2.COLOR_RGB2YCrCb)
     luma = ycc[..., 0]
-    lifted = luma + FOUR_K_V1_FINE_DETAIL_GAIN * (luma - cv2.GaussianBlur(luma, (0, 0), 0.9))
+    gain = FOUR_K_V1_FLAT_DETAIL_GAIN + (FOUR_K_V1_FINE_DETAIL_GAIN - FOUR_K_V1_FLAT_DETAIL_GAIN) * texture
+    gain = gain * (1.0 - (1.0 - FOUR_K_V1_EDGE_DETAIL_GAIN / FOUR_K_V1_FINE_DETAIL_GAIN) * edge) * (1.0 - stroke)
+    lifted = luma + gain * (luma - cv2.GaussianBlur(luma, (0, 0), 0.9))
     kernel = np.ones((3, 3), np.uint8)
     ycc[..., 0] = np.clip(
         lifted,
         cv2.erode(luma, kernel) - FOUR_K_V1_HALO_CLAMP,
         cv2.dilate(luma, kernel) + FOUR_K_V1_HALO_CLAMP,
     )
-    out = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB)
-    return (np.clip(out, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    return np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0.0, 1.0)
 
 
-def _back_project(fused: np.ndarray, rgb: Image.Image) -> np.ndarray:
-    """Make the fused result consistent with the original when scaled back to it."""
+def _back_project(fused: np.ndarray, rgb: Image.Image, stroke: np.ndarray) -> np.ndarray:
+    """Make the fused result consistent with the original when scaled back to it.
+
+    On tiny strokes the correction is smoothed, so glyph structure is restored
+    without re-imposing the source's pixel-level jaggies."""
 
     source = np.asarray(rgb, dtype=np.float32) / 255.0
-    out = fused.astype(np.float32) / 255.0
+    out = fused
     source_size = (source.shape[1], source.shape[0])
     target_size = (out.shape[1], out.shape[0])
+    stroke3 = stroke[..., None]
     for _ in range(FOUR_K_V1_BACK_PROJECTION_ITERATIONS):
-        residual = source - cv2.resize(out, source_size, interpolation=cv2.INTER_AREA)
-        out = np.clip(out + cv2.resize(residual, target_size, interpolation=cv2.INTER_LINEAR), 0.0, 1.0)
+        residual = cv2.resize(source - cv2.resize(out, source_size, interpolation=cv2.INTER_AREA), target_size, interpolation=cv2.INTER_LINEAR)
+        smoothed = cv2.GaussianBlur(residual, (0, 0), 1.0)
+        out = np.clip(out + stroke3 * smoothed + (1.0 - stroke3) * residual, 0.0, 1.0)
     return (out * 255.0 + 0.5).astype(np.uint8)
 
 
@@ -608,7 +685,8 @@ def process_4k_v1_image(
         destination.parent.mkdir(parents=True, exist_ok=True)
         sr_x4 = _run_super_resolution(rgb, destination.parent, stage_callback)
         _emit_stage(stage_callback, "image_processing", 78, "正在进行原图保真融合与细节校准")
-        resized = Image.fromarray(_back_project(_fuse_detail(sr_x4, rgb, target_size), rgb), "RGB")
+        maps = _structure_maps(rgb, target_size)
+        resized = Image.fromarray(_back_project(_fuse_detail(sr_x4, rgb, target_size, maps), rgb, maps[2]), "RGB")
         del sr_x4
         if source_meta["has_alpha"]:
             # Alpha is never generated by SR; it is upscaled with LANCZOS from the original.

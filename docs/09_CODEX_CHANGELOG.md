@@ -1,5 +1,11 @@
 # Codex Changelog
 
+## 2026-10-28 - V0.6.1-dev 4K SR route v3: region-aware strength and tiny-text stroke control
+
+- Product-owner closing requests: soften hair/skin/high-contrast contours without losing clarity; control tiny-text edges separately for stroke continuity without emphasising source jaggies. `four_k_v1.py` now builds source-measured maps (`_structure_maps`): flat areas (5×5 std) get SR high-frequency ×0.45 and fine lift 0.15; hard contours (3×3 range) get a 0.30·tanh soft cap on SR high-frequency and lift 0.40; tiny strokes (5×5 black/top-hat >0.20 in dense 7×7 clusters) are smoothed σ0.6 then re-sharpened with a σ1.6 unsharp bounded to the local 5×5 range, with lift off and back-projection residual smoothed σ1.0 there. Contract `fidelity_fusion` lists the new parameters.
+- Nine samples (eight golden + reported poster) v2→v3: flat-area grain −13% to −46%, high-contrast detail gain over LANCZOS kept at 77–95%, source-consistency PSNR still above LANCZOS on all (43.5–67.5 dB), color shift unchanged. Visual: hair wire highlights and SR forehead crosshatch reduced; "锦江流韵" strokes continuous and closer to source glyphs. Rejected: hard cap 0.10 with a loose text mask (lost half the detail gain).
+- `process_4k_v1_image` is pixel-identical to the prototype on S03/S07/YR (71.9–78.8s); `tests/image_processing_routing` 129/129. Report and crops in `artifacts/4k_v2_testset/` (`evidence/v3_*.png`). Not yet run through the desktop UI; the running backend must be restarted to use v3. Not committed.
+
 ## 2026-10-28 - V0.6.1-dev 4K SR route v2: back-projection consistency after golden-sample test
 
 - Ran the new 4K route on the eight stage-1 golden samples (S01–S08). Found a real regression in v1: Real-ESRGAN altered legible small Chinese glyphs (S07 "锦江流韵 / 烟火日常"). Added `_back_project` (4 iterations, INTER_AREA down / INTER_LINEAR residual up, no blur) after `_fuse_detail`, contract key `fidelity_fusion.back_projection_iterations=4`. Strokes return to source glyph structure while keeping SR sharpness.
