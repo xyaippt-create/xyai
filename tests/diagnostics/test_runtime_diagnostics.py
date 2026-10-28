@@ -149,6 +149,37 @@ class RuntimeDiagnosticIdentityTests(unittest.TestCase):
         self.assertNotIn("客户并购终稿.png", first["reason"])
         self.assertNotIn("private-value", first["reason"])
 
+    def test_business_trace_is_reused_by_error_and_related_event_lookup(self):
+        operation = runtime_logging.new_operation_identity(
+            "image_compression",
+            module_id="hdde.image.compression",
+        )
+        try:
+            controlled_decode_failure()
+        except RuntimeError as exc:
+            diagnostics = runtime_logging.build_exception_diagnostics(
+                exc,
+                error_category=runtime_logging.PRODUCT_ERROR,
+                error_stage="compression_engine",
+                trace_id=operation["trace_id"],
+            )
+        runtime_logging.log_runtime_event(
+            "PROCESS_FAILED",
+            level=logging.ERROR,
+            stage="compression_engine",
+            result="failed",
+            task_id="compression_task_trace_contract",
+            **{**operation, **diagnostics},
+        )
+        related = runtime_logging.related_runtime_events(
+            operation_id=operation["operation_id"],
+            trace_id=operation["trace_id"],
+        )
+        self.assertEqual(diagnostics["trace_id"], operation["trace_id"])
+        self.assertEqual(len(related), 1)
+        self.assertEqual(related[0]["operation_id"], operation["operation_id"])
+        self.assertEqual(related[0]["trace_id"], operation["trace_id"])
+
     def test_controlled_failure_feedback_contains_only_related_safe_diagnostics(self):
         runtime_id = runtime_logging.begin_runtime(product_version="V0.5.4-dev")
         build_id = "V0.5.4-dev+test123.clean.20260810T000000000Z"
@@ -231,19 +262,18 @@ class RuntimeDiagnosticIdentityTests(unittest.TestCase):
             )
             self.assertEqual(bundle["feedback_bundle_status"], "PASS")
             with zipfile.ZipFile(bundle["feedback_bundle_path"]) as archive:
-                report = json.loads(archive.read("feedback_report.json").decode("utf-8"))
+                report = json.loads(archive.read("feedback.json").decode("utf-8"))
+                timeline = json.loads(archive.read("timeline.json").decode("utf-8"))
 
-        context = report["context"]
-        self.assertEqual(report["application"]["build"], build_id)
-        self.assertEqual(report["application"]["runtime_id"], runtime_id)
+        context = report["common_context"]
+        self.assertEqual(report["application_runtime"]["build_id"], build_id)
+        self.assertEqual(report["application_runtime"]["runtime_id"], runtime_id)
         self.assertEqual(context["task_id"], task_id)
         self.assertIsNone(context["result_id"])
-        self.assertEqual(context["error"]["error_id"], diagnostics["error_id"])
-        self.assertEqual(context["error"]["error_fingerprint"], diagnostics["error_fingerprint"])
-        self.assertEqual(context["error"]["exception_type"], "RuntimeError")
-        self.assertIn("tests/diagnostics/test_runtime_diagnostics.py", context["error"]["code_location"])
-        self.assertEqual(context["safe_input_metadata"]["file_size_bucket"], "20-50MB")
-        self.assertEqual(len(context["related_events"]), 1)
+        self.assertEqual(context["error_id"], diagnostics["error_id"])
+        self.assertEqual(context["error_fingerprint"], diagnostics["error_fingerprint"])
+        self.assertEqual(report["safe_input_metadata"]["file_size_bucket"], "20-50MB")
+        self.assertTrue(any(event["error_id"] == diagnostics["error_id"] for event in timeline["events"]))
         serialized = json.dumps(report, ensure_ascii=False)
         self.assertNotIn("private-user", serialized)
         self.assertNotIn("客户并购终稿.png", serialized)

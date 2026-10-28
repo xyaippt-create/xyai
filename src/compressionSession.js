@@ -9,10 +9,25 @@ export const FILE_SELECTION_STATES = Object.freeze({
 export const TOKEN_SESSION_ERROR_CODE = "TOKEN_NOT_FOUND_OR_EXPIRED";
 export const TOKEN_SESSION_ERROR_MESSAGE = "图片会话已失效，请重新选择图片。";
 export const FUNCTION_DIRECTORY_BY_MODE = Object.freeze({
+  DELIVERY_OPTIMIZATION: "交付优化",
   LOSSLESS_COMPRESSION: "PNG无损压缩",
   RESIZE_REDUCTION: "尺寸缩小",
   UPLOAD_ADAPTATION: "上传适配",
 });
+
+export function groupDeliveryCandidates(result) {
+  const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+  const available = candidates.filter((item) => item?.status === "AVAILABLE");
+  const recommended = candidates.find((item) => item?.recommended) || null;
+  const selected = candidates.find((item) => item?.selected) || null;
+  return {
+    candidates,
+    available,
+    recommended,
+    selected,
+    alternatives: candidates.filter((item) => item !== recommended),
+  };
+}
 
 export const REQUIRED_INTAKE_FIELDS = Object.freeze([
   "source_token",

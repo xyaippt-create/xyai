@@ -29,14 +29,20 @@ function createBuildMetadata() {
   const worktree = status === null ? "unknown" : status ? "dirty" : "clean";
   const timestamp = builtAt.replace(/[-:.]/g, "");
   return {
-    id: `${productVersion.display_version}+${commit}.${worktree}.${timestamp}`,
+    id: `V${productVersion.version}+${commit}.${worktree}.${timestamp}`,
     builtAt,
   };
 }
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   const build = createBuildMetadata();
-  const apiTarget = process.env.HDDE_API_TARGET || "http://127.0.0.1:8787";
+  const configuredApiTarget = String(process.env.HDDE_API_TARGET || "").trim();
+  if (command === "serve" && !configuredApiTarget) {
+    throw new Error(
+      "HDDE_API_TARGET_REQUIRED: 开发与自动验证服务器必须显式指定隔离后端，禁止静默连接正式 8787 端口。",
+    );
+  }
+  const apiTarget = configuredApiTarget || "http://127.0.0.1:0";
   return {
     plugins: [react()],
     define: {
@@ -47,6 +53,16 @@ export default defineConfig(() => {
       host: "127.0.0.1",
       port: 5173,
       strictPort: true,
+      // Runtime data and validation assets do not participate in frontend HMR.
+      // Recursively watching them can starve module delivery and the API proxy.
+      watch: {
+        ignored: [
+          "**/.venv/**", "**/.agents/**", "**/.codex/**",
+          "**/.playwright-cli/**", "**/.reprosight/**",
+          "**/output/**", "**/tmp/**", "**/runtime_data/**",
+          "**/artifacts/**", "**/build/**", "**/tests/**", "**/logs/**",
+        ],
+      },
       proxy: {
         "/api": apiTarget,
       },

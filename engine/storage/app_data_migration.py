@@ -13,16 +13,17 @@ from typing import Any, Callable
 
 
 TARGET_PATHS = {
-    "standard_output": Path("输出") / "1080P标准增强",
-    "safe_output": Path("输出") / "1080P安全增强",
-    "four_k_output": Path("输出") / "4K高清增强",
+    "standard_output": Path("输出") / "1080P画质",
+    "safe_output": Path("输出") / "1080P画质",
+    "four_k_output": Path("输出") / "4K画质增强",
     "compression_output": Path("输出") / "图片压缩",
-    "standard_input_cache": Path("输出") / "1080P标准增强" / ".输入缓存",
-    "safe_input_cache": Path("输出") / "1080P安全增强" / ".输入缓存",
+    "local_retouch_output": Path("输出") / "瑕疵修复",
+    "standard_input_cache": Path("输出") / "1080P画质" / ".输入缓存",
+    "safe_input_cache": Path("输出") / "1080P画质" / ".输入缓存",
     "compression_runtime_cache": Path("输出") / "图片压缩" / ".运行缓存",
     "log_dir": Path("诊断") / "日志",
     "feedback_dir": Path("诊断") / "反馈包",
-    "safe_feedback_dir": Path("诊断") / "反馈包" / "1080P安全增强",
+    "safe_feedback_dir": Path("诊断") / "反馈包" / "1080P画质",
     "report_dir": Path("诊断") / "报告",
 }
 
@@ -43,13 +44,40 @@ LEGACY_DIRECTORY_TARGETS = {
 
 LEGACY_RELATIVE_DIRECTORY_TARGETS = {
     Path("诊断") / "反馈包" / "交付包": TARGET_PATHS["feedback_dir"],
+    Path("诊断") / "反馈包" / "1080P安全增强": TARGET_PATHS["safe_feedback_dir"],
+    Path("输出") / "4K尺寸适配": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K适配": TARGET_PATHS["four_k_output"],
     Path("输出") / "4K增强": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K画质": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K画质适配": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K高清增强": TARGET_PATHS["four_k_output"],
+    Path("输出") / "1080P画质增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P标准增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P安全增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P增强": TARGET_PATHS["standard_output"],
     Path("输出") / "1080P标准版": TARGET_PATHS["standard_output"],
+    Path("输出") / "标记修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "瑕疵修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "局部修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "局部修复": TARGET_PATHS["local_retouch_output"],
 }
 
 LEGACY_FORMAL_OUTPUT_ALIASES = {
+    Path("输出") / "4K尺寸适配": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K适配": TARGET_PATHS["four_k_output"],
     Path("输出") / "4K增强": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K画质": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K画质适配": TARGET_PATHS["four_k_output"],
+    Path("输出") / "4K高清增强": TARGET_PATHS["four_k_output"],
+    Path("输出") / "1080P画质增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P标准增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P安全增强": TARGET_PATHS["standard_output"],
+    Path("输出") / "1080P增强": TARGET_PATHS["standard_output"],
     Path("输出") / "1080P标准版": TARGET_PATHS["standard_output"],
+    Path("输出") / "标记修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "瑕疵修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "局部修整": TARGET_PATHS["local_retouch_output"],
+    Path("输出") / "局部修复": TARGET_PATHS["local_retouch_output"],
 }
 
 CLEANUP_ONLY_NAMES = {"配置"}
@@ -60,6 +88,7 @@ STANDARD_OUTPUT_RESERVED_NAMES = {
     TARGET_PATHS["safe_output"].name,
     TARGET_PATHS["compression_output"].name,
     TARGET_PATHS["four_k_output"].name,
+    TARGET_PATHS["local_retouch_output"].name,
     *(path.name for path in LEGACY_FORMAL_OUTPUT_ALIASES),
 }
 
@@ -272,8 +301,11 @@ def _move_file(
     target = destination
     if target.exists():
         if not target.is_file():
-            target = _unique_conflict_path(destination)
-            result["renamed_conflicts"].append({"source": str(source), "target": str(target)})
+            raise _MigrationOperationError(
+                "collision",
+                target,
+                FileExistsError(f"NAME_COLLISION: target is not a file: {target}"),
+            )
         else:
             try:
                 source_sha256 = _sha256(source)
@@ -293,8 +325,11 @@ def _move_file(
                 result["migrated_files"] += 1
                 return target
             else:
-                target = _unique_conflict_path(destination)
-                result["renamed_conflicts"].append({"source": str(source), "target": str(target)})
+                raise _MigrationOperationError(
+                    "collision",
+                    target,
+                    FileExistsError(f"NAME_COLLISION: different content already exists: {target}"),
+                )
 
     try:
         if source.drive.lower() == target.drive.lower() and not target.exists():
@@ -396,11 +431,21 @@ def _known_settings_updates(settings: dict[str, Any], root: Path, project_root: 
         "default_output_dir": {
             _path_key(root / "输出"): standard,
             _path_key(root / "输出成品"): standard,
+            **{
+                _path_key(root / legacy): standard
+                for legacy in LEGACY_FORMAL_OUTPUT_ALIASES
+                if legacy.parts[1].startswith("1080P")
+            },
             _path_key(root / "输出" / "1080P标准版"): standard,
         },
         "last_output_dir": {
             _path_key(root / "输出"): standard,
             _path_key(root / "输出成品"): standard,
+            **{
+                _path_key(root / legacy): standard
+                for legacy in LEGACY_FORMAL_OUTPUT_ALIASES
+                if legacy.parts[1].startswith("1080P")
+            },
             _path_key(root / "输出" / "1080P标准版"): standard,
             _path_key(root / "1080P安全增强输出"): safe,
             _path_key(root / "图片压缩输出"): compression,
@@ -410,6 +455,8 @@ def _known_settings_updates(settings: dict[str, Any], root: Path, project_root: 
         },
         "safe_beta_output_dir": {
             _path_key(root / "1080P安全增强输出"): safe,
+            _path_key(root / "输出" / "1080P安全增强"): safe,
+            _path_key(root / "输出" / "1080P标准增强"): safe,
         },
         "feedback_dir": {
             _path_key(root / "反馈包"): feedback,

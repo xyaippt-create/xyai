@@ -107,8 +107,9 @@ def _safe_value(value: Any, *, field: str = "") -> str:
             reference = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
             return f"file_{reference}{suffix}"
         return f"<redacted_path>{suffix}" if suffix else "<redacted_path>"
-    text = _WINDOWS_ABSOLUTE_PATH.sub("<redacted_path>", text)
-    text = _POSIX_ABSOLUTE_PATH.sub("<redacted_path>", text)
+    if field not in {"route", "route_family"}:
+        text = _WINDOWS_ABSOLUTE_PATH.sub("<redacted_path>", text)
+        text = _POSIX_ABSOLUTE_PATH.sub("<redacted_path>", text)
     if field not in {"code_location", "runtime_log_reference"}:
         text = _BUSINESS_FILENAME_PATTERN.sub(lambda match: f"<redacted_file>.{match.group(1).lower()}", text)
     return text
@@ -148,6 +149,21 @@ def runtime_identity() -> dict[str, str]:
         "build_id": _BUILD_ID,
         "runtime_id": _RUNTIME_ID,
         "run_kind": "test" if os.environ.get(RUNTIME_ROOT_OVERRIDE_ENV) else "product",
+    }
+
+
+def new_operation_identity(feature_key: str, *, module_id: str = "") -> dict[str, str]:
+    """Create the durable identity for one real user-triggered business operation."""
+
+    normalized_feature = str(feature_key or "").strip()
+    if not normalized_feature:
+        raise ValueError("FEATURE_KEY_REQUIRED")
+    timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+    return {
+        "feature_key": normalized_feature,
+        "module_id": str(module_id or f"hdde.{normalized_feature}").strip(),
+        "operation_id": f"OP-{timestamp}-{uuid.uuid4().hex[:10].upper()}",
+        "trace_id": f"TRACE-{uuid.uuid4().hex[:12].upper()}",
     }
 
 
@@ -199,6 +215,7 @@ def build_exception_diagnostics(
     *,
     error_category: str,
     error_stage: str,
+    trace_id: str = "",
 ) -> dict[str, str]:
     """Create or reuse the diagnostic identity of one propagated root exception."""
 
@@ -239,7 +256,7 @@ def build_exception_diagnostics(
         "exception_type": exception_type,
         "code_location": code_location,
         "module": module,
-        "trace_id": f"TRACE-{uuid.uuid4().hex[:12].upper()}",
+        "trace_id": str(trace_id or f"TRACE-{uuid.uuid4().hex[:12].upper()}").strip(),
         "trace_summary": " <- ".join(
             f"{Path(frame.filename).resolve().relative_to(PROJECT_ROOT).as_posix()}:{frame.lineno}::{frame.name}"
             for frame in _project_frames(exc)[-3:]
@@ -265,6 +282,7 @@ def log_runtime_event(event: str, *, level: int = logging.INFO, **fields: Any) -
                 exception,
                 error_category=str(fields.get("error_category") or PRODUCT_ERROR),
                 error_stage=str(fields.get("error_stage") or fields.get("stage") or "unknown"),
+                trace_id=str(fields.get("trace_id") or ""),
             )
         )
     identity = runtime_identity()
@@ -284,7 +302,9 @@ def log_runtime_event(event: str, *, level: int = logging.INFO, **fields: Any) -
         "run_kind",
         "feature_key",
         "feature",
+        "module_id",
         "operation",
+        "operation_id",
         "task_id",
         "result_id",
         "delivery_id",
@@ -354,14 +374,28 @@ def log_runtime_event(event: str, *, level: int = logging.INFO, **fields: Any) -
 
 def related_runtime_events(
     *,
+    feature_key: str = "",
+    operation_id: str = "",
+    trace_id: str = "",
     task_id: str = "",
+    result_id: str = "",
+    delivery_id: str = "",
     batch_id: str = "",
     error_id: str = "",
     limit: int = 7,
 ) -> list[dict[str, Any]]:
     criteria = {
         key: str(value)
-        for key, value in (("task_id", task_id), ("batch_id", batch_id), ("error_id", error_id))
+        for key, value in (
+            ("feature_key", feature_key),
+            ("operation_id", operation_id),
+            ("trace_id", trace_id),
+            ("task_id", task_id),
+            ("result_id", result_id),
+            ("delivery_id", delivery_id),
+            ("batch_id", batch_id),
+            ("error_id", error_id),
+        )
         if value
     }
     if not criteria:
@@ -372,7 +406,7 @@ def related_runtime_events(
             for item in _RECENT_EVENTS
             if any(str(item.get(key) or "") == value for key, value in criteria.items())
         ]
-    return matches[-max(1, min(int(limit), 12)):]
+    return matches[-max(1, min(int(limit), 120)):]
 
 
 def initialize_file_logging(app_data_root: Path) -> dict[str, Any]:

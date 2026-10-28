@@ -26,7 +26,9 @@ from backend.image_compression_api import (
     register_image_compression_routes,
 )
 from engine.image_compression.common import optimise_png_data
+import engine.image_compression.delivery_options as delivery_options_module
 from engine.image_compression.contracts import RESULT_FIELD_NAMES
+from engine.output.metadata_writer import HDDE_SOFTWARE, read_hdde_metadata
 
 
 class ImageCompressionApiStage4Tests(unittest.TestCase):
@@ -119,6 +121,40 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         task = self.state["task_registry"][data["result"]["task_id"]]
         self.assertEqual(data["result"], task["result"].to_dict())
         self.assertEqual(data["task"]["task_id"], data["result"]["task_id"])
+        self.assertRegex(task["operation_id"], r"^OP-")
+        self.assertRegex(task["trace_id"], r"^TRACE-")
+        if isinstance(task.get("task_result"), dict):
+            self.assertEqual(task["task_result"]["operation_id"], task["operation_id"])
+            self.assertEqual(task["task_result"]["trace_id"], task["trace_id"])
+        if data["result"]["output_created"]:
+            output_path = Path(str(task["output_path"]))
+            self.assertEqual(read_hdde_metadata(output_path)["software"], HDDE_SOFTWARE)
+            self.assertTrue(task["result"].metadata_details["hdde_output_metadata"]["written"])
+        linked_events = [item for item in self.runtime_events if item.get("task_id") == task["task_id"]]
+        self.assertTrue(linked_events)
+        self.assertTrue(all(item.get("feature_key") == "image_compression" for item in linked_events))
+        self.assertTrue(all(item.get("operation_id") == task["operation_id"] for item in linked_events))
+        self.assertTrue(all(item.get("trace_id") == task["trace_id"] for item in linked_events))
+        return data
+
+    def execute_delivery_optimization(self, intake, *, target_format="PRESERVE_FORMAT"):
+        response = self.client.post("/api/image-compression/run", json={
+            "source_token": intake["source_token"],
+            "operation_mode": "DELIVERY_OPTIMIZATION",
+            "params": {"target_format": target_format},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()["data"]
+        self.assertEqual(set(data), {"task", "result", "ui"})
+        self.assertTrue(set(RESULT_FIELD_NAMES).issubset(data["result"]))
+        self.assertEqual(data["result"]["selection_policy"], "SINGLE_WINNER_QUALITY_V2")
+        self.assertIn("winner", data["result"])
+        self.assertLessEqual(len(data["result"]["candidates"]), 1)
+        self.assertEqual(data["result"]["public_output_count"], data["ui"]["public_output_count"])
+        record = self.state["task_registry"][data["result"]["task_id"]]
+        if not (target_format == "SMART_COMPRESSION" and intake["format"] == "PNG" and not record["source_has_real_transparency"]):
+            expected_format = "JPG" if intake["format"] == "JPEG" else intake["format"]
+            self.assertEqual({item["format"] for item in record["candidate_options"]}, {expected_format})
         return data
 
     def generate_feedback(self, result):
@@ -168,11 +204,12 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         with zipfile.ZipFile(package["display_path"]) as archive:
             self.assertEqual(set(archive.namelist()), expected)
 
-    def test_01_capabilities_three_modes(self):
+    def test_01_capabilities_four_modes(self):
         response = self.client.get("/api/image-compression/capabilities")
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
         self.assertEqual([item["value"] for item in data["modes"]], [
+            "DELIVERY_OPTIMIZATION",
             "LOSSLESS_COMPRESSION",
             "RESIZE_REDUCTION",
             "UPLOAD_ADAPTATION",
@@ -181,6 +218,210 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertFalse(data["jpeg_lossless_supported"])
         self.assertEqual(data["server_session_id"], self.state["server_session_id"])
         self.assertEqual(data["output_settings_endpoint"], "/api/image-compression/output-settings")
+
+    def test_01a_preserve_format_png_runs_only_png_chain_and_publishes_one_winner(self):
+        intake, _ = self.intake("opaque-business.png", "PNG", size=(160, 100), compress_level=0)
+        data = self.execute_delivery_optimization(intake)
+        result = data["result"]
+        record = self.state["task_registry"][result["task_id"]]
+        candidates = record["candidate_options"]
+        self.assertEqual({item["scheme_id"] for item in candidates}, {"png_lossless"})
+        self.assertEqual(result["public_output_count"], 1)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["winner_scheme_id"], result["selected_scheme_id"])
+        self.assertEqual(result["winner"]["quality_gate"]["status"], "PASS")
+        self.assertEqual(sum(bool(item.get("output_path")) for item in candidates), 1)
+        png = next(item for item in candidates if item["scheme_id"] == "png_lossless")
+        self.assertTrue(png["pixel_identical"])
+        self.assertTrue(png["lossless_verified"])
+        self.assertEqual(png["pixel_diff_count"], 0)
+        self.assertEqual(png["max_channel_diff"], 0)
+        self.assertEqual(png["verification_status"], "PASS")
+        self.assertEqual(png["source_size"], len(self.image_bytes("PNG", (160, 100), compress_level=0)))
+        self.assertEqual(png["output_size"], png["file_size"])
+        output = Path(result["output_path"])
+        self.assertTrue(output.is_file())
+        self.assertEqual(len([path for path in output.parent.iterdir() if path.is_file()]), 1)
+        png_record = next(item for item in record["candidate_options"] if item["scheme_id"] == "png_lossless")
+        verification = png_record["metadata_details"]["lossless_verification"]
+        optimisation = png_record["metadata_details"]["lossless_optimization"]
+        self.assertTrue(verification["metadata_verified"])
+        self.assertTrue(verification["icc_preserved"])
+        self.assertTrue(verification["dpi_preserved"])
+        self.assertTrue(verification["xmp_preserved"])
+        passing_sizes = [
+            item["output_size"]
+            for item in optimisation["evaluated_variants"]
+            if item["verification_status"] == "PASS"
+        ]
+        self.assertEqual(optimisation["best_size"], min(passing_sizes))
+        self.assertTrue(all(item["direct_source_lineage"] for item in record["candidate_options"]))
+        self.assertEqual(record["result_file"], result["output_path"])
+        self.assertEqual(record["task_result"]["selected_scheme_id"], result["selected_scheme_id"])
+
+    def test_01b_transparent_smart_png_never_creates_jpeg_candidates(self):
+        intake, _ = self.intake("transparent.png", "PNG", size=(120, 80), alpha=True)
+        data = self.execute_delivery_optimization(intake, target_format="SMART_COMPRESSION")
+        record = self.state["task_registry"][data["result"]["task_id"]]
+        candidates = record["candidate_options"]
+        png = next(item for item in candidates if item["scheme_id"] == "png_lossless")
+        jpgs = [item for item in candidates if item["format"] == "JPG"]
+        self.assertNotIn(data["result"]["winner_scheme_id"], {"jpg_high_quality", "jpg_balanced"})
+        self.assertEqual(jpgs, [])
+        self.assertFalse(png["alpha_optimized"])
+        png_record = next(item for item in record["candidate_options"] if item["scheme_id"] == "png_lossless")
+        self.assertTrue(png_record["metadata_details"]["lossless_verification"]["alpha_exact"])
+        self.assertTrue(png_record["metadata_details"]["lossless_verification"]["alpha_preserved"])
+
+    def test_01c_opaque_alpha_is_removed_only_after_rgba_identity_passes(self):
+        image = Image.new("RGBA", (128, 84), (12, 90, 180, 255))
+        stream = io.BytesIO()
+        image.save(stream, format="PNG", compress_level=0)
+        intake = self.intake_bytes(stream.getvalue(), "opaque-alpha.png")
+        data = self.execute_delivery_optimization(intake)
+        record = self.state["task_registry"][data["result"]["task_id"]]
+        png = next(item for item in record["candidate_options"] if item["scheme_id"] == "png_lossless")
+        self.assertEqual(data["result"]["winner_scheme_id"], "png_lossless")
+        self.assertTrue(png["alpha_optimized"])
+        self.assertTrue(png["pixel_identical"])
+        self.assertEqual(png["pixel_diff_count"], 0)
+        self.assertEqual(png["max_channel_diff"], 0)
+        with Image.open(png["output_path"]) as output:
+            output.load()
+            self.assertNotIn("A", output.getbands())
+
+    def test_01d_automatic_winner_updates_legacy_result_and_delivery_binding(self):
+        intake, _ = self.intake("select.png", "PNG", size=(144, 96), compress_level=0)
+        data = self.execute_delivery_optimization(intake)
+        result_id = data["task"]["result_id"]
+        self.assertEqual(data["result"]["selected_scheme_id"], data["result"]["winner_scheme_id"])
+        self.assertEqual(data["result"]["visual_review_status"], "NOT_REQUIRED")
+        self.assertTrue(data["result"]["delivery_eligible"])
+        self.assertEqual(data["result"]["output_path"], data["task"]["result_file"])
+        self.assertEqual(data["result"]["delivery_gate_status"], "DELIVERY_READY")
+        self.dirs["image_compression_output_dir"] = self.saved_output_root
+        center = self.client.get("/api/output-center/items")
+        self.assertEqual(center.status_code, 200, center.text)
+        unified = [item for item in center.json()["data"]["items"] if item.get("result_id") == result_id]
+        self.assertEqual(len(unified), 1)
+        self.assertEqual(unified[0]["file_name"], Path(data["result"]["output_path"]).name)
+        delivery = self.client.post("/api/smart-delivery/preflight", json={"result_ids": [result_id], "rules": {}})
+        self.assertEqual(delivery.status_code, 200, delivery.text)
+        self.assertTrue(delivery.json()["data"]["ready"])
+        executed = self.client.post("/api/smart-delivery/execute", json={
+            "plan_id": delivery.json()["data"]["plan_id"],
+            "confirmed": True,
+        })
+        self.assertEqual(executed.status_code, 200, executed.text)
+        delivered = executed.json()["data"]["results"][0]
+        registered_sha256 = data["result"]["output_sha256"]
+        self.assertEqual(delivered["registered_output_sha256"], registered_sha256)
+        self.assertEqual(delivered["source_sha256"], registered_sha256)
+        self.assertEqual(delivered["delivery_sha256"], registered_sha256)
+
+    def test_01e_png_selection_fails_closed_without_strict_evidence(self):
+        intake, _ = self.intake("strict-gate.png", "PNG", size=(90, 60), compress_level=0)
+        before = self.execute_delivery_optimization(intake)
+        record = self.state["task_registry"][before["result"]["task_id"]]
+        png = next(item for item in record["candidate_options"] if item["scheme_id"] == "png_lossless")
+        png["lossless_verified"] = False
+        response = self.client.post("/api/image-compression/select-candidate", json={
+            "task_id": before["result"]["task_id"],
+            "scheme_id": "png_lossless",
+        })
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "LOSSLESS_VERIFICATION_REQUIRED")
+
+    def test_01f_replaced_candidate_invalidates_registered_lossless_evidence(self):
+        intake, _ = self.intake("identity.png", "PNG", size=(90, 60), compress_level=0)
+        before = self.execute_delivery_optimization(intake)
+        task_id = before["result"]["task_id"]
+        record = self.state["task_registry"][task_id]
+        png = next(item for item in record["candidate_options"] if item["scheme_id"] == "png_lossless")
+        registered_sha256 = png["output_sha256"]
+        png_path = Path(png["output_path"])
+        Image.new("RGB", (90, 60), (240, 20, 40)).save(png_path, format="PNG")
+        self.assertNotEqual(hashlib.sha256(png_path.read_bytes()).hexdigest(), registered_sha256)
+
+        rejected = self.client.post("/api/image-compression/select-candidate", json={
+            "task_id": task_id,
+            "scheme_id": "png_lossless",
+        })
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["detail"]["code"], "RESULT_IDENTITY_MISMATCH")
+        self.assertEqual(png["status"], "INVALIDATED")
+        self.assertEqual(png["identity_status"], "RESULT_IDENTITY_MISMATCH")
+        self.assertFalse(png["delivery_eligible"])
+        self.assertFalse(record["result"].delivery_eligible)
+        self.assertEqual(record["result"].failure_code, "RESULT_IDENTITY_MISMATCH")
+
+        fallback = self.client.post("/api/image-compression/select-candidate", json={
+            "task_id": task_id,
+            "scheme_id": "png_lossless",
+        })
+        self.assertEqual(fallback.status_code, 409, fallback.text)
+        self.assertEqual(fallback.json()["detail"]["code"], "CANDIDATE_NOT_APPLICABLE")
+        self.assertEqual(record["winner_public"]["status"], "INVALIDATED")
+        self.assertEqual(record["winner_public"]["identity_status"], "RESULT_IDENTITY_MISMATCH")
+        self.assertFalse(record["winner_public"]["delivery_eligible"])
+        self.assertEqual(record["winner_public"]["quality_gate"]["status"], "FAIL")
+
+    def test_01g_keep_original_creates_no_result_or_formal_event(self):
+        noise = Image.effect_noise((320, 240), 80).convert("RGB")
+        stream = io.BytesIO()
+        noise.save(stream, format="JPEG", quality=45, optimize=True)
+        intake = self.intake_bytes(stream.getvalue(), "already-small.jpg", "image/jpeg")
+        data = self.execute_delivery_optimization(intake)
+        result = data["result"]
+        record = self.state["task_registry"][result["task_id"]]
+
+        self.assertEqual(result["winner_scheme_id"], "keep_original")
+        self.assertFalse(result["output_created"])
+        self.assertEqual(result["public_output_count"], 0)
+        self.assertEqual(data["task"]["result_id"], "")
+        self.assertIsNone(record.get("result_id"))
+        self.assertIsNone(record.get("task_result"))
+        events = [item for item in self.runtime_events if item.get("task_id") == result["task_id"]]
+        self.assertFalse(any(item["event"] == "RESULT_REGISTERED" for item in events))
+        succeeded = next(item for item in events if item["event"] == "PROCESS_SUCCEEDED")
+        self.assertEqual(succeeded["impact"], "no_output_required")
+
+    def test_01h_source_identity_mismatch_before_publish_registers_nothing(self):
+        intake, _ = self.intake("source-race.png", "PNG", size=(160, 100), compress_level=0)
+        source_path = Path(self.state["token_registry"][intake["source_token"]]["path"])
+        original_reader = delivery_options_module._read_source_identity
+        read_count = 0
+
+        def mutate_before_second_identity_read(path):
+            nonlocal read_count
+            read_count += 1
+            if read_count == 2:
+                Image.new("RGB", (160, 100), (240, 20, 40)).save(source_path, format="PNG")
+            return original_reader(path)
+
+        with patch(
+            "engine.image_compression.delivery_options._read_source_identity",
+            side_effect=mutate_before_second_identity_read,
+        ):
+            with self.assertRaisesRegex(Exception, "Source"):
+                self.client.post("/api/image-compression/run", json={
+                    "source_token": intake["source_token"],
+                    "operation_mode": "DELIVERY_OPTIMIZATION",
+                    "params": {},
+                })
+
+        record = next(item for item in self.state["task_registry"].values() if item["source_path"] == source_path)
+        self.assertEqual(record.get("failure_code"), "SOURCE_IDENTITY_MISMATCH")
+        self.assertEqual(record["error_context"].get("error_code"), "SOURCE_IDENTITY_MISMATCH")
+        self.assertFalse(record.get("result_id"))
+        self.assertIsNone(record.get("task_result"))
+        self.assertEqual(list(Path(record["output_dir"]).iterdir()), [])
+        events = [item for item in self.runtime_events if item.get("task_id") == record["task_id"]]
+        self.assertFalse(any(item["event"] == "RESULT_REGISTERED" for item in events))
+        self.assertTrue(any(
+            item["event"] == "PROCESS_FAILED" and item["impact"] == "formal_result_unavailable"
+            for item in events
+        ))
 
     def test_02_png_intake_stable_contract(self):
         intake, raw = self.intake("alpha.png", alpha=True)
@@ -611,7 +852,7 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         directory = Path(data["ui"]["output_directory"])
         output = Path(data["result"]["output_path"])
         self.assertEqual(directory.name, "尺寸缩小")
-        self.assertIn("_尺寸缩小_短边1080_", output.name)
+        self.assertEqual(output.name, "中文商业长图_影界压缩_270115.png")
         self.assertNotIn("compression_", output.name)
 
     def test_48_short_side_calculation_examples(self):
@@ -765,8 +1006,8 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertEqual(package_path.parent, self.saved_output_root.resolve() / "PNG无损压缩")
         self.assertTrue(package_path.is_file())
         self.assertTrue(package_path.name.endswith("_测试反馈包.zip"))
-        self.assertIn("_PNG无损压缩_", package_path.name)
-        self.assertRegex(package_path.name, r"_\d{8}-\d{6}_[a-f0-9]{4}_测试反馈包\.zip$")
+        self.assertIn("_影界压缩_270115_", package_path.name)
+        self.assertRegex(package_path.name, r"_[a-f0-9]{8}_测试反馈包\.zip$")
         self.assertEqual(hashlib.sha256(package_path.read_bytes()).hexdigest(), package["package_sha256"])
         self.assertEqual(self.client.get(package["download_url"]).status_code, 200)
         with zipfile.ZipFile(package_path) as archive:
@@ -805,8 +1046,8 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertNotEqual(first_path, second_path)
         self.assertTrue(first_path.is_file())
         self.assertTrue(second_path.is_file())
-        self.assertIn("_尺寸缩小_短边750_", first_path.name)
-        self.assertIn("_尺寸缩小_短边750_", second_path.name)
+        self.assertEqual(first_path.name, "同名海报_影界压缩_270115.png")
+        self.assertEqual(second_path.name, "同名海报_影界压缩_270115_02.png")
 
     def test_60_forged_source_and_preview_tokens_cannot_download_feedback_packages(self):
         intake, _ = self.intake("token-scope.png", size=(1200, 900), compress_level=0)
@@ -1134,6 +1375,9 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertEqual(task["source_path"], data["result"]["source_path"])
         self.assertEqual(task["status"], "completed")
         self.assertEqual(task["progress"], 100)
+        self.assertEqual(task["task_status"], "completed")
+        self.assertEqual(task["task_progress"], 100)
+        self.assertEqual(task["execution_state"], "completed")
         self.assertIsNone(task["failure_reason"])
         self.assertTrue(task["created_at"])
         self.assertTrue(task["completed_at"])
@@ -1169,6 +1413,9 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
 
         self.assertEqual(task["status"], "failed")
         self.assertNotEqual(task["progress"], 100)
+        self.assertEqual(task["task_status"], "failed")
+        self.assertEqual(task["task_progress"], task["progress"])
+        self.assertEqual(task["execution_state"], "failed")
         self.assertIsNone(task["output_path"])
         self.assertTrue(task["failure_reason"])
         self.assertEqual(task["failure_reason"], data["result"]["failure_reason"])

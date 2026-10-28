@@ -1,0 +1,15 @@
+影界 HDDE｜正式品牌资产包
+
+文件说明：
+- logo-light.png：浅色主题横向品牌Logo
+- logo-dark.png：深色主题横向品牌Logo
+- app-icon.png：软件内部核心品牌图标（透明背景）
+- desktop-icon-master.png：Windows桌面/EXE图标母版（浅色主版本）
+- hdde.ico：Windows多尺寸ICO（256/128/64/48/32/16）
+- splash-light.png：浅色启动界面
+- splash-dark.png：深色启动界面
+
+备注：
+1. 本包基于当前会话中已选定的蓝银光学品牌方案整理。
+2. 未生成SVG矢量文件，避免用位图伪装成SVG。
+3. 建议Codex只做尺寸适配、资源转换和代码接入，不重新设计Logo。

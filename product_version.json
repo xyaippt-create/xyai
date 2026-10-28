@@ -1,5 +1,6 @@
 {
-  "version": "0.5.4-dev",
-  "display_version": "V0.5.4-dev",
-  "release_name": "自动颜色校正开发版"
+  "version": "0.6.1-dev",
+  "display_version": "V0.6.1 开发版",
+  "release_name": "开发版",
+  "release_channel": "DEVELOPMENT"
 }

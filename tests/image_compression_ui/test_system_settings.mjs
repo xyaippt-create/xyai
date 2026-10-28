@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,12 +7,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
+process.env.HDDE_API_TARGET ||= "http://127.0.0.1:0";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const settingsPath = path.join(root, "src", "SystemSettingsPage.jsx");
 const shellPath = path.join(root, "src", "AppShell.jsx");
 const routesPath = path.join(root, "src", "appRoutes.js");
 const cssPath = path.join(root, "src", "index.css");
 const versionPath = path.join(root, "product_version.json");
+const qrAssetPath = path.join(root, "public", "assets", "contact", "wechat-qr.png");
 
 const settings = fs.readFileSync(settingsPath, "utf8");
 const shell = fs.readFileSync(shellPath, "utf8");
@@ -91,6 +95,33 @@ test("normal settings condense directory internals into one formal-directory sta
   });
 });
 
+test("settings exposes one platform-aware formal output root without compatibility directories", () => {
+  assert.equal(settingsModule.resolveFormalOutputRoot("D:\\影界文件"), "D:\\影界文件\\输出");
+  assert.equal(settingsModule.resolveFormalOutputRoot("D:\\影界文件\\"), "D:\\影界文件\\输出");
+  assert.equal(settingsModule.resolveFormalOutputRoot("/Users/hdde"), "/Users/hdde/输出");
+  assert.equal(settingsModule.resolveFormalOutputRoot("/"), "/输出");
+  assert.equal(settingsModule.resolveFormalOutputRoot(""), "");
+
+  assert.equal((settings.match(/label="正式输出根目录"/g) || []).length, 1);
+  assert.match(settings, /value=\{formalOutputRoot\}/);
+  assert.doesNotMatch(settings, /label="当前输出目录"/);
+  assert.doesNotMatch(settings, /1080P(?:画质增强|标准增强|安全增强)(?:兼容)?输出目录/);
+  assert.doesNotMatch(settings, /1080P标准增强|1080P安全增强/);
+  assert.doesNotMatch(settings, /value=\{workdir\.(?:output_dir|beta_output_dir)\}/);
+  assert.match(settings, /"选择新目录"/);
+  assert.match(settings, /"重新检测"/);
+  assert.match(settings, />\s*恢复默认\s*<\/button>/);
+  assert.ok(settings.indexOf('onClick={handleSelectFormalDirectory}') < settings.indexOf('onClick={handleRecheckFormalDirectory}'));
+  assert.ok(settings.indexOf('onClick={handleRecheckFormalDirectory}') < settings.indexOf('onClick={handleRestoreDefaultDirectory}'));
+  assert.match(settings, /disabled=\{directoryAction\.status === "loading" \|\| isDefaultFormalDirectory\}/);
+  assert.match(settings, /title=\{isDefaultFormalDirectory \? "当前已是默认目录" : undefined\}/);
+});
+
+test("system settings uses the configured same-origin API target without formal 8787 fallback", () => {
+  assert.match(settings, /const API_BASE = import\.meta\.env\.VITE_API_BASE_URL \|\| "";/);
+  assert.doesNotMatch(settings, /(?:localhost|127\.0\.0\.1):8787/);
+});
+
 test("unavailable formal directory blocks processing and directs the user to reselect", () => {
   const status = settingsModule.resolveDirectoryStatus("success", {
     directory_ready: false,
@@ -157,7 +188,7 @@ test("recheck calls the real workdir endpoint with explicit no-store semantics",
     globalThis.fetch = originalFetch;
   }
   assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /^http:\/\/localhost:8787\/api\/app\/workdir\?recheck=\d+$/);
+  assert.match(calls[0].url, /^\/api\/app\/workdir\?recheck=\d+$/);
   assert.equal(calls[0].options.cache, "no-store");
   assert.match(settings, /"重新检测"/);
   assert.match(settings, /handleRecheckFormalDirectory/);
@@ -197,6 +228,45 @@ test("recheck can replace blocked state with ready state without a page reload",
     globalThis.fetch = originalFetch;
   }
   assert.doesNotMatch(settings, /window\.location\.reload|location\.reload/);
+});
+
+test("restore default uses the backend authority and refreshes the current workdir", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          success: true,
+          message: "已恢复默认正式目录并通过校验。",
+          data: {
+            app_data_root: "D:\\影界文件",
+            formal_output_root: "D:\\影界文件\\输出",
+            default_app_data_root: "D:\\影界文件",
+            is_default_app_data_root: true,
+          },
+        };
+      },
+    };
+  };
+  try {
+    const result = await settingsModule.requestRestoreDefaultDirectory();
+    assert.equal(result.data.default_app_data_root, "D:\\影界文件");
+    assert.equal(result.data.formal_output_root, "D:\\影界文件\\输出");
+    assert.equal(result.data.is_default_app_data_root, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/app/workdir/reset-default");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.body, "{}");
+  assert.match(settings, /handleRestoreDefaultDirectory/);
+  assert.match(settings, /loadSettingsSnapshot\(\{ fresh: true \}\)/);
+  assert.doesNotMatch(settings, /const DEFAULT_(?:FORMAL|APP_DATA|OUTPUT)_ROOT/);
 });
 
 test("directory selection save failure keeps the old path and exposes the backend reason", async () => {
@@ -249,24 +319,46 @@ test("product and version facts are consolidated without engineering placeholder
   assert.equal((settings.match(/label="产品版本"/g) || []).length, 1);
 });
 
-test("system settings displays the unified V0.5.4-dev product version", () => {
-  assert.equal(version.version, "0.5.4-dev");
-  assert.equal(version.display_version, "V0.5.4-dev");
+test("system settings displays the authoritative test product version", () => {
+  const semanticVersion = version.version.match(/^\d+\.\d+\.\d+/)?.[0];
+  const releaseLabels = { DEVELOPMENT: "开发版", INTERNAL_BETA: "测试版" };
+  assert.ok(semanticVersion);
+  assert.equal(version.release_name, releaseLabels[version.release_channel]);
+  assert.equal(version.display_version, `V${semanticVersion} ${version.release_name}`);
   assert.match(settings, /PRODUCT_VERSION_LABEL/);
   assert.match(settings, /label="产品版本" value=\{health\.version \|\| PRODUCT_VERSION_LABEL\}/);
-  assert.match(settings, /label="当前构建" value=\{CURRENT_BUILD_ID\}/);
+  assert.doesNotMatch(settings, />测试版<\/HddeStatusPill>/);
+  assert.match(css, /\.hdde-settings-row__value-group \{[\s\S]*display: inline-flex;[\s\S]*flex-wrap: wrap;[\s\S]*gap: 8px;/);
+  assert.equal(settings.includes(version.display_version), false);
+  assert.doesNotMatch(settings, /当前构建|CURRENT_BUILD_ID|dirty|commit/i);
   assert.doesNotMatch(settings, /V0\.5\.3/);
 });
 
 test("current build identity is fixed for the running build and includes trace metadata", () => {
   const buildId = buildInfoModule.CURRENT_BUILD_ID;
-  assert.match(buildId, /^V0\.5\.4-dev\+(?:[0-9a-f]{7,12}|nogit)\.(?:clean|dirty|unknown)\.\d{8}T\d{9}Z$/);
+  assert.ok(buildId.startsWith(`V${version.version}+`));
+  assert.match(buildId, /\+(?:[0-9a-f]{7,12}|nogit)\.(?:clean|dirty|unknown)\.\d{8}T\d{9}Z$/);
   assert.equal(buildInfoModule.CURRENT_BUILD_ID, buildId);
 });
 
-test("settings identifies 1080P as the default delivery resolution", () => {
-  assert.match(settings, /label="默认交付分辨率" value=\{health\.target_resolution\}/);
-  assert.doesNotMatch(settings, /label="目标分辨率"/);
+test("system settings removes non-global delivery facts from product information", () => {
+  assert.doesNotMatch(settings, /label="默认交付分辨率"|label="目标分辨率"|label="当前输出格式"|health\.target_resolution|health\.outputFormats/);
+});
+
+test("product information uses the approved copyright, email, and byte-preserved QR asset", () => {
+  const qrAsset = fs.readFileSync(qrAssetPath);
+  assert.equal(crypto.createHash("sha256").update(qrAsset).digest("hex"), "29e1d202f73cc2290a9703885bed67dd94ae078c6244e5791295aae0c176e880");
+  assert.equal(qrAsset.readUInt32BE(16), 1254);
+  assert.equal(qrAsset.readUInt32BE(20), 1254);
+  assert.match(settings, /label="版权信息" value="© 2026 雪原PPT设计·品牌视觉"/);
+  assert.match(settings, /label="官方邮箱" value="xueyaippt@outlook\.com"/);
+  assert.doesNotMatch(settings, /官方联系方式|微信 xuey_aippt/);
+  assert.match(settings, /src="\/assets\/contact\/wechat-qr\.png"/);
+  assert.match(settings, /alt="影界 HDDE 官方微信二维码"/);
+  assert.match(settings, /width="104"[\s\S]*height="104"/);
+  assert.match(settings, /<figcaption>扫码联系<\/figcaption>/);
+  assert.doesNotMatch(settings, /data:image\/|base64/);
+  assert.match(css, /\.hdde-settings-contact-qr img \{[\s\S]*width: 104px;[\s\S]*height: 104px;[\s\S]*object-fit: contain;/);
 });
 
 test("settings keeps technical research history out of the primary product surface", () => {

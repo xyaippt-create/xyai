@@ -88,6 +88,22 @@ test("无候选不复制原图且不显示复核和打开目录", () => {
   assert.equal(state.showOpenFolder, false);
 });
 
+test("无需处理的原图不冒充已确认候选结果", () => {
+  const state = noCandidateUiState({
+    technical_status: "NO_PROCESSING_NEEDED",
+    output_created: false,
+    candidate_delivery_role: "SOURCE_NO_PROCESSING",
+    delivery_gate_status: "DELIVERY_READY",
+    visual_review_status: "NOT_REQUIRED",
+  });
+
+  assert.equal(state.sourceNoProcessing, true);
+  assert.equal(state.candidateDeliveryReady, false);
+  assert.equal(state.hasCandidate, false);
+  assert.equal(state.showOpenFolder, false);
+  assert.match(state.message, /原图已满足要求/);
+});
+
 test("JPEG无损被执行前安全阻止且模式不自动切换", () => {
   const request = plan({ mode: "LOSSLESS_COMPRESSION" });
   assert.equal(request.valid, false);

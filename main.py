@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import MutableMapping
 from datetime import datetime
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from runtime import APP_VERSION, PRODUCT_VERSION
 from runtime.crash_handler import handle_exception, install_global_exception_hook
 from runtime.error_dialog import show_info_dialog
 from runtime.startup_check import run_startup_check
-from runtime.system_info import is_pyinstaller
+from runtime.system_info import is_pyinstaller, resource_root, runtime_settings_path
 from engine.diagnostics.runtime_logging import (
     CONFIGURATION_ERROR,
     ENVIRONMENT_ERROR,
@@ -31,9 +32,12 @@ from engine.diagnostics.runtime_logging import (
     configure_runtime_identity,
     initialize_file_logging,
     log_runtime_event,
+    new_operation_identity,
     related_runtime_events,
+    runtime_logging_state,
 )
 from engine.storage.app_data_migration import execute_migration_cycle, resolve_migrated_formal_output_path
+from engine.storage.shared_task_registry import SharedTaskRegistry, SharedTaskRegistryError
 from engine.image_processing_routing.four_k_v1 import (
     FOUR_K_V1_MODE,
     FOUR_K_V1_OUTPUT_DIRECTORY,
@@ -70,13 +74,14 @@ SUPPORTED_MODES = [
     "ppt_business",
 ]
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
+PROJECT_ROOT = resource_root()
+SETTINGS_PATH = runtime_settings_path()
+_VALIDATION_FORMAL_ROOT: Path | None = None
 APP_DATA_ROOT_NAME = "\u5f71\u754cHDDE"
 LEGACY_WORK_DIR_NAME = "\u5f71\u754c\u6587\u4ef6"
 OUTPUT_ROOT_RELATIVE = Path("\u8f93\u51fa")
 DIAGNOSTIC_ROOT_RELATIVE = Path("\u8bca\u65ad")
-DEFAULT_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u6807\u51c6\u589e\u5f3a"
+DEFAULT_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u753b\u8d28"
 DEFAULT_INPUT_DIR_NAME = DEFAULT_OUTPUT_DIR_NAME / ".\u8f93\u5165\u7f13\u5b58"
 DEFAULT_REPORT_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u62a5\u544a"
 DEFAULT_FEEDBACK_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u53cd\u9988\u5305"
@@ -84,10 +89,10 @@ DEFAULT_TMP_DIR_NAME = OUTPUT_ROOT_RELATIVE / "\u56fe\u7247\u538b\u7f29" / ".\u8
 DEFAULT_DELIVERY_PACKAGE_DIR_NAME = DEFAULT_FEEDBACK_DIR_NAME
 DEFAULT_CONFIG_DIR_NAME = Path(".")
 DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT = Path("D:/\u5f71\u754c\u6587\u4ef6/\u8f93\u51fa/\u56fe\u7247\u538b\u7f29")
-DEFAULT_BETA_UPLOAD_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u5b89\u5168\u589e\u5f3a" / ".\u8f93\u5165\u7f13\u5b58"
+DEFAULT_BETA_UPLOAD_DIR_NAME = DEFAULT_OUTPUT_DIR_NAME / ".\u8f93\u5165\u7f13\u5b58"
 LEGACY_SAFE_BETA_INPUT_DIR_NAME = DEFAULT_BETA_UPLOAD_DIR_NAME
-LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "1080P\u5b89\u5168\u589e\u5f3a"
-LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME = DEFAULT_FEEDBACK_DIR_NAME / "1080P\u5b89\u5168\u589e\u5f3a"
+LEGACY_SAFE_BETA_OUTPUT_DIR_NAME = DEFAULT_OUTPUT_DIR_NAME
+LEGACY_SAFE_BETA_FEEDBACK_DIR_NAME = DEFAULT_FEEDBACK_DIR_NAME / "1080P\u753b\u8d28"
 IMAGE_COMPRESSION_OUTPUT_DIR_NAME = OUTPUT_ROOT_RELATIVE / "\u56fe\u7247\u538b\u7f29"
 RUNTIME_LOG_DIR_NAME = DIAGNOSTIC_ROOT_RELATIVE / "\u65e5\u5fd7"
 REQUIRED_FORMAL_SUBDIRECTORIES = (
@@ -274,6 +279,10 @@ def _initial_formal_app_data_root() -> Path:
     return Path.home() / APP_DATA_ROOT_NAME
 
 
+def _formal_path_key(path: Path | str) -> str:
+    return os.path.normcase(os.path.normpath(str(Path(path).expanduser().resolve())))
+
+
 def _path_is_within(path: Path, root: Path) -> bool:
     try:
         resolved_path = path.resolve()
@@ -286,6 +295,8 @@ def _path_is_within(path: Path, root: Path) -> bool:
 def _formal_root_validation_error(path: Path) -> tuple[str, str]:
     if not path.is_absolute():
         return "FORMAL_DIRECTORY_PATH_INVALID", "正式目录必须使用绝对路径。"
+    if _VALIDATION_FORMAL_ROOT is not None and path.resolve() == _VALIDATION_FORMAL_ROOT:
+        return "", ""
     forbidden_roots = [PROJECT_ROOT, Path.cwd()]
     for name in ("TEMP", "TMP"):
         value = str(os.environ.get(name) or "").strip()
@@ -300,7 +311,11 @@ def resolve_app_data_root(settings: dict | None = None) -> dict:
     settings = settings if isinstance(settings, dict) else _read_settings_file_safely()
     configured = str(settings.get("app_data_root") or "").strip()
     saved = str(settings.get("last_app_data_root") or "").strip()
-    if configured:
+    if _VALIDATION_FORMAL_ROOT is not None:
+        source = "validation_formal_root"
+        candidate = _VALIDATION_FORMAL_ROOT
+        first_initialization = not candidate.exists()
+    elif configured:
         source = "user_config"
         candidate = Path(configured).expanduser()
         first_initialization = False
@@ -642,7 +657,7 @@ def load_settings(load_status: dict | None = None) -> dict:
     return settings
 
 
-def read_frontend_build_identity(project_root: Path | None = None, display_version: str = APP_VERSION) -> dict:
+def read_frontend_build_identity(project_root: Path | None = None, build_version: str = f"V{PRODUCT_VERSION}") -> dict:
     root = Path(project_root or PROJECT_ROOT)
     dist_root = root / "dist"
     index_path = dist_root / "index.html"
@@ -704,7 +719,7 @@ def read_frontend_build_identity(project_root: Path | None = None, display_versi
             "reason": str(exc),
         }
     pattern = re.compile(
-        rf"{re.escape(display_version)}\+(?:[0-9a-f]{{7,12}}|nogit)\.(?:clean|dirty|unknown)\.\d{{8}}T\d{{9}}Z"
+        rf"{re.escape(build_version)}\+(?:[0-9a-f]{{7,12}}|nogit)\.(?:clean|dirty|unknown)\.\d{{8}}T\d{{9}}Z"
     )
     build_ids = sorted(set(pattern.findall(asset_text)))
     if len(build_ids) != 1:
@@ -929,6 +944,16 @@ def make_task_id() -> str:
     return f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
 
+def task_created_order_key(item: dict) -> tuple[int, float | str, str]:
+    """Return a stable newest-first key across string and datetime timestamps."""
+    raw_value = item.get("created_at") or item.get("updated_at") or ""
+    try:
+        parsed = raw_value if isinstance(raw_value, datetime) else datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
+        return 1, parsed.timestamp(), str(item.get("task_id") or "")
+    except (TypeError, ValueError, OSError):
+        return 0, str(raw_value), str(item.get("task_id") or "")
+
+
 def cleanup_input_cache(input_dir: Path, max_age_days: int = 0, max_files: int = 0) -> dict:
     """Reserved V0.4 cache cleanup hook.
 
@@ -980,7 +1005,7 @@ def build_web_app():
     output_test_dir = runtime_root / "test"
     for directory in (output_formal_dir, output_work_dir, output_debug_dir, output_test_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    task_registry: dict[str, dict] = {}
+    task_registry: MutableMapping[str, dict] = SharedTaskRegistry(get_app_data_root())
 
     app = FastAPI(title="VisualMasterPro V0.3 API", version=APP_VERSION)
     app.add_middleware(
@@ -1020,6 +1045,7 @@ def build_web_app():
             output_format=task["output_format"],
             initial_timing=task.get("debug_timing"),
             debug_keep_intermediate=task.get("debug_keep_intermediate", False),
+            original_filename=task.get("original_filename") or task.get("fileName"),
         )
         final_path = result["final_output_path"]
         main_path = result["main_output_path"]
@@ -1393,7 +1419,14 @@ def build_web_app():
         input_hash = sha256_file(saved_path)
         input_size_bytes = saved_path.stat().st_size
         keep_intermediate = parse_bool_value(debug_keep_intermediate) or parse_bool_value(debug_mode)
-        output_plan = build_output_plan(saved_path, output_root, output_profile, requested_output_format, keep_intermediate)
+        output_plan = build_output_plan(
+            saved_path,
+            output_root,
+            output_profile,
+            requested_output_format,
+            keep_intermediate,
+            original_filename=upload_name,
+        )
         expected_output_path = output_plan["paths"]["final"]
         task = {
             "taskId": DEFAULT_TASK_ID,
@@ -1410,6 +1443,7 @@ def build_web_app():
             "selected_output_profile": output_plan["selected_output_profile"],
             "selected_output_format": output_plan["selected_output_format"],
             "fileName": upload_name,
+            "original_filename": upload_name,
             "createdAt": datetime.now().isoformat(timespec="seconds"),
             "input_hash": input_hash,
             "input_size_bytes": input_size_bytes,
@@ -1546,7 +1580,7 @@ def build_web_app():
 
 def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PORT):
     runtime_id = begin_runtime(product_version=APP_VERSION)
-    build_identity = read_frontend_build_identity(PROJECT_ROOT, APP_VERSION)
+    build_identity = read_frontend_build_identity(PROJECT_ROOT, f"V{PRODUCT_VERSION}")
     configure_runtime_identity(
         product_version=APP_VERSION,
         build_id=build_identity["build_id"] or "unavailable",
@@ -1565,14 +1599,25 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     )
     try:
         from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+        from fastapi.exception_handlers import http_exception_handler
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     except ImportError as exc:
         raise RuntimeError("缺少 FastAPI 服务依赖，请先安装 requirements.txt。") from exc
 
     from backend.v036_output_core import build_output_plan, sha256_file
-    from backend.image_compression_api import register_image_compression_routes
-    from engine.diagnostics.feedback_bundle import generate_feedback_bundle
+    from backend.image_compression_api import batch_naming_delivery_fact_key, register_image_compression_routes
+    from engine.storage.result_reuse import (
+        ResultReuseError,
+        resolve_reusable_result_source,
+        result_lineage_fields,
+    )
+    from engine.diagnostics.feedback_bundle import (
+        generate_feedback_bundle,
+        normalize_evidence_consent,
+        normalize_feedback_evaluation,
+        validate_feedback_bundle,
+    )
     from engine.diagnostics.feedback_context import (
         RECENT_FEATURE_COVERAGE,
         build_feedback_context,
@@ -1651,7 +1696,23 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     default_output_root = initial_user_dirs["normal_output_dir"]
     output_formal_dir = default_output_root
 
-    task_registry: dict[str, dict] = {}
+    try:
+        task_registry: MutableMapping[str, dict] = SharedTaskRegistry(initial_user_dirs["app_data_root"])
+        task_registry.reconcile_file_availability(
+            lambda raw_path: resolve_migrated_formal_output_path(raw_path, initial_user_dirs["app_data_root"])
+        )
+    except SharedTaskRegistryError as exc:
+        log_runtime_event(
+            "SHARED_TASK_REGISTRY_LOAD_FAILED",
+            level=logging.ERROR,
+            stage="shared_task_registry_load",
+            result="failed",
+            error_category=PRODUCT_ERROR,
+            reason=str(exc),
+            impact="formal_task_registration_blocked",
+            action="inspect_shared_task_registry",
+        )
+        raise RuntimeError("统一任务事实源无法安全加载。") from exc
     upload_file_index: dict[str, Path] = {}
     output_file_index: dict[str, Path] = {}
     background_tasks: dict[str, asyncio.Task] = {}
@@ -1659,6 +1720,78 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     task_terminal_events: set[str] = set()
     latest_task_id = {"value": None}
     feedback_context_snapshots: dict[str, dict] = {}
+
+    restored_runtime_tasks: dict[str, dict] = {}
+    for restored_task in task_registry.values():
+        if not isinstance(restored_task, dict) or str(restored_task.get("record_kind") or "task") != "task":
+            continue
+        restored_task_id = str(restored_task.get("task_id") or "").strip()
+        if restored_task_id:
+            restored_runtime_tasks[restored_task_id] = restored_task
+    for restored_task_id, restored_task in restored_runtime_tasks.items():
+        restored_status = str(restored_task.get("task_status") or restored_task.get("status") or "").strip().lower()
+        restored_feature = str(restored_task.get("feature_key") or "").strip()
+        restored_result = restored_task.get("task_result") or restored_task.get("result") or {}
+        has_formal_result = bool(
+            restored_task.get("result_id")
+            or (isinstance(restored_result, dict) and restored_result.get("result_id"))
+        )
+        if (
+            restored_feature not in {
+                ENHANCEMENT_1080P_FEATURE_KEY,
+                ENHANCEMENT_4K_FEATURE_KEY,
+                "image_compression",
+            }
+            or restored_status not in {"pending", "queued", "processing", "running"}
+            or not bool(restored_task.get("execution_started"))
+            or has_formal_result
+        ):
+            continue
+        interrupted_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        interrupted_task = dict(restored_task)
+        interrupted_progress = max(
+            0,
+            min(99, int(interrupted_task.get("task_progress") or interrupted_task.get("progress") or 0)),
+        )
+        interrupted_task.update(
+            {
+                "status": "failed",
+                "task_status": "failed",
+                "progress": interrupted_progress,
+                "task_progress": interrupted_progress,
+                "execution_state": "interrupted",
+                "processing_stage": "interrupted_by_restart",
+                "error_code": "TASK_INTERRUPTED_BY_RESTART",
+                "error_message": "应用上次退出前任务未完成，请重新选择图片处理。",
+                "failure_reason": "应用上次退出前任务未完成，请重新选择图片处理。",
+                "completed_at": interrupted_at,
+                "updated_at": interrupted_at,
+            }
+        )
+        lifecycle = list(interrupted_task.get("lifecycle") or [])
+        lifecycle.append(
+            {
+                "task_id": restored_task_id,
+                "status": "failed",
+                "progress": interrupted_progress,
+                "recorded_at": interrupted_at,
+                "reason": "TASK_INTERRUPTED_BY_RESTART",
+            }
+        )
+        interrupted_task["lifecycle"] = lifecycle
+        task_registry[restored_task_id] = interrupted_task
+        log_runtime_event(
+            "TASK_INTERRUPTED_AFTER_RESTART",
+            level=logging.WARNING,
+            stage="task_runtime_reconciliation",
+            result="failed",
+            error_category=PRODUCT_ERROR,
+            task_id=restored_task_id,
+            status="failed",
+            reason="TASK_INTERRUPTED_BY_RESTART",
+            impact="orphaned_task_moved_out_of_current_processing",
+            action="select_source_and_process_again",
+        )
 
     app = FastAPI(title=f"VisualMasterPro / Yingjie {APP_VERSION} API", version=PRODUCT_VERSION)
     app.state.runtime_task_start_times = task_start_times
@@ -1678,6 +1811,69 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         allow_headers=["*"],
     )
 
+    feedback_target_fields = (
+        "feature_key",
+        "module_id",
+        "operation_id",
+        "trace_id",
+        "task_id",
+        "result_id",
+        "delivery_id",
+        "batch_id",
+        "route",
+        "stage",
+        "status",
+        "error_id",
+        "error_code",
+        "error_fingerprint",
+    )
+    feedback_target_strong_fields = (
+        "operation_id",
+        "trace_id",
+        "task_id",
+        "result_id",
+        "delivery_id",
+        "batch_id",
+        "error_id",
+    )
+
+    def normalize_feedback_target(value: object, *, required: bool = False) -> dict:
+        if value in (None, "") and not required:
+            return {}
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="问题反馈目标无效。")
+        unknown_fields = sorted(str(key) for key in value if key not in feedback_target_fields)
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"问题反馈目标包含未知字段：{', '.join(unknown_fields)}。")
+        normalized = {
+            field: str(value.get(field) or "").strip()[: (200 if field == "route" else 180)]
+            for field in feedback_target_fields
+            if str(value.get(field) or "").strip()
+        }
+        feature_key = normalized.get("feature_key", "")
+        if feature_key not in RECENT_FEATURE_COVERAGE:
+            raise HTTPException(status_code=400, detail="问题反馈目标功能来源无效。")
+        if not any(normalized.get(field) for field in feedback_target_strong_fields):
+            raise HTTPException(status_code=400, detail="问题反馈目标缺少业务事实引用。")
+        return normalized
+
+    def build_feedback_target(**fields: object) -> dict:
+        return normalize_feedback_target(
+            {key: value for key, value in fields.items() if key in feedback_target_fields and value not in (None, "")},
+            required=True,
+        )
+
+    @app.exception_handler(HTTPException)
+    async def hdde_http_exception_handler(request: Request, exc: HTTPException):
+        feedback_target = getattr(exc, "hdde_feedback_target", None)
+        if not feedback_target:
+            return await http_exception_handler(request, exc)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail, "feedback_target": feedback_target},
+            headers=exc.headers,
+        )
+
     def _finish_image_task(
         task_id: str,
         *,
@@ -1693,6 +1889,10 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         error_category: str = "",
         phase_event: str = "",
         purpose: str = "1080P_DELIVERY",
+        feature_key: str = "",
+        module_id: str = "",
+        operation_id: str = "",
+        trace_id: str = "",
         level: int = logging.INFO,
         exception: BaseException | None = None,
     ) -> float | None:
@@ -1701,6 +1901,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         timing_anchor = started_at if started_at is not None else task_start_times.get(task_id, time.monotonic())
         duration_ms = round((time.monotonic() - timing_anchor) * 1000, 3)
         task_terminal_events.add(task_id)
+        task_record = task_registry.get(task_id) or {}
         common_fields = {
             "stage": stage,
             "result": result,
@@ -1713,26 +1914,28 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             "reason": reason,
             "impact": impact,
             "action": action,
+            "feature_key": task_record.get("feature_key") or feature_key,
+            "module_id": task_record.get("module_id") or module_id,
+            "operation_id": task_record.get("operation_id") or operation_id,
+            "trace_id": task_record.get("trace_id") or trace_id,
         }
         if exception is not None:
             diagnostics = build_exception_diagnostics(
                 exception,
                 error_category=error_category or PRODUCT_ERROR,
                 error_stage=stage,
+                trace_id=str(task_record.get("trace_id") or trace_id),
             )
             common_fields.update(diagnostics)
-            task_record = task_registry.get(task_id)
             if isinstance(task_record, dict):
                 task_record["error_context"] = dict(diagnostics)
         try:
             if phase_event:
                 log_runtime_event(phase_event, level=level, **common_fields)
             log_runtime_event(event, level=level, **common_fields)
-            task_record = task_registry.get(task_id) or {}
             log_runtime_event(
                 "PROCESS_SUCCEEDED" if result == "success" else "PROCESS_FAILED",
                 level=level,
-                feature_key=task_record.get("feature_key") or "",
                 result_id=task_record.get("result_id") or "",
                 status="completed" if result == "success" else ("failed" if result == "failed" else result),
                 **common_fields,
@@ -1763,17 +1966,26 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         feature_key = str(task.get("feature_key") or "")
         source_path = Path(task["input_path"]).resolve()
         resolved_result = final_path.resolve()
+        if not resolved_result.is_file():
+            raise RuntimeError("FORMAL_RESULT_IMAGE_NOT_FOUND")
+        output_sha256 = sha256_file(resolved_result)
+        lineage_fields = result_lineage_fields(task)
         task_result = task.get("task_result") if isinstance(task.get("task_result"), dict) else {}
         task_result.update(
             {
                 "result_id": result_id,
                 "task_id": task_id,
                 "feature_key": feature_key,
+                "module_id": task.get("module_id") or "",
+                "operation_id": task.get("operation_id") or "",
+                "trace_id": task.get("trace_id") or "",
                 "source": str(source_path),
                 "source_path": str(source_path),
                 "result_file": str(resolved_result),
                 "output_path": str(resolved_result),
+                "output_sha256": output_sha256,
                 "status": "completed",
+                **lineage_fields,
             }
         )
         task.update(
@@ -1782,14 +1994,22 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "source": str(source_path),
                 "source_path": source_path,
                 "result_file": str(resolved_result),
+                "output_path": str(resolved_result),
+                "output_sha256": output_sha256,
                 "task_result": task_result,
             }
         )
+        # The formal Result fact must be durable before RESULT_REGISTERED is
+        # observable by downstream Delivery and Output Center consumers.
+        task_registry[task_id] = task
         log_runtime_event(
             "RESULT_REGISTERED",
             stage="result_registry",
             result="success",
             feature_key=feature_key,
+            module_id=task.get("module_id") or "",
+            operation_id=task.get("operation_id") or "",
+            trace_id=task.get("trace_id") or "",
             task_id=task_id,
             result_id=result_id,
             status="completed",
@@ -1819,6 +2039,57 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "cleanup_failures": user_dirs.get("cleanup_failures") or [],
             },
         )
+
+    def resolve_result_asset(result_id: str, *, include_webp: bool = False) -> dict:
+        user_dirs = require_directory_ready()
+        try:
+            return resolve_reusable_result_source(
+                task_registry,
+                result_id,
+                Path(user_dirs["app_data_root"]),
+                max_bytes=50 * 1024 * 1024,
+                allowed_suffixes=frozenset({".png", ".jpg", ".jpeg", ".webp"} if include_webp else {".png", ".jpg", ".jpeg"}),
+            )
+        except ResultReuseError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.get("/api/result-assets/{result_id}")
+    async def get_result_asset(result_id: str):
+        from PIL import Image
+
+        source = resolve_result_asset(result_id, include_webp=True)
+        path = Path(source["source_result_path"])
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+                image_format = str(image.format or path.suffix.lstrip(".")).upper()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "RESULT_REUSE_DECODE_FAILED", "message": "原结果文件已损坏或无法解码。"},
+            ) from exc
+        return {
+            "success": True,
+            "data": {
+                **result_lineage_fields(source),
+                "file_name": source["source_result_file_name"],
+                "size_bytes": source["source_result_size_bytes"],
+                "width": int(width),
+                "height": int(height),
+                "format": image_format,
+                "preview_url": f"/api/result-assets/{urllib.parse.quote(str(result_id), safe='')}/file",
+            },
+        }
+
+    @app.get("/api/result-assets/{result_id}/file")
+    async def get_result_asset_file(result_id: str):
+        source = resolve_result_asset(result_id, include_webp=True)
+        path = Path(source["source_result_path"])
+        media_type = "image/webp" if path.suffix.lower() == ".webp" else "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     def normalize_output_dir_text(value: str | None) -> str:
         return str(value or "").strip().strip('"').strip()
@@ -2002,7 +2273,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     def feedback_runtime_provider() -> dict:
         formal_root = read_only_formal_root_status(initial_user_dirs)
         runtime_ready = bool(settings_load_status["status"] == "loaded" and formal_root["directory_ready"])
-        log_path = Path(initial_user_dirs["runtime_log_dir"]) / "hdde.log"
+        active_log_path = str(runtime_logging_state().get("path") or "").strip()
+        log_path = Path(active_log_path) if active_log_path else Path(initial_user_dirs["runtime_log_dir"]) / "hdde.log"
         error_code = formal_root["error_code"] or ("SETTINGS_NOT_LOADED" if settings_load_status["status"] != "loaded" else "")
         return {
             "app_version": APP_VERSION,
@@ -2030,8 +2302,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         user_dirs_provider=require_directory_ready,
         output_settings_provider=compression_output_settings_provider,
         color_output_settings_provider=lambda: {
-            "built_in_default_root": str(Path(settings_data["app_data_root"]) / "输出"),
-            "saved_default_root": str(Path(settings_data["app_data_root"]) / "输出"),
+            "built_in_default_root": str(Path(initial_user_dirs["app_data_root"]) / "输出"),
+            "saved_default_root": str(Path(initial_user_dirs["app_data_root"]) / "输出"),
         },
         output_default_saver=save_compression_default_output_root,
         output_dir_validator=lambda value: validate_output_dir_value(value, source_hint="image_compression"),
@@ -2050,9 +2322,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         runtime_event_logger=log_runtime_event,
     )
 
-    from backend.image_diagnosis_api import register_image_diagnosis_routes
+    from backend.batch_watermark_api import register_batch_watermark_routes
 
-    register_image_diagnosis_routes(
+    register_batch_watermark_routes(
         app,
         user_dirs_provider=require_directory_ready,
         shared_task_registry=task_registry,
@@ -2131,21 +2403,35 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             "warnings": [],
         }
 
-    def public_task(task: dict) -> dict:
+    def public_task(task: dict, user_dirs: dict | None = None) -> dict:
         result = dict(task)
         result.pop("formal_root", None)
-        formal_root = Path(current_user_dirs()["app_data_root"])
+        # Reference intake is private context, not another public Result source.
+        result.pop("reference_metadata", None)
+        result.pop("reference_preview_token", None)
+        user_dirs = user_dirs or current_user_dirs()
+        formal_root = Path(user_dirs["app_data_root"])
         for key in ("input_path", "source_path", "result_file", "output_root", "expected_output_path", "output_path"):
-            if key in result and result[key] is not None:
+            if key in result and result[key] not in (None, ""):
                 result[key] = str(resolve_migrated_formal_output_path(result[key], formal_root))
         result["taskId"] = result.get("task_id")
         result["status"] = result.get("task_status") or result.get("status")
         result["task_status"] = result["status"]
         result["task_progress"] = result.get("task_progress", result.get("progress", 0))
         result["streamEndpoint"] = f"/api/v1/tasks/{result.get('task_id')}/stream"
-        result["originalUrl"] = result.get("source_preview_url") or public_file_url(
+        task_id = str(result.get("task_id") or "")
+        task_result = result.get("task_result") if isinstance(result.get("task_result"), dict) else {}
+        source_path = result.get("source_path") or result.get("input_path") or task_result.get("source_path")
+        source_preview_url = str(result.get("source_preview_url") or "")
+        if task_id and source_path and (
+            not source_preview_url or source_preview_url.startswith("/api/image-compression/preview/")
+        ):
+            source_preview_url = f"/api/v1/tasks/{urllib.parse.quote(task_id, safe='')}/source-file"
+        if source_preview_url:
+            result["source_preview_url"] = source_preview_url
+        result["originalUrl"] = source_preview_url or public_file_url(
             "uploads",
-            Path(result.get("input_path") or result.get("source_path") or "").name,
+            Path(source_path or "").name,
         )
         if result.get("task_result"):
             filename = result["task_result"].get("output_filename")
@@ -2157,11 +2443,36 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             if expected:
                 result["enhancedUrl"] = public_file_url("outputs", Path(expected).name)
                 result["final_output_url"] = result["enhancedUrl"]
-        if result.get("result_id") and result.get("task_id") and result.get("result_file"):
-            result["final_output_url"] = f"/api/v1/tasks/{urllib.parse.quote(str(result['task_id']), safe='')}/result-file"
+        result_action = str(result.get("result_action") or task_result.get("result_action") or "").upper()
+        output_selected = str(result.get("output_selected") or task_result.get("output_selected") or "").upper()
+        original_selected = result_action == "ACCEPT_ORIGINAL" or output_selected == "ORIGINAL"
+        result_path = result.get("result_file") or result.get("output_path") or task_result.get("output_path")
+        explicit_output_exists = result.get("final_output_exists")
+        if explicit_output_exists is None:
+            explicit_output_exists = task_result.get("final_output_exists")
+        final_output_exists = (
+            bool(explicit_output_exists)
+            if explicit_output_exists is not None
+            else bool(result_path and Path(result_path).is_file())
+        )
+        if original_selected:
+            final_output_exists = False
+            result["enhancedUrl"] = None
+            result["preview_output_url"] = None
+            result["final_output_url"] = None
+        elif result.get("result_id") and task_id and result_path and final_output_exists:
+            result_file_url = f"/api/v1/tasks/{urllib.parse.quote(task_id, safe='')}/result-file"
+            result["enhancedUrl"] = result_file_url
+            result["preview_output_url"] = result_file_url
+            result["final_output_url"] = result_file_url
+            if task_result:
+                public_task_result = dict(task_result)
+                public_task_result["preview_output_url"] = result_file_url
+                public_task_result["final_output_url"] = result_file_url
+                result["task_result"] = public_task_result
+        result["final_output_exists"] = final_output_exists
         result.setdefault("main_output_url", None)
         result.setdefault("optimized_output_url", None)
-        result.setdefault("final_output_exists", False)
         return result
 
     def resolve_public_file(kind: str, filename: str) -> Path:
@@ -2235,7 +2546,11 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         existing = background_tasks.get(task_id)
         if existing and not existing.done():
             return
+        claim = getattr(task_registry, "claim_task_execution", None)
+        if callable(claim) and not claim(str(task_id)):
+            return
         task["execution_started"] = True
+        task["execution_state"] = "scheduled"
         background_tasks[task_id] = asyncio.create_task(run_task_background(task_id))
 
     def run_4k_v1_pipeline(task: dict) -> dict:
@@ -2250,6 +2565,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             stage="engine_adapter",
             result="started",
             feature_key=task.get("feature_key") or ENHANCEMENT_4K_FEATURE_KEY,
+            module_id=task.get("module_id") or "",
+            operation_id=task.get("operation_id") or "",
+            trace_id=task.get("trace_id") or "",
             task_id=task_id,
             status="processing",
             impact="image_processing_running",
@@ -2324,7 +2642,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 result="success",
                 route=FOUR_K_V1_ROUTE,
                 path=final_path or task.get("input_path"),
-                reason=result.get("quality_conclusion") or "SIZE_ADAPTATION_COMPLETED",
+                reason=result.get("quality_conclusion") or "DETAIL_ENHANCEMENT_COMPLETED",
                 impact="output_available" if final_path else "no_processing_needed",
                 action="none",
                 purpose="4K_SIZE_ADAPTATION",
@@ -2332,7 +2650,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         except Exception as exc:
             error_code = str(getattr(exc, "code", "4K_PROCESSING_FAILED"))
             failed_stage = str(getattr(exc, "stage", getattr(exc, "hdde_failed_stage", "image_processing")))
-            record_stage(failed_stage, 100, f"4K高清画质增强未完成：{exc}")
+            record_stage(failed_stage, 100, f"4K画质增强未完成：{exc}")
             finish_task_failure(
                 task_id,
                 started_at=task.get("started_at_monotonic"),
@@ -2369,6 +2687,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     "completed_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
+        task_registry[task_id] = task
         return task
 
     def run_image_pipeline(task: dict) -> dict:
@@ -2387,6 +2706,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             stage="engine_adapter",
             result="started",
             feature_key=task.get("feature_key") or ENHANCEMENT_1080P_FEATURE_KEY,
+            module_id=task.get("module_id") or "",
+            operation_id=task.get("operation_id") or "",
+            trace_id=task.get("trace_id") or "",
             task_id=task_id,
             status="processing",
             impact="image_processing_running",
@@ -2404,6 +2726,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     "debug_keep_intermediate": False,
                     "color_stability_enabled": task.get("color_stability_enabled", True),
                     "color_correction_enabled": task.get("color_correction_enabled", False),
+                    "original_filename": task.get("original_filename") or task.get("input_filename"),
                 }
             )
             final_path = Path(result["final_output_path"])
@@ -2518,6 +2841,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     "completed_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
+        task_registry[task_id] = task
         return task
 
     async def stream_task_events(task_id: str, delay: float = 0.25):
@@ -2531,7 +2855,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
         if task.get("mode") == FOUR_K_V1_MODE:
             cursor = 0
-            deadline = time.perf_counter() + 180.0
+            deadline = time.perf_counter() + 1800.0
             while time.perf_counter() < deadline:
                 events = list(task.get("stage_events") or [])
                 while cursor < len(events):
@@ -2568,12 +2892,12 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
             final_payload = public_task(task)
             final_message = (
-                f"4K高清画质增强未完成：{task.get('error_message') or '请重试。'}"
+                f"4K画质增强未完成：{task.get('error_message') or '请重试。'}"
                 if task.get("task_status") == "failed"
                 else (
                     "原图已达到4K门槛，无需重复放大。"
                     if task.get("quality_conclusion") == "NO_PROCESSING_NEEDED"
-                    else "4K高清画质增强完成"
+                    else "4K画质增强完成"
                 )
             )
             yield format_sse_log(
@@ -2606,12 +2930,16 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             "Edge Safe Enhance：过滤随机噪点，仅保留真实结构边缘",
             "Structure Recovery：建筑线条、纹理与远景轮廓进入中频补偿",
             "Color Lock：输出色彩回归原图 Lab 色彩坐标",
-            "1080P 输出完成：task_result 与 task_report 已生成",
+            "1080P 处理仍在进行，等待成品安全发布与任务完成状态",
         ]
         total = len(stage_logs)
         for index, message in enumerate(stage_logs, start=1):
+            if task.get("task_status") in {"completed", "failed"}:
+                break
             if index > 1:
                 await asyncio.sleep(max(0.0, float(delay)))
+                if task.get("task_status") in {"completed", "failed"}:
+                    break
             if task.get("task_status") not in {"completed", "failed"}:
                 task["task_progress"] = min(99, int(round((index / total) * 100)))
             extra = {
@@ -2674,6 +3002,10 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     def app_workdir_payload() -> dict:
         user_dirs = current_user_dirs()
         directory_ready = bool(user_dirs["directory_ready"])
+        default_app_data_root = _initial_formal_app_data_root()
+        is_default_app_data_root = (
+            _formal_path_key(user_dirs["app_data_root"]) == _formal_path_key(default_app_data_root)
+        )
         input_dir_path = user_dirs["normal_input_dir"]
         beta_upload_dir = user_dirs["beta_upload_dir"]
         input_image_count = 0
@@ -2687,6 +3019,10 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         data = {
             "app_data_root": str(user_dirs["app_data_root"]),
             "app_data_root_source": str(user_dirs["app_data_root_source"]),
+            "default_app_data_root": str(default_app_data_root),
+            "formal_output_root": str(Path(user_dirs["app_data_root"]) / OUTPUT_ROOT_RELATIVE),
+            "default_formal_output_root": str(default_app_data_root / OUTPUT_ROOT_RELATIVE),
+            "is_default_app_data_root": is_default_app_data_root,
             "app_data_root_exists": bool(user_dirs["app_data_root_exists"]),
             "app_data_root_writable": bool(user_dirs["app_data_root_writable"]),
             "directory_ready": directory_ready,
@@ -2744,20 +3080,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             raise HTTPException(status_code=400, detail=f"正式目录选择请求包含未知字段：{', '.join(unknown_fields)}。")
 
         def ask_directory() -> str:
-            import tkinter as tk
-            from tkinter import filedialog
+            from runtime.windows_dialog import select_directory
 
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-            try:
-                selected = filedialog.askdirectory(title="选择影界正式目录")
-            finally:
-                root.destroy()
-            return selected or ""
+            return select_directory("选择影界正式目录")
 
         try:
             selected_path = await asyncio.to_thread(ask_directory)
@@ -2820,6 +3145,94 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         data = app_workdir_payload()
         return {"code": 200, "status": "success", "success": True, "message": "正式目录已保存并通过校验。", "data": data, **data}
 
+    @app.post("/api/app/workdir/reset-default")
+    async def reset_formal_workdir(payload: dict = Body(default_factory=dict)):
+        unknown_fields = sorted(str(key) for key in payload if key not in set())
+        if unknown_fields:
+            raise HTTPException(status_code=400, detail=f"恢复默认目录请求包含未知字段：{', '.join(unknown_fields)}。")
+
+        default_root = _initial_formal_app_data_root()
+        current_dirs = current_user_dirs()
+        if (
+            current_dirs["directory_ready"]
+            and _formal_path_key(current_dirs["app_data_root"]) == _formal_path_key(default_root)
+        ):
+            data = app_workdir_payload()
+            return {
+                "code": 200,
+                "status": "unchanged",
+                "success": True,
+                "message": "当前已是默认目录。",
+                "write_skipped": True,
+                "data": data,
+                **data,
+            }
+
+        checked = resolve_app_data_root({"app_data_root": str(default_root), "last_app_data_root": ""})
+        if not checked["directory_ready"]:
+            log_runtime_event(
+                "DIRECTORY_VALIDATION_FAILED",
+                level=logging.ERROR,
+                stage=checked.get("failed_stage") or "formal_directory_reset",
+                result="failed",
+                error_category=ENVIRONMENT_ERROR,
+                path=checked.get("failed_path") or default_root,
+                reason=checked.get("failure_reason") or checked.get("message"),
+                impact="formal_directory_not_changed",
+                action="check_default_formal_directory",
+            )
+            raise HTTPException(status_code=400, detail={"code": checked["error_code"], "message": checked["message"]})
+
+        restored_root = Path(checked["path"])
+        next_settings = {
+            **settings_data,
+            "app_data_root": str(restored_root),
+            "last_app_data_root": str(restored_root),
+            "default_output_dir": str(restored_root / DEFAULT_OUTPUT_DIR_NAME),
+            "image_compression_default_output_root": str(restored_root / IMAGE_COMPRESSION_OUTPUT_DIR_NAME),
+            "last_output_dir": str(restored_root / DEFAULT_OUTPUT_DIR_NAME),
+        }
+        try:
+            write_result = write_settings_if_changed(next_settings)
+        except Exception as exc:
+            log_runtime_event(
+                "SETTINGS_WRITE_FAILED",
+                level=logging.ERROR,
+                stage="formal_directory_reset",
+                result="failed",
+                error_category=ENVIRONMENT_ERROR,
+                path=SETTINGS_PATH,
+                reason=str(exc),
+                impact="formal_directory_not_changed",
+                action="check_settings_file_permissions",
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "SETTINGS_WRITE_FAILED", "message": f"恢复默认正式目录失败：{exc}"},
+            ) from exc
+
+        settings_data.clear()
+        settings_data.update(next_settings)
+        initialize_file_logging(restored_root)
+        log_runtime_event(
+            "DIRECTORY_VALIDATION_SUCCEEDED",
+            stage="formal_directory_reset",
+            result="success",
+            path=restored_root,
+            impact="default_formal_directory_restored",
+            action="persist_default_formal_directory",
+        )
+        data = app_workdir_payload()
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "message": "已恢复默认正式目录并通过校验。",
+            "write_skipped": bool(write_result.get("write_skipped")),
+            "data": data,
+            **data,
+        }
+
     @app.get("/api/health")
     async def health():
         formal_root = read_only_formal_root_status(initial_user_dirs)
@@ -2837,8 +3250,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             ),
             "data": {
                 "version": APP_VERSION,
-                "host": SERVER_HOST,
-                "port": SERVER_PORT,
+                "host": runtime_host,
+                "port": runtime_port,
                 "healthy": healthy,
                 "health_basis": "startup_validation_plus_read_only_presence_check",
                 "settings_status": settings_load_status["status"],
@@ -2957,20 +3370,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         persist_last_output_dir = payload.get("persist_last_output_dir", True) is not False
 
         def ask_directory() -> str:
-            import tkinter as tk
-            from tkinter import filedialog
+            from runtime.windows_dialog import select_directory
 
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-            try:
-                selected = filedialog.askdirectory(title="选择影界输出文件夹")
-            finally:
-                root.destroy()
-            return selected or ""
+            return select_directory("选择影界输出文件夹")
 
         try:
             selected_path = await asyncio.to_thread(ask_directory)
@@ -3105,7 +3507,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             "verification_result": "FAILED",
             "stage": "BETA_RESULT_INVALID",
             "reason": "BETA_RESULT_INVALID",
-            "error": "1080P安全增强 Beta 返回结果无效。",
+            "error": "1080P画质返回结果无效。",
             "error_message": f"invalid_result_type={type(value).__name__}",
             "processed_count": 0,
             "skipped_count": 0,
@@ -3197,7 +3599,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         error = (
             result.get("error")
             or result.get("error_message")
-            or (f"{skip_file} 被 1080P安全增强 Beta 安全策略跳过：{skip_reason}" if skip_reason else "")
+            or (f"{skip_file} 未通过1080P画质安全检查：{skip_reason}" if skip_reason else "")
             or result.get("reason")
             or "1080P safe enhance Beta failed."
         )
@@ -3931,7 +4333,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
     @app.post("/api/upload")
     async def upload_file(
-        file: UploadFile = File(...),
+        file: UploadFile | None = File(None),
+        result_id: str = Form(""),
         mode: str = Form("fidelity"),
         scale: str | None = Form(None),
         output_dir: str | None = Form(None),
@@ -3941,12 +4344,21 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         color_correction_enabled: bool = Form(False),
     ):
         user_dirs = require_directory_ready()
+        normalized_result_id = str(result_id or "").strip()
+        if (file is None) == (not normalized_result_id):
+            raise HTTPException(status_code=400, detail="必须且只能提供一个上传文件或正式结果编号。")
+        reusable_source = resolve_result_asset(normalized_result_id) if normalized_result_id else None
         task_id = make_task_id()
         task_started_at = time.monotonic()
         task_start_times[task_id] = task_started_at
         mode_value = safe_mode(mode)
+        feature_key = ENHANCEMENT_4K_FEATURE_KEY if mode_value == FOUR_K_V1_MODE else ENHANCEMENT_1080P_FEATURE_KEY
+        operation_identity = new_operation_identity(
+            feature_key,
+            module_id="hdde.enhancement.4k" if mode_value == FOUR_K_V1_MODE else "hdde.enhancement.1080p",
+        )
         current_stage = "image_task_intake"
-        current_path: str | Path = file.filename or ""
+        current_path: str | Path = reusable_source["source_result_path"] if reusable_source else (file.filename or "")
         current_impact = "image_task_not_created"
         current_action = "check_runtime_log_and_retry"
 
@@ -3974,6 +4386,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 stage=current_stage,
                 result="started",
                 task_id=task_id,
+                **operation_identity,
                 purpose="4K_SIZE_ADAPTATION" if mode_value == FOUR_K_V1_MODE else "1080P_DELIVERY",
                 route=mode_value,
                 path=current_path,
@@ -4016,7 +4429,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     "output_dir_source": "formal_4k_contract",
                     "used_custom_output_dir": False,
                     "output_dir_created": False,
-                    "output_dir_message": "使用正式目录下的4K高清增强输出目录。",
+                    "output_dir_message": "使用正式目录下的4K画质增强输出目录。",
                 }
             else:
                 requested_output_format = parse_output_format(output_format or format or settings_data.get("default_output_format"))
@@ -4052,12 +4465,12 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             )
 
             current_stage = "input_read"
-            current_path = file.filename or ""
+            current_path = reusable_source["source_result_path"] if reusable_source else (file.filename or "")
             current_impact = "image_processing_not_started"
             current_action = "check_input_file_access"
             receive_start = time.perf_counter()
             try:
-                raw = await file.read()
+                raw = Path(reusable_source["source_result_path"]).read_bytes() if reusable_source else await file.read()
             except Exception as exc:
                 error_category = ENVIRONMENT_ERROR if isinstance(exc, OSError) else PRODUCT_ERROR
                 error = HTTPException(status_code=500, detail=f"上传图片读取失败：{exc}")
@@ -4087,7 +4500,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 raise error
 
             current_stage = "input_path_planning"
-            upload_name = safe_upload_name(file.filename)
+            upload_name = safe_upload_name(reusable_source["source_result_file_name"] if reusable_source else file.filename)
             saved_path = unique_input_path(upload_name)
             current_path = saved_path
 
@@ -4116,7 +4529,11 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 if mode_value == FOUR_K_V1_MODE:
                     output_plan = inspect_4k_v1_source(saved_path)
                     output_plan["paths"] = {
-                        "final": build_4k_v1_output_path(saved_path, user_dirs["app_data_root"])
+                        "final": build_4k_v1_output_path(
+                            saved_path,
+                            user_dirs["app_data_root"],
+                            trusted_original_filename=upload_name,
+                        )
                     }
                     output_plan["image_type"] = "alpha" if output_plan.get("has_alpha") else "opaque"
                 else:
@@ -4127,6 +4544,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                         requested_output_format,
                         False,
                         mode=mode_value,
+                        original_filename=upload_name,
                     )
             except HTTPException as exc:
                 error_category = (
@@ -4160,6 +4578,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 stage="route_planning",
                 result="selected",
                 task_id=task_id,
+                **operation_identity,
                 purpose="4K_SIZE_ADAPTATION" if mode_value == FOUR_K_V1_MODE else "1080P_DELIVERY",
                 route=FOUR_K_V1_ROUTE if mode_value == FOUR_K_V1_MODE else mode_value,
                 path=saved_path,
@@ -4190,7 +4609,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             task = {
                 "task_id": task_id,
                 "taskId": task_id,
-                "feature_key": ENHANCEMENT_4K_FEATURE_KEY if mode_value == FOUR_K_V1_MODE else ENHANCEMENT_1080P_FEATURE_KEY,
+                **operation_identity,
                 "result_id": "",
                 "task_status": "pending",
                 "status": "pending",
@@ -4245,6 +4664,14 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     "receive_file_time": receive_file_time,
                     "save_input_time": save_input_time,
                 },
+                "task_context": {
+                    "task_id": task_id,
+                    **operation_identity,
+                    "purpose": "4K_SIZE_ADAPTATION" if mode_value == FOUR_K_V1_MODE else "1080P_DELIVERY",
+                    "route": FOUR_K_V1_ROUTE if mode_value == FOUR_K_V1_MODE else mode_value,
+                    "route_family": "image_enhancement",
+                },
+                **result_lineage_fields(reusable_source),
             }
             task_registry[task_id] = task
             task_registry[DEFAULT_TASK_ID] = task
@@ -4256,6 +4683,9 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 stage="task_registration",
                 result="success",
                 feature_key=task["feature_key"],
+                module_id=task["module_id"],
+                operation_id=task["operation_id"],
+                trace_id=task["trace_id"],
                 task_id=task_id,
                 status="pending",
                 impact="unified_task_available",
@@ -4268,7 +4698,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "status": "success",
                 "success": True,
                 "message": (
-                    "图片上传完成，已开始4K高清画质增强。"
+                    "图片上传完成，已开始4K画质增强。"
                     if mode_value == FOUR_K_V1_MODE
                     else f"图片上传完成，已登记为 {APP_VERSION} 后台处理任务。"
                 ),
@@ -4277,6 +4707,14 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "task_id": task_id,
                 "taskId": task_id,
                 "streamEndpoint": data["streamEndpoint"],
+                "feedback_target": build_feedback_target(
+                    feature_key=task.get("feature_key"),
+                    module_id=task.get("module_id"),
+                    operation_id=task.get("operation_id"),
+                    trace_id=task.get("trace_id"),
+                    task_id=task_id,
+                    route=task.get("route"),
+                ),
                 "data": data,
             }
         except HTTPException as exc:
@@ -4302,7 +4740,18 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     exception=exc
                     if error_category in {ENVIRONMENT_ERROR, PRODUCT_ERROR, CONFIGURATION_ERROR}
                     else None,
+                    **operation_identity,
                 )
+            exc.hdde_feedback_target = build_feedback_target(
+                **operation_identity,
+                task_id=task_id,
+                route=mode_value,
+                stage=getattr(exc, "hdde_failed_stage", current_stage),
+                status="blocked" if 400 <= exc.status_code < 500 else "failed",
+                error_id=getattr(exc, "hdde_error_id", ""),
+                error_code=getattr(exc, "hdde_error_code", ""),
+                error_fingerprint=getattr(exc, "hdde_error_fingerprint", ""),
+            )
             raise
         except BaseException as exc:
             if task_id not in task_terminal_events:
@@ -4320,6 +4769,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                     impact=current_impact,
                     action=current_action if error_category == ENVIRONMENT_ERROR else "check_runtime_log_and_retry",
                     exception=exc,
+                    **operation_identity,
                 )
             raise
         finally:
@@ -4335,6 +4785,15 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
     @app.get("/api/v1/tasks/{task_id}/stream")
     async def stream(task_id: str, delay: float = 0.25):
+        task = task_registry.get(task_id)
+        if task and str(task.get("feature_key") or "") == "image_compression":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TASK_STREAM_UNSUPPORTED",
+                    "message": "图片压缩任务由其业务执行链维护状态，不使用增强任务日志流。",
+                },
+            )
         return StreamingResponse(
             stream_task_events(task_id, delay),
             media_type="text/event-stream",
@@ -4345,25 +4804,171 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     async def serve_file(kind: str, filename: str):
         return FileResponse(resolve_public_file(kind, filename))
 
-    def capture_feedback_snapshot(task_id: str, source_feature: str, stage_hint: str = "") -> dict:
-        feature = str(source_feature or "runtime_failure").strip()
+    def exact_feedback_target_events(feedback_target: dict) -> list[dict]:
+        strong_references = {
+            field: str(feedback_target.get(field) or "")
+            for field in feedback_target_strong_fields
+            if feedback_target.get(field)
+        }
+        if not strong_references:
+            return []
+        candidates = related_runtime_events(
+            task_id=strong_references.get("task_id", ""),
+            result_id=strong_references.get("result_id", ""),
+            delivery_id=strong_references.get("delivery_id", ""),
+            batch_id=strong_references.get("batch_id", ""),
+            error_id=strong_references.get("error_id", ""),
+            operation_id=strong_references.get("operation_id", "") if not strong_references.get("task_id") else "",
+            trace_id=strong_references.get("trace_id", "") if not strong_references.get("task_id") else "",
+            limit=120,
+        )
+        exact: list[dict] = []
+        for event in candidates:
+            event_feature = str(event.get("feature_key") or event.get("feature") or "")
+            target_feature = str(feedback_target.get("feature_key") or "")
+            task_matches = bool(
+                strong_references.get("task_id")
+                and str(event.get("task_id") or "") == strong_references["task_id"]
+            )
+            result_matches = bool(
+                strong_references.get("result_id")
+                and str(event.get("result_id") or "") == strong_references["result_id"]
+            )
+            delivery_matches = bool(
+                strong_references.get("delivery_id")
+                and str(event.get("delivery_id") or "") == strong_references["delivery_id"]
+            )
+            if strong_references.get("task_id") and not task_matches:
+                continue
+            if strong_references.get("result_id") and event.get("result_id") not in (None, "") and not result_matches:
+                continue
+            if strong_references.get("delivery_id") and event.get("delivery_id") not in (None, "") and not delivery_matches:
+                if not (task_matches and result_matches):
+                    continue
+            if event_feature and target_feature and event_feature != target_feature:
+                if not (
+                    task_matches
+                    and (result_matches or delivery_matches)
+                    and str(event.get("source_feature_key") or "") == target_feature
+                ):
+                    continue
+            operation_matches = str(event.get("operation_id") or "") == strong_references.get("operation_id", "")
+            trace_matches = str(event.get("trace_id") or "") == strong_references.get("trace_id", "")
+            parent_operation_matches = str(event.get("parent_operation_id") or "") == strong_references.get("operation_id", "")
+            parent_trace_matches = str(event.get("parent_trace_id") or "") == strong_references.get("trace_id", "")
+            child_business_link = bool(
+                task_matches
+                and (result_matches or delivery_matches)
+                and str(event.get("source_feature_key") or "") == target_feature
+            )
+            if event.get("operation_id") and strong_references.get("operation_id") and not operation_matches:
+                if not (child_business_link or parent_operation_matches):
+                    continue
+            if event.get("trace_id") and strong_references.get("trace_id") and not trace_matches:
+                if not (child_business_link or parent_trace_matches):
+                    continue
+            if not any((task_matches, result_matches, delivery_matches, operation_matches, trace_matches)):
+                continue
+            exact.append(dict(event))
+        return exact
+
+    def capture_feedback_snapshot(
+        task_id: str,
+        source_feature: str,
+        stage_hint: str = "",
+        route: str = "",
+        feedback_target: dict | None = None,
+    ) -> dict:
+        target = normalize_feedback_target(feedback_target)
+        if task_id and target.get("task_id") and str(task_id).strip() != target["task_id"]:
+            raise HTTPException(status_code=409, detail="问题反馈目标与当前 Task 不一致。")
+        feature = str(target.get("feature_key") or source_feature or "runtime_failure").strip()
         if feature not in RECENT_FEATURE_COVERAGE:
             raise HTTPException(status_code=400, detail="问题反馈功能来源无效。")
-        normalized_task_id = str(task_id or "").strip()
+        normalized_task_id = str(target.get("task_id") or task_id or "").strip()
         task = task_registry.get(normalized_task_id) if normalized_task_id else None
         if normalized_task_id and not task:
+            result_reference_for_task = getattr(task_registry, "result_reference_for_task", None)
+            if callable(result_reference_for_task):
+                task = result_reference_for_task(normalized_task_id)
+        if source_feature == "color_correction" and (
+            feature != "color_correction"
+            or (task and task.get("feature_key") != "color_correction")
+        ):
+            raise HTTPException(status_code=409, detail="颜色校正反馈目标与当前功能不一致。")
+        delivery_fact = (
+            task_registry.get(batch_naming_delivery_fact_key(normalized_task_id))
+            if normalized_task_id
+            and feature == "smart_delivery"
+            else None
+        )
+        if isinstance(delivery_fact, dict):
+            task = delivery_fact
+        if normalized_task_id and not task and not target:
             raise HTTPException(status_code=404, detail="任务不存在。")
         captured_at = datetime.now().isoformat(timespec="milliseconds")
         frozen_task = copy.deepcopy(task) if task else {}
+        if target:
+            for field in feedback_target_strong_fields:
+                existing = str(frozen_task.get(field) or "")
+                requested = str(target.get(field) or "")
+                if existing and requested and existing != requested:
+                    raise HTTPException(status_code=409, detail="问题反馈目标与既有业务事实不一致。")
+            frozen_task.update(target)
         frozen_task["source_feature"] = feature
-        if not task and stage_hint:
+        if not task and not target and stage_hint:
             frozen_task["processing_stage"] = str(stage_hint)[:120]
+        if target.get("stage"):
+            frozen_task["processing_stage"] = target["stage"]
+        if target.get("route"):
+            frozen_task["route"] = target["route"]
+        elif route:
+            frozen_task["route"] = str(route)[:160]
         runtime_context = feedback_runtime_provider()
         frozen_task["runtime_context"] = runtime_context
-        if task:
+        if target:
+            exact_events = exact_feedback_target_events(target)
+            frozen_task["related_events"] = exact_events
+            failure_event = next(
+                (
+                    event
+                    for event in reversed(exact_events)
+                    if str(event.get("result") or event.get("status") or "").lower() in {"failed", "blocked"}
+                    or event.get("reason")
+                ),
+                {},
+            )
+            if failure_event:
+                frozen_task.setdefault("failure_reason", str(failure_event.get("reason") or ""))
+                frozen_task.setdefault("error_code", str(failure_event.get("error_code") or ""))
+                error_context = {
+                    key: failure_event.get(key)
+                    for key in (
+                        "error_id",
+                        "error_fingerprint",
+                        "exception_type",
+                        "code_location",
+                        "module",
+                        "trace_id",
+                        "trace_summary",
+                        "reason",
+                    )
+                    if failure_event.get(key) not in (None, "")
+                }
+                if error_context:
+                    error_context.setdefault("error_stage", failure_event.get("stage") or target.get("stage") or "")
+                    frozen_task["error_context"] = error_context
+        elif task:
             error_context = task.get("error_context") if isinstance(task.get("error_context"), dict) else {}
+            task_context = task.get("task_context") if isinstance(task.get("task_context"), dict) else {}
+            result = task.get("task_result") if isinstance(task.get("task_result"), dict) else {}
             frozen_task["related_events"] = related_runtime_events(
+                feature_key=str(task.get("feature_key") or task_context.get("feature_key") or feature),
+                operation_id=str(task.get("operation_id") or task_context.get("operation_id") or ""),
+                trace_id=str(task.get("trace_id") or task_context.get("trace_id") or error_context.get("trace_id") or ""),
                 task_id=normalized_task_id,
+                result_id=str(task.get("result_id") or result.get("result_id") or ""),
+                delivery_id=str(task.get("delivery_id") or result.get("delivery_id") or ""),
                 batch_id=str(task.get("batch_id") or ""),
                 error_id=str(error_context.get("error_id") or ""),
             )
@@ -4374,6 +4979,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             source_feature=feature,
             runtime=runtime_context,
             captured_at=captured_at,
+            route=str(target.get("route") or route),
         )
         snapshot_id = f"FCS-{uuid.uuid4().hex}"
         if len(feedback_context_snapshots) >= 64:
@@ -4412,7 +5018,13 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             })
         return manifest
 
-    def generate_snapshot_feedback_bundle(snapshot: dict, description: str, attachments: list[dict]) -> dict:
+    def generate_snapshot_feedback_bundle(
+        snapshot: dict,
+        description: str,
+        attachments: list[dict],
+        evaluation: dict,
+        evidence_consent: dict,
+    ) -> dict:
         user_dirs = current_user_dirs()
         if not user_dirs["directory_ready"]:
             raise HTTPException(status_code=409, detail=user_dirs["directory_message"])
@@ -4426,13 +5038,28 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         context = copy.deepcopy(snapshot["context"])
         context["user_description"] = description
         artifact_identity = str(snapshot.get("task_id") or f"runtime_{runtime_id}")
+        active_log_path = str(runtime_logging_state().get("path") or "").strip()
+        runtime_log_path = (
+            Path(active_log_path)
+            if active_log_path
+            else Path(initial_user_dirs["runtime_log_dir"]) / "hdde.log"
+        )
         bundle = generate_feedback_bundle(
             artifact_identity,
             frozen_task,
             output_dir=Path(user_dirs["feedback_dir"]),
             context_snapshot=context,
             attachment_manifest=attachments,
+            runtime_log_path=runtime_log_path,
+            evaluation=evaluation,
+            evidence_consent=evidence_consent,
+            evidence_root=Path(user_dirs["app_data_root"]),
         )
+        if bundle.get("feedback_bundle_status") == "PASS" and bundle.get("feedback_bundle_name"):
+            bundle["download_url"] = (
+                "/api/v1/feedback/bundle-file/"
+                + urllib.parse.quote(str(bundle["feedback_bundle_name"]), safe="")
+            )
         bundle_status = str(bundle.get("feedback_bundle_status") or "FAIL")
         log_runtime_event(
             "FEEDBACK_REPORT_GENERATED" if bundle_status == "PASS" else "FEEDBACK_REPORT_GENERATION_FAILED",
@@ -4440,8 +5067,13 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             stage="feedback_bundle_generation",
             result="success" if bundle_status == "PASS" else "failed",
             error_category="" if bundle_status == "PASS" else ENVIRONMENT_ERROR,
-            feature=snapshot["source_feature"],
+            feature_key=context.get("feature_key") or snapshot["source_feature"],
+            module_id=context.get("module_id") or "",
+            operation_id=context.get("operation_id") or "",
+            trace_id=context.get("trace_id") or "",
             task_id=str(snapshot.get("task_id") or ""),
+            result_id=str(context.get("result_id") or ""),
+            delivery_id=str(context.get("delivery_id") or ""),
             status=str(frozen_task.get("task_status") or frozen_task.get("status") or ""),
             error_stage="" if bundle_status == "PASS" else "feedback_bundle_generation",
             path=Path(str(bundle.get("feedback_bundle_path") or "")).name,
@@ -4452,9 +5084,16 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         )
         return bundle
 
+    def public_feedback_bundle(bundle: dict) -> dict:
+        return {
+            key: value
+            for key, value in bundle.items()
+            if key != "feedback_bundle_path"
+        }
+
     @app.post("/api/v1/feedback/context-snapshot")
     async def unified_feedback_context_snapshot(payload: dict = Body(default_factory=dict)):
-        allowed_fields = {"task_id", "source_feature", "stage"}
+        allowed_fields = {"task_id", "source_feature", "stage", "route", "feedback_target"}
         unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown_fields:
             raise HTTPException(status_code=400, detail=f"问题反馈上下文包含未知字段：{', '.join(unknown_fields)}。")
@@ -4462,6 +5101,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             str(payload.get("task_id") or ""),
             str(payload.get("source_feature") or "runtime_failure"),
             str(payload.get("stage") or ""),
+            str(payload.get("route") or ""),
+            payload.get("feedback_target"),
         )
         return {
             "code": 200,
@@ -4477,7 +5118,13 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
     @app.post("/api/v1/feedback/bundle")
     async def unified_feedback_bundle(payload: dict = Body(default_factory=dict)):
-        allowed_fields = {"snapshot_id", "description", "attachment_manifest"}
+        allowed_fields = {
+            "snapshot_id",
+            "description",
+            "attachment_manifest",
+            "evaluation",
+            "evidence_consent",
+        }
         unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown_fields:
             raise HTTPException(status_code=400, detail=f"问题反馈请求包含未知字段：{', '.join(unknown_fields)}。")
@@ -4490,17 +5137,55 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             raise HTTPException(status_code=400, detail="请描述你做了什么、发生了什么以及预期结果。")
         if len(description) > 1000:
             raise HTTPException(status_code=400, detail="问题描述不得超过1000个字符。")
+        try:
+            evaluation = normalize_feedback_evaluation(payload.get("evaluation"))
+            evidence_consent = normalize_evidence_consent(payload.get("evidence_consent"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         bundle = generate_snapshot_feedback_bundle(
             snapshot,
             description,
             safe_attachment_manifest(payload.get("attachment_manifest")),
+            evaluation,
+            evidence_consent,
         )
         return {
             "code": 200 if bundle["feedback_bundle_status"] == "PASS" else 500,
             "status": "success" if bundle["feedback_bundle_status"] == "PASS" else "error",
             "success": bundle["feedback_bundle_status"] == "PASS",
-            "data": bundle,
+            "data": public_feedback_bundle(bundle),
         }
+
+    @app.get("/api/v1/feedback/bundle-file/{filename}")
+    async def unified_feedback_bundle_file(filename: str):
+        safe_name = str(filename or "").strip()
+        if not re.fullmatch(r"影界HDDE_问题反馈_FB-[A-Za-z0-9-]+\.zip", safe_name):
+            raise HTTPException(status_code=404, detail="反馈包不存在。")
+        feedback_root = Path(current_user_dirs()["feedback_dir"]).resolve()
+        bundle_path = (feedback_root / safe_name).resolve()
+        if bundle_path.parent != feedback_root or not bundle_path.is_file():
+            raise HTTPException(status_code=404, detail="反馈包不存在。")
+        try:
+            validate_feedback_bundle(bundle_path)
+        except Exception as exc:
+            log_runtime_event(
+                "FEEDBACK_BUNDLE_READ_VALIDATION_FAILED",
+                level=logging.ERROR,
+                stage="feedback_bundle_read",
+                result="failed",
+                error_category=ENVIRONMENT_ERROR,
+                path=bundle_path.name,
+                reason=str(exc),
+                impact="feedback_bundle_download_blocked",
+                action="regenerate_feedback_bundle",
+            )
+            raise HTTPException(status_code=409, detail="反馈包完整性校验失败，请重新生成。") from exc
+        return FileResponse(
+            bundle_path,
+            media_type="application/zip",
+            filename=safe_name,
+            headers={"Cache-Control": "private, no-store"},
+        )
 
     @app.post("/api/v1/tasks/{task_id}/feedback-bundle")
     async def feedback_bundle(task_id: str, payload: dict = Body(default_factory=dict)):
@@ -4508,12 +5193,26 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         unknown_fields = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown_fields:
             raise HTTPException(status_code=400, detail=f"问题反馈请求包含未知字段：{', '.join(unknown_fields)}。")
-        real_task_id = latest_task_id["value"] if task_id == DEFAULT_TASK_ID else task_id
+        real_task_id = str(task_id or "").strip()
+        if not real_task_id or real_task_id == DEFAULT_TASK_ID:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTEXT_NOT_RESOLVABLE",
+                    "message": "问题反馈缺少可验证的当前任务 Identity，已停止生成以避免绑定到其他任务。",
+                },
+            )
         snapshot = capture_feedback_snapshot(
             str(real_task_id or ""),
             str(payload.get("source_feature") or "processing_center"),
         )
-        bundle = generate_snapshot_feedback_bundle(snapshot, str(payload.get("description") or "").strip(), [])
+        bundle = generate_snapshot_feedback_bundle(
+            snapshot,
+            str(payload.get("description") or "").strip(),
+            [],
+            evaluation=normalize_feedback_evaluation(None),
+            evidence_consent=normalize_evidence_consent(None),
+        )
         task = task_registry.get(str(real_task_id or ""))
         if task:
             task.update(bundle)
@@ -4521,7 +5220,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
             "code": 200 if bundle["feedback_bundle_status"] == "PASS" else 500,
             "status": "success" if bundle["feedback_bundle_status"] == "PASS" else "error",
             "success": bundle["feedback_bundle_status"] == "PASS",
-            "data": bundle,
+            "data": public_feedback_bundle(bundle),
         }
 
     @app.get("/api/v1/tasks/{task_id}/feedback-bundle")
@@ -4529,23 +5228,135 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         return await feedback_bundle(task_id, {})
 
     @app.get("/api/v1/tasks")
-    async def task_list():
+    async def task_list(limit: int | None = None, offset: int = 0):
         unique_tasks: dict[str, dict] = {}
         for task in task_registry.values():
+            if str(task.get("record_kind") or "task") != "task":
+                continue
             task_identifier = str(task.get("task_id") or "").strip()
             if task_identifier:
                 unique_tasks[task_identifier] = task
-        ordered_tasks = sorted(
-            unique_tasks.values(),
-            key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""),
-            reverse=True,
+        ordered_tasks = sorted(unique_tasks.values(), key=task_created_order_key, reverse=True)
+        page_limit = None if limit is None else max(1, min(int(limit), 100))
+        page_offset = max(0, int(offset))
+        selected_tasks = (
+            ordered_tasks[page_offset:]
+            if page_limit is None
+            else ordered_tasks[page_offset:page_offset + page_limit]
         )
-        tasks = [public_task(task) for task in ordered_tasks]
+        user_dirs = current_user_dirs()
+        tasks = [public_task(task, user_dirs) for task in selected_tasks]
+        total_count = len(ordered_tasks)
+        next_offset = page_offset + len(tasks)
         return {
             "code": 200,
             "status": "success",
             "success": True,
-            "data": {"tasks": tasks, "count": len(tasks)},
+            "data": {
+                "tasks": tasks,
+                "count": total_count,
+                "total_count": total_count,
+                "returned_count": len(tasks),
+                "offset": page_offset,
+                "limit": page_limit,
+                "has_more": next_offset < total_count,
+                "next_offset": next_offset if next_offset < total_count else None,
+            },
+        }
+
+    def cleanup_deleted_task_runtime_references(task_id: str) -> None:
+        normalized_id = str(task_id or "").strip()
+        image_state = getattr(app.state, "image_compression_api_state", {}) or {}
+        remove_image_references = image_state.get("remove_task_runtime_references")
+        if callable(remove_image_references):
+            remove_image_references(normalized_id)
+        for snapshot_id, snapshot in list(feedback_context_snapshots.items()):
+            if str(snapshot.get("task_id") or "") == normalized_id:
+                feedback_context_snapshots.pop(snapshot_id, None)
+        local_state = getattr(app.state, "local_retouch_api_state", {}) or {}
+        for session in (local_state.get("sessions") or {}).values():
+            if isinstance(session, dict) and str(session.get("task_id") or "") == normalized_id:
+                session["task_id"] = ""
+        terminal_task = background_tasks.pop(normalized_id, None)
+        if terminal_task is not None and not terminal_task.done():
+            terminal_task.cancel()
+        task_start_times.pop(normalized_id, None)
+        task_terminal_events.discard(normalized_id)
+        if latest_task_id.get("value") == normalized_id:
+            remaining = [
+                record
+                for record in task_registry.values()
+                if isinstance(record, dict) and str(record.get("record_kind") or "task") == "task"
+            ]
+            remaining.sort(key=task_created_order_key, reverse=True)
+            latest_task_id["value"] = str(remaining[0].get("task_id") or "") if remaining else None
+
+    @app.delete("/api/v1/tasks")
+    async def task_delete(payload: dict = Body(default_factory=dict)):
+        if set(payload) != {"task_ids"}:
+            raise HTTPException(status_code=400, detail={"code": "TASK_DELETE_REQUEST_INVALID", "message": "清除请求只能包含 task_ids。"})
+        raw_task_ids = payload.get("task_ids")
+        if not isinstance(raw_task_ids, list) or not 1 <= len(raw_task_ids) <= 100:
+            raise HTTPException(status_code=400, detail={"code": "TASK_DELETE_REQUEST_INVALID", "message": "请选择 1 至 100 条任务记录。"})
+        task_ids = [str(value or "").strip() for value in raw_task_ids]
+        if any(not value for value in task_ids) or len(set(task_ids)) != len(task_ids):
+            raise HTTPException(status_code=400, detail={"code": "TASK_DELETE_REQUEST_INVALID", "message": "task_ids 不能为空或重复。"})
+        delete_task_fact = getattr(task_registry, "delete_task_fact", None)
+        if not callable(delete_task_fact):
+            raise HTTPException(status_code=503, detail={"code": "TASK_DELETE_UNAVAILABLE", "message": "统一任务事实源暂不支持安全清除。"})
+
+        outcomes: list[dict] = []
+        for task_id in task_ids:
+            current = task_registry.get(task_id)
+            active_background = background_tasks.get(task_id)
+            if isinstance(current, dict) and active_background is not None and not active_background.done():
+                current["execution_started"] = True
+                current["execution_state"] = "scheduled"
+                task_registry[task_id] = current
+            outcome = delete_task_fact(task_id)
+            outcomes.append(outcome)
+            if outcome.get("deleted"):
+                cleanup_deleted_task_runtime_references(task_id)
+                log_runtime_event(
+                    "TASK_RECORD_DELETED",
+                    stage="task_record_deletion",
+                    result="success",
+                    task_id=task_id,
+                    result_id=outcome.get("result_id") or "",
+                    delivery_id=outcome.get("delivery_id") or "",
+                    status=outcome.get("status") or "",
+                    impact="task_removed_formal_result_preserved" if outcome.get("result_preserved") else "task_removed",
+                )
+            else:
+                log_runtime_event(
+                    "TASK_RECORD_DELETE_BLOCKED",
+                    level=logging.WARNING,
+                    stage="task_record_deletion",
+                    result="blocked",
+                    task_id=task_id,
+                    status=outcome.get("status") or "",
+                    reason=outcome.get("reason") or "task_not_deletable",
+                    impact="task_preserved",
+                )
+        deleted = [item for item in outcomes if item.get("deleted")]
+        protected = [item for item in outcomes if not item.get("deleted")]
+        return {
+            "code": 200,
+            "status": "success",
+            "success": True,
+            "data": {
+                "requested_count": len(task_ids),
+                "deleted_count": len(deleted),
+                "protected_count": len(protected),
+                "deleted_task_ids": [item["task_id"] for item in deleted],
+                "protected_task_ids": [item["task_id"] for item in protected],
+                "protected_tasks": protected,
+                "result_references": [
+                    {"task_id": item["task_id"], "result_id": item.get("result_id") or "", "delivery_id": item.get("delivery_id") or ""}
+                    for item in deleted
+                    if item.get("result_preserved")
+                ],
+            },
         }
 
     @app.get("/api/v1/tasks/{task_id}")
@@ -4559,6 +5370,15 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
     @app.get("/api/v1/tasks/{task_id}/result-file")
     async def task_result_file(task_id: str):
         task = task_registry.get(str(task_id or ""))
+        if not task:
+            result_reference_for_task = getattr(task_registry, "result_reference_for_task", None)
+            if callable(result_reference_for_task):
+                task = result_reference_for_task(task_id)
+        if task and task.get("result_available") is False:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "FILE_UNAVAILABLE", "message": "历史结果文件不可用或已不存在。"},
+            )
         raw_path = task.get("result_file") or task.get("output_path") if task else ""
         if not task or not task.get("result_id") or not raw_path:
             raise HTTPException(status_code=404, detail="当前任务没有可打开的正式结果。")
@@ -4567,6 +5387,36 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         if formal_output_root not in result_path.parents or not result_path.is_file():
             raise HTTPException(status_code=404, detail="正式结果文件不存在或不在正式输出目录中。")
         return FileResponse(result_path, headers={"Cache-Control": "private, no-store"})
+
+    @app.get("/api/v1/tasks/{task_id}/source-file")
+    async def task_source_file(task_id: str):
+        task = task_registry.get(str(task_id or ""))
+        if not task:
+            result_reference_for_task = getattr(task_registry, "result_reference_for_task", None)
+            if callable(result_reference_for_task):
+                task = result_reference_for_task(task_id)
+        task_result = task.get("task_result") if task and isinstance(task.get("task_result"), dict) else {}
+        raw_path = (
+            task.get("source_path")
+            or task.get("input_path")
+            or task_result.get("source_path")
+            or task_result.get("input_path")
+            if task
+            else ""
+        )
+        if not task or not raw_path:
+            raise HTTPException(status_code=404, detail="当前任务没有可预览的原图。")
+        source_path = resolve_migrated_formal_output_path(str(raw_path), current_user_dirs()["app_data_root"])
+        formal_root = Path(current_user_dirs()["app_data_root"]).resolve()
+        if formal_root not in source_path.parents or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="原图不存在或不在正式目录中。")
+        return FileResponse(source_path, headers={"Cache-Control": "private, no-store"})
+
+    frontend_dist = PROJECT_ROOT / "dist"
+    if (frontend_dist / "index.html").is_file():
+        from runtime.production_frontend import register_production_frontend
+
+        register_production_frontend(app, frontend_dist)
 
     log_runtime_event(
         "APPLICATION_STARTUP_COMPLETED",
@@ -4625,6 +5475,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", dest="output_option", help="输出文件夹。")
     parser.add_argument("--gui", action="store_true", help=f"启动 VisualMasterPro {APP_VERSION} 图形化界面。")
     parser.add_argument("--server", action="store_true", help="启动 Web API 服务，监听 http://localhost:8787。")
+    parser.add_argument("--validation-runtime-root", default="", help=argparse.SUPPRESS)
     parser.add_argument("--host", default=SERVER_HOST, help="Web API 监听主机，默认 localhost。")
     parser.add_argument("--port", type=int, default=SERVER_PORT, help="Web API 监听端口，默认 8787。")
     parser.add_argument("--mode", default=AUTO_MODE, choices=SUPPORTED_MODES, help="增强模式，默认 fidelity。")
@@ -4668,6 +5519,42 @@ def run(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.validation_runtime_root:
+        if not args.server:
+            parser.error("--validation-runtime-root 仅允许用于自动验证 Web API。")
+        validation_root = Path(args.validation_runtime_root).expanduser()
+        if not validation_root.is_absolute():
+            parser.error("--validation-runtime-root 必须使用绝对路径。")
+        validation_root = validation_root.resolve()
+        try:
+            validation_root.relative_to(PROJECT_ROOT)
+        except ValueError:
+            pass
+        else:
+            parser.error("自动验证运行目录不得位于项目目录内。")
+
+        production_settings = PROJECT_ROOT / "settings" / "settings.json"
+        if production_settings.is_file():
+            try:
+                saved_settings = json.loads(production_settings.read_text(encoding="utf-8"))
+                protected_root_value = str(
+                    saved_settings.get("app_data_root") or saved_settings.get("last_app_data_root") or ""
+                ).strip()
+                protected_root = Path(protected_root_value).expanduser().resolve() if protected_root_value else None
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                protected_root = None
+            if protected_root is not None and (
+                validation_root == protected_root or protected_root in validation_root.parents
+            ):
+                parser.error("自动验证运行目录不得位于正式根目录内。")
+
+        from engine.diagnostics.runtime_logging import RUNTIME_ROOT_OVERRIDE_ENV
+
+        os.environ[RUNTIME_ROOT_OVERRIDE_ENV] = str(validation_root)
+        global SETTINGS_PATH, _VALIDATION_FORMAL_ROOT
+        SETTINGS_PATH = validation_root / ".hdde-validation-settings.json"
+        _VALIDATION_FORMAL_ROOT = validation_root
 
     if args.server:
         from runtime.formal_launcher import PROJECT_PYTHON

@@ -1,0 +1,314 @@
+{
+  "contract": "hdde.ocr-real-sample-set.n2-01.v1",
+  "sample_count": 8,
+  "samples": [
+    {
+      "sample_id": "normal_chinese_title",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/normal_chinese_title.png",
+      "sample_sha256": "8bca68310397dcd88d71e2d795df742a22e2fdc61b5fbe888d6b49bcdd2a8e36",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S04__real_group_meeting_04.jpg",
+      "source_sha256": "bbeb1523324fffc01fe5659c3c52fb2dbe4165735f46e2bcf510fee21cd8f3ef",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 1450,
+      "height": 400,
+      "baseline": "NORMAL_OCR_BASELINE",
+      "derivation": "REAL_SOURCE_CROP",
+      "crop_box_xyxy": [
+        300,
+        250,
+        1750,
+        650
+      ],
+      "geometry_severity": "NONE",
+      "geometry_abnormal": false,
+      "fragmented": false,
+      "expected_status": "NORMAL_RELIABLE",
+      "expected_trigger": false
+    },
+    {
+      "sample_id": "fragmented_title_control",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/fragmented_title_control.png",
+      "sample_sha256": "b43d68ade8b6a87df25cc1f78aeb8bde204b7a717449feb67ea3c2e8f438e315",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S04__real_group_meeting_04.jpg",
+      "source_sha256": "bbeb1523324fffc01fe5659c3c52fb2dbe4165735f46e2bcf510fee21cd8f3ef",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 1450,
+      "height": 400,
+      "baseline": "PERSPECTIVE_BASELINE",
+      "derivation": "CONTROLLED_FRAGMENTATION_FROM_REAL_SOURCE",
+      "crop_box_xyxy": [
+        300,
+        250,
+        1750,
+        650
+      ],
+      "geometry_severity": "NONE",
+      "geometry_abnormal": false,
+      "fragmented": true,
+      "expected_status": "FRAGMENTED",
+      "expected_trigger": true
+    },
+    {
+      "sample_id": "perspective_light",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_light.png",
+      "sample_sha256": "d659cea99cf6de2fbc1d3debcd23e860ae0de544a5b4f86fe6b931b0a64033f9",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S04__real_group_meeting_04.jpg",
+      "source_sha256": "bbeb1523324fffc01fe5659c3c52fb2dbe4165735f46e2bcf510fee21cd8f3ef",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 1450,
+      "height": 400,
+      "baseline": "PERSPECTIVE_BASELINE",
+      "derivation": "CONTROLLED_HOMOGRAPHY_FROM_REAL_SOURCE",
+      "crop_box_xyxy": [
+        300,
+        250,
+        1750,
+        650
+      ],
+      "geometry_severity": "LIGHT",
+      "geometry_abnormal": false,
+      "fragmented": false,
+      "destination_quad_xy": [
+        [
+          40,
+          20
+        ],
+        [
+          1435,
+          0
+        ],
+        [
+          1445,
+          385
+        ],
+        [
+          20,
+          395
+        ]
+      ],
+      "homography_matrix": [
+        [
+          0.9364731,
+          -0.05117126,
+          40.0
+        ],
+        [
+          -0.01380262,
+          0.91919226,
+          20.0
+        ],
+        [
+          -1.83e-05,
+          -5.23e-05,
+          1.0
+        ]
+      ],
+      "expected_status": "NORMAL_RELIABLE",
+      "expected_trigger": false
+    },
+    {
+      "sample_id": "perspective_medium",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_medium.png",
+      "sample_sha256": "ae63eb1292917486dbba5454b0a01e2e0858e2992874d110b458296202562f54",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S04__real_group_meeting_04.jpg",
+      "source_sha256": "bbeb1523324fffc01fe5659c3c52fb2dbe4165735f46e2bcf510fee21cd8f3ef",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 1450,
+      "height": 400,
+      "baseline": "PERSPECTIVE_BASELINE",
+      "derivation": "CONTROLLED_HOMOGRAPHY_FROM_REAL_SOURCE",
+      "crop_box_xyxy": [
+        300,
+        250,
+        1750,
+        650
+      ],
+      "geometry_severity": "MEDIUM",
+      "geometry_abnormal": true,
+      "fragmented": false,
+      "destination_quad_xy": [
+        [
+          150,
+          55
+        ],
+        [
+          1430,
+          0
+        ],
+        [
+          1445,
+          335
+        ],
+        [
+          55,
+          395
+        ]
+      ],
+      "homography_matrix": [
+        [
+          0.88410819,
+          -0.24900492,
+          150.0
+        ],
+        [
+          -0.03795721,
+          0.77377897,
+          55.0
+        ],
+        [
+          5.2e-07,
+          -0.00019836,
+          1.0
+        ]
+      ],
+      "expected_status": "GEOMETRIC_ABNORMAL",
+      "expected_trigger": true
+    },
+    {
+      "sample_id": "perspective_strong",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_strong.png",
+      "sample_sha256": "54a0a1cc58a74392469b29f262247b4f1bcdf58bdb1c7093437b7e42591e531d",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S04__real_group_meeting_04.jpg",
+      "source_sha256": "bbeb1523324fffc01fe5659c3c52fb2dbe4165735f46e2bcf510fee21cd8f3ef",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 1450,
+      "height": 400,
+      "baseline": "PERSPECTIVE_BASELINE",
+      "derivation": "CONTROLLED_HOMOGRAPHY_FROM_REAL_SOURCE",
+      "crop_box_xyxy": [
+        300,
+        250,
+        1750,
+        650
+      ],
+      "geometry_severity": "STRONG",
+      "geometry_abnormal": true,
+      "fragmented": false,
+      "destination_quad_xy": [
+        [
+          310,
+          105
+        ],
+        [
+          1430,
+          0
+        ],
+        [
+          1445,
+          265
+        ],
+        [
+          95,
+          395
+        ]
+      ],
+      "homography_matrix": [
+        [
+          0.78350988,
+          -0.57943981,
+          310.0
+        ],
+        [
+          -0.07246377,
+          0.55803691,
+          105.0
+        ],
+        [
+          7.39e-06,
+          -0.00042729,
+          1.0
+        ]
+      ],
+      "expected_status": "GEOMETRIC_ABNORMAL",
+      "expected_trigger": true
+    },
+    {
+      "sample_id": "three_d_text",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/three_d_text.png",
+      "sample_sha256": "9d788dbfcd79ab8ae7114c1a5aaf364e9c9db54667b443576d09d330e893d3bb",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S07__chengdu_yanhuo.png",
+      "source_sha256": "3a9a5f0588d591e77fe02c6f6794855bd7e2bcbe6bd62bd522604c6a8d65ca57",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 420,
+      "height": 250,
+      "baseline": "3D_TEXT_BASELINE",
+      "derivation": "REAL_EMBOSSED_3D_TEXT_CROP",
+      "crop_box_xyxy": [
+        610,
+        1040,
+        1030,
+        1290
+      ],
+      "geometry_severity": "3D_TEXT",
+      "geometry_abnormal": false,
+      "fragmented": false,
+      "expected_status": "OCR_EMPTY",
+      "expected_trigger": true
+    },
+    {
+      "sample_id": "low_confidence_text_control",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/low_confidence_text_control.png",
+      "sample_sha256": "b75d40e956ada980a491b8b48011608ad91c003dabaf76b34f2e4b95871343ab",
+      "source_path": "artifacts/4k_stage1_baseline/golden_samples/S02__lixiang_l9.png",
+      "source_sha256": "ed951ff181b36543373397661473ce9d3576bbacb8fbfaafd2bece81f336e2f5",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 360,
+      "height": 240,
+      "baseline": "3D_TEXT_BASELINE",
+      "derivation": "REAL_DESIGN_TEXT_CROP",
+      "crop_box_xyxy": [
+        0,
+        0,
+        360,
+        240
+      ],
+      "geometry_severity": "NONE",
+      "geometry_abnormal": false,
+      "fragmented": false,
+      "expected_status": "LOW_CONFIDENCE",
+      "expected_trigger": true
+    },
+    {
+      "sample_id": "no_text_control",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/no_text_control.png",
+      "sample_sha256": "20bea06b6b5460f1d77e1b3c4cf40d2fef314f9d7eb50ef5e14e291ece9007c8",
+      "source_path": "artifacts/hdde_stage02_internal_self_exemplar_poc_20260813/batch_20260813T110924_internal_self_exemplar_crop_gt_stage_a/source_crops/real/S03_face__LQ.png",
+      "source_sha256": "46d0442a1b183a6bc9a6d6a49264d542cfb627d50f99d7cff2cd38000025293f",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "format": "PNG",
+      "color_mode": "BGR_8BIT",
+      "width": 192,
+      "height": 192,
+      "baseline": "FALSE_POSITIVE_BASELINE",
+      "derivation": "REAL_NO_TEXT_CONTROL_COPY",
+      "crop_box_xyxy": null,
+      "geometry_severity": "NONE",
+      "geometry_abnormal": false,
+      "fragmented": false,
+      "expected_status": "OCR_EMPTY",
+      "expected_trigger": true
+    }
+  ]
+}

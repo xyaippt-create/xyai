@@ -1,0 +1,59 @@
+{
+  "schema_version": "hdde.stage5.chrome-ui-evidence.v1",
+  "captured_from": "real_chrome",
+  "captured_at": "2026-07-18T07:24:49.615Z",
+  "response_status_visible": "BLOCKED_UNSAFE",
+  "alternative_action_visible": "图片尺寸缩小",
+  "alternative_parameter_visible": "缩小策略：固定短边 · 短边：750像素",
+  "required_targets_visible": "NOT_APPLICABLE",
+  "console_error_count": 0,
+  "auto_processing_triggered": false,
+  "task_side_effects": "NONE",
+  "output_side_effects": "NONE",
+  "download_side_effects": "NONE",
+  "absolute_path_in_preflight": false,
+  "viewports": {
+    "light_1440x900": {
+      "absolute_path_in_preflight": false,
+      "alternative_text": "替代建议图片尺寸缩小建议参数缩小策略：固定短边 · 短边：750像素",
+      "apply_button_count": 0,
+      "client_width": 1440,
+      "horizontal_scroll": false,
+      "scroll_width": 1440,
+      "status": "BLOCKED_UNSAFE",
+      "target_short_side_750_visible": true,
+      "task_or_download_marker_count": 0,
+      "theme": "light",
+      "viewport": {
+        "height": 900,
+        "width": 1440
+      }
+    },
+    "dark_1920x1080": {
+      "client_width": 1920,
+      "horizontal_scroll": false,
+      "scroll_width": 1920,
+      "target_short_side_750_visible": true,
+      "theme": "dark",
+      "viewport": {
+        "height": 1080,
+        "width": 1920
+      }
+    },
+    "follow_system_1920x1080": {
+      "client_width": 1920,
+      "horizontal_scroll": false,
+      "scroll_width": 1920,
+      "target_short_side_750_visible": true,
+      "theme": "dark",
+      "viewport": {
+        "height": 1080,
+        "width": 1920
+      }
+    }
+  },
+  "screenshots": [
+    "stage5_command3_long_image_preflight_1440x900_light.png",
+    "stage5_command3_long_image_preflight_1920x1080_dark.png"
+  ]
+}

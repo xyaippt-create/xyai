@@ -31,6 +31,9 @@ from engine.algorithms.single_image_color_correction import (
 )
 from engine.algorithms.text_clarity import detect_text_like_regions, enhance_text_regions
 from runtime.logger import logs_dir
+from engine.output.filename_policy import FEATURE_1080P, build_output_path
+from engine.output.metadata_writer import HDDE_COMMENT, HDDE_KEYWORDS, HDDE_SOFTWARE, read_hdde_metadata
+from engine.output.publish_safety import publish_image_file_with_metadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,98 +61,18 @@ class OutputFileWriteError(OSError):
     hdde_error_category = "ENVIRONMENT_ERROR"
 
 
-DELIVERY_METADATA = {
-    "author_name": "雪原Ai·PPT设计",
-    "author_wechat": "893812410",
-    "author_contact": "微信：893812410",
-    "copyright": "© 雪原Ai·PPT设计",
-    "software_name": "影界 / VisualMasterPro",
-    "metadata_description": "由影界高清交付引擎生成，用于中文商业视觉高清交付",
-}
+def write_delivery_metadata(path: Path, *, source_path: Path | None = None) -> dict[str, Any]:
+    """Read-only compatibility check for metadata written before publication."""
 
-
-def _xp_text(value: str) -> bytes:
-    return (str(value) + "\x00").encode("utf-16le")
-
-
-def write_delivery_metadata(path: Path) -> dict[str, Any]:
-    """Write silent delivery metadata into the output file.
-
-    This must never block normal image export. Windows exposes common JPEG EXIF
-    fields more reliably than PNG text chunks; PNG metadata is still written for
-    tooling/Pillow/ExifTool verification.
-    """
-    target = Path(path)
-    status = {
-        "written": False,
-        "format": target.suffix.lower().lstrip("."),
-        "method": "",
-        "error": "",
-    }
-    try:
-        from PIL import Image
-        from PIL.PngImagePlugin import PngInfo
-    except Exception as exc:
-        status["error"] = f"Pillow unavailable: {exc}"
-        return status
-
-    suffix = target.suffix.lower()
-    try:
-        if suffix in {".jpg", ".jpeg"}:
-            with Image.open(target) as image:
-                exif = image.getexif()
-                exif[315] = DELIVERY_METADATA["author_name"]  # Artist
-                exif[305] = DELIVERY_METADATA["software_name"]  # Software
-                exif[33432] = DELIVERY_METADATA["copyright"]  # Copyright
-                exif[270] = DELIVERY_METADATA["metadata_description"]  # ImageDescription
-                exif[37510] = b"UNICODE\x00" + DELIVERY_METADATA["author_contact"].encode("utf-16le")
-                exif[40091] = _xp_text("影界高清交付图")
-                exif[40092] = _xp_text(DELIVERY_METADATA["author_contact"])
-                exif[40093] = _xp_text(DELIVERY_METADATA["author_name"])
-                exif[40095] = _xp_text(DELIVERY_METADATA["metadata_description"])
-                save_kwargs = {"exif": exif}
-                if image.format == "JPEG":
-                    save_kwargs.update({"quality": "keep", "subsampling": "keep"})
-                else:
-                    save_kwargs.update({"quality": 95, "subsampling": 0})
-                if image.mode not in {"RGB", "L"}:
-                    image = image.convert("RGB")
-                image.save(target, **save_kwargs)
-            status.update({"written": True, "method": "jpeg_exif"})
-            return status
-
-        if suffix == ".png":
-            with Image.open(target) as image:
-                pnginfo = PngInfo()
-                for key, value in (image.info or {}).items():
-                    if isinstance(value, str):
-                        pnginfo.add_text(key, value)
-                png_entries = {
-                    "Author": DELIVERY_METADATA["author_name"],
-                    "Artist": DELIVERY_METADATA["author_name"],
-                    "Creator": DELIVERY_METADATA["author_name"],
-                    "Software": DELIVERY_METADATA["software_name"],
-                    "Copyright": DELIVERY_METADATA["copyright"],
-                    "Description": DELIVERY_METADATA["metadata_description"],
-                    "Comment": DELIVERY_METADATA["author_contact"],
-                    "Contact": DELIVERY_METADATA["author_contact"],
-                    "WeChat": DELIVERY_METADATA["author_wechat"],
-                    "VisualMasterPro.Author": DELIVERY_METADATA["author_name"],
-                    "VisualMasterPro.WeChat": DELIVERY_METADATA["author_wechat"],
-                    "VisualMasterPro.Contact": DELIVERY_METADATA["author_contact"],
-                    "VisualMasterPro.Software": DELIVERY_METADATA["software_name"],
-                }
-                for key, value in png_entries.items():
-                    pnginfo.add_text(key, value)
-                image.save(target, pnginfo=pnginfo)
-            status.update({"written": True, "method": "png_text"})
-            return status
-
-        status["error"] = "unsupported_format"
-        return status
-    except Exception as exc:
-        status["error"] = str(exc)
-        return status
+    del source_path
+    metadata = read_hdde_metadata(path)
+    if (
+        metadata.get("software") != HDDE_SOFTWARE
+        or metadata.get("comment") != HDDE_COMMENT
+        or metadata.get("keywords") != HDDE_KEYWORDS
+    ):
+        raise ValueError("HDDE_METADATA_VERIFY_FAILED")
+    return {"written": True, **metadata, "verified_after_publish": True}
 
 
 def normalize_output_root(output_root: Path) -> Path:
@@ -468,6 +391,7 @@ def build_output_paths(
     selected_format: str,
     mode: str = "fidelity",
     timestamp: str | None = None,
+    original_filename: str | None = None,
 ) -> dict[str, Path]:
     dirs = output_dirs(output_root)
     stem = safe_filename_part(Path(source).stem)
@@ -477,7 +401,18 @@ def build_output_paths(
     fmt = "jpg" if selected_format == "jpeg" else selected_format
     for key in ("formal", "work", "debug", "test", "test_archive"):
         dirs[key].mkdir(parents=True, exist_ok=True)
-    final_path = unique_path(dirs["formal"] / f"{output_stem}.{fmt}")
+    try:
+        filename_moment = datetime.strptime(timestamp, "%Y%m%d_%H%M%S") if timestamp else datetime.now()
+    except ValueError:
+        filename_moment = datetime.now()
+    final_path = build_output_path(
+        dirs["formal"],
+        source.name,
+        FEATURE_1080P,
+        f".{fmt}",
+        trusted_original_filename=original_filename,
+        moment=filename_moment,
+    )
     return {
         "main": dirs["work"] / f"{output_stem}_main.png",
         "optimized": dirs["work"] / f"{output_stem}_optimized.{fmt}",
@@ -497,6 +432,7 @@ def build_output_plan(
     debug_keep_intermediate: bool | str = False,
     mode: str = "fidelity",
     timestamp: str | None = None,
+    original_filename: str | None = None,
 ) -> dict[str, Any]:
     image, _, has_alpha, has_real_alpha = load_image_with_alpha(input_path)
     height, width = image.shape[:2]
@@ -506,7 +442,14 @@ def build_output_plan(
     selected_format, format_note, alpha_used = choose_format(output_format, profile, has_alpha, has_real_alpha, text_density)
     target_width, target_height, preset, scale_policy, resolution_gate_pass, resize_policy, was_upscaled, was_downscaled = target_size(width, height, profile)
     ratio, _ = aspect_label(width, height)
-    paths = build_output_paths(input_path, output_root, selected_format, mode=mode, timestamp=timestamp)
+    paths = build_output_paths(
+        input_path,
+        output_root,
+        selected_format,
+        mode=mode,
+        timestamp=timestamp,
+        original_filename=original_filename,
+    )
     return {
         "output_profile": output_profile or "delivery_1080p",
         "output_format": output_format or "auto",
@@ -823,21 +766,21 @@ def write_encoded(path: Path, encoded: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
-def safe_copy_final(source: Path, final_path: Path) -> Path:
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = final_path.with_name(f"{final_path.stem}_tmp{final_path.suffix}")
-    counter = 1
-    while temp_path.exists():
-        temp_path = final_path.with_name(f"{final_path.stem}_tmp_{counter}{final_path.suffix}")
-        counter += 1
-    shutil.copyfile(str(source), str(temp_path))
-    try:
-        temp_path.replace(final_path)
-    except OSError:
-        if final_path.exists():
-            final_path.unlink()
-        temp_path.replace(final_path)
-    return final_path
+def safe_copy_final(
+    source: Path,
+    final_path: Path,
+    *,
+    source_path: Path | None = None,
+    metadata_report: dict[str, Any] | None = None,
+) -> Path:
+    published, report, _validation = publish_image_file_with_metadata(
+        source,
+        final_path,
+        source_path=source_path,
+    )
+    if metadata_report is not None:
+        metadata_report.update(report)
+    return published
 
 
 def decode_encoded(encoded: np.ndarray) -> np.ndarray:
@@ -1261,6 +1204,7 @@ def process_v036_output(
     debug_keep_intermediate: bool | str = False,
     color_stability_enabled: bool | str = True,
     color_correction_enabled: bool | str = False,
+    original_filename: str | None = None,
 ) -> dict[str, Any]:
     total_start = time.perf_counter()
     timings = dict(initial_timing or {})
@@ -1292,6 +1236,7 @@ def process_v036_output(
         debug_keep_intermediate,
         mode=mode,
         timestamp=export_timestamp,
+        original_filename=original_filename,
     )
     profile = plan["selected_output_profile"]
     selected_format = plan["selected_output_format"]
@@ -1433,15 +1378,42 @@ def process_v036_output(
     final_quality_source = "optimized_output" if use_optimized else "main_output"
     final_path = paths["final"]
     if final_path.suffix.lower() != final_source.suffix.lower():
-        final_path = final_path.with_suffix(final_source.suffix)
+        final_path = build_output_path(
+            dirs["formal"],
+            input_path.name,
+            FEATURE_1080P,
+            final_source.suffix,
+            trusted_original_filename=original_filename,
+            moment=datetime.strptime(export_timestamp, "%Y%m%d_%H%M%S"),
+        )
         paths["final"] = final_path
-    try:
-        final_path = safe_copy_final(final_source, final_path)
-    except OSError as exc:
-        raise OutputFileWriteError(f"成品文件写入或替换失败：{exc}") from exc
+    delivery_package: dict[str, Any] = {}
+    while True:
+        try:
+            final_path = safe_copy_final(
+                final_source,
+                final_path,
+                source_path=input_path,
+                metadata_report=delivery_package,
+            )
+            break
+        except FileExistsError:
+            final_path = build_output_path(
+                dirs["formal"],
+                input_path.name,
+                FEATURE_1080P,
+                final_source.suffix,
+                trusted_original_filename=original_filename,
+                moment=datetime.strptime(export_timestamp, "%Y%m%d_%H%M%S"),
+            )
+        except Exception as exc:
+            raise OutputFileWriteError(f"成品私有元数据阶段或排他发布失败：{exc}") from exc
     paths["final"] = final_path
     quarantine_formal_output_noise(dirs["formal"], dirs["test_archive"], dirs["work"], protected_paths={final_path})
-    delivery_package = write_delivery_metadata(final_path)
+    try:
+        write_delivery_metadata(final_path, source_path=input_path)
+    except Exception as exc:
+        raise OutputFileWriteError(f"成品发布后元数据只读核验失败：{exc}") from exc
 
     final_size = final_path.stat().st_size
     final_hash = sha256_file(final_path)

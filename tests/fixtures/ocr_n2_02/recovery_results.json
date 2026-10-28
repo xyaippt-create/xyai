@@ -1,0 +1,1394 @@
+{
+  "contract": "hdde.ocr-perspective-recovery-evidence.n2-02.v1",
+  "recovery_contract": "hdde.perspective-ocr-recovery.n2-02.v1",
+  "recorded_at": "2026-08-14T09:36:59.219736+00:00",
+  "n2_01_sample_contract": "hdde.ocr-real-sample-set.n2-01.v1",
+  "n2_01_result_contract": "hdde.ocr-real-baseline.n2-01.v1",
+  "n2_01_manifest_sha256": "c0486dc0f8f8caa5184352153a2a5e52fde741c6a62b3375310b84fe3f5fac89",
+  "n2_01_results_sha256": "8a6203cebf0a4ca2a2a8945447d7fda1e76c051e7e1c864c5fa5e336f8d28716",
+  "ocr_engine": "windows_media_ocr_zh_hans_cn",
+  "mock_used": false,
+  "reference_title": "湖州市黔南州校校合作座谈会",
+  "gain_status": {
+    "perspective_medium": "PASS",
+    "perspective_strong": "PASS",
+    "perspective_fragmented": "PASS"
+  },
+  "normal_ocr_protection": "PASS",
+  "false_positive_control": "PASS",
+  "real_gain_proven": "PASS",
+  "scope": {
+    "three_d_text_recovery_developed": false,
+    "n1_integration_changed": false,
+    "result_delivery_changed": false,
+    "four_k_changed": false,
+    "color_correction_changed": false,
+    "ui_changed": false
+  },
+  "samples": [
+    {
+      "sample_id": "normal_chinese_title",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/normal_chinese_title.png",
+      "sample_sha256": "8bca68310397dcd88d71e2d795df742a22e2fdc61b5fbe888d6b49bcdd2a8e36",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校校合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校校合作座谈会"
+        ]
+      },
+      "trigger": {
+        "status": "NORMAL_RELIABLE",
+        "trigger_recovery": false,
+        "reasons": []
+      },
+      "applied": false,
+      "reason": "RECOVERY_NOT_TRIGGERED",
+      "after": {},
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "selected_source": "NORMAL",
+        "selected_candidate": {
+          "source": "NORMAL",
+          "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "NORMAL_RELIABLE_PROTECTED",
+        "structural_consistency": 0.0,
+        "real_gain": false
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "湖州市黔南州校校合作座谈会",
+        "final_value": "湖州市黔南州校校合作座谈会",
+        "before_accuracy": 1.0,
+        "after_accuracy": 1.0,
+        "accuracy_gain": 0.0
+      },
+      "geometry": {
+        "geometry_source": "NONE"
+      },
+      "rectification": {},
+      "artifact_path": "",
+      "artifact_sha256": ""
+    },
+    {
+      "sample_id": "perspective_light",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_light.png",
+      "sample_sha256": "d659cea99cf6de2fbc1d3debcd23e860ae0de544a5b4f86fe6b931b0a64033f9",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校校合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校校合作座谈会"
+        ]
+      },
+      "trigger": {
+        "status": "NORMAL_RELIABLE",
+        "trigger_recovery": false,
+        "reasons": []
+      },
+      "applied": false,
+      "reason": "RECOVERY_NOT_TRIGGERED",
+      "after": {},
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "selected_source": "NORMAL",
+        "selected_candidate": {
+          "source": "NORMAL",
+          "text": "湖 州 市 ． 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "NORMAL_RELIABLE_PROTECTED",
+        "structural_consistency": 0.0,
+        "real_gain": false
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "湖州市黔南州校校合作座谈会",
+        "final_value": "湖州市黔南州校校合作座谈会",
+        "before_accuracy": 1.0,
+        "after_accuracy": 1.0,
+        "accuracy_gain": 0.0
+      },
+      "geometry": {
+        "geometry_source": "NONE"
+      },
+      "rectification": {},
+      "artifact_path": "",
+      "artifact_sha256": ""
+    },
+    {
+      "sample_id": "perspective_medium",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_medium.png",
+      "sample_sha256": "ae63eb1292917486dbba5454b0a01e2e0858e2992874d110b458296202562f54",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "· 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "· 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "NO_NAMING_VALUE",
+        "title_value": "",
+        "naming_candidates": []
+      },
+      "trigger": {
+        "status": "GEOMETRIC_ABNORMAL",
+        "trigger_recovery": true,
+        "reasons": [
+          "GEOMETRIC_ABNORMAL"
+        ]
+      },
+      "applied": true,
+      "reason": "LOCAL_RECTIFICATION_EXECUTED",
+      "after": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校校合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校校合作座谈会"
+        ]
+      },
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "· 州 校 校 合 作 座 谈 会",
+          "title_value": "",
+          "normalized_text": "州校校合作座谈会",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 1,
+          "character_completeness": 8
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selected_source": "PERSPECTIVE_RECOVERY",
+        "selected_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "RECOVERY_RELIABLE_COMPLETE_AND_STRUCTURALLY_CONSISTENT",
+        "structural_consistency": 1.0,
+        "real_gain": true
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "· 州 校 校 合 作 座 谈 会",
+        "final_value": "湖州市黔南州校校合作座谈会",
+        "before_accuracy": 0.6154,
+        "after_accuracy": 1.0,
+        "accuracy_gain": 0.3846
+      },
+      "geometry": {
+        "geometry_source": "N2_01_FROZEN_NORMAL_TEXT_BLOCK_PLUS_SAMPLE_HOMOGRAPHY",
+        "base_text_box_xyxy": [
+          90.25,
+          185.08,
+          1400.75,
+          390.8
+        ]
+      },
+      "rectification": {
+        "full_image_transform": false,
+        "source_dimensions": [
+          1450,
+          400
+        ],
+        "canvas_dimensions_before_scale": [
+          1310,
+          206
+        ],
+        "output_dimensions": [
+          2620,
+          412
+        ],
+        "scale": 2.0,
+        "interpolation": "INTER_CUBIC",
+        "color_mode": "BGR_8BIT",
+        "region_count": 1,
+        "source_area_ratio": 0.379927,
+        "regions": [
+          {
+            "label": "LOCAL_TITLE_QUAD",
+            "source_quad_xy": [
+              [
+                190.6969,
+                202.1991
+              ],
+              [
+                1392.4342,
+                150.4565
+              ],
+              [
+                1398.4948,
+                329.529
+              ],
+              [
+                143.605,
+                383.6927
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                1309.0,
+                0.0
+              ],
+              [
+                1309.0,
+                205.0
+              ],
+              [
+                0.0,
+                205.0
+              ]
+            ],
+            "source_crop_xyxy": [
+              141,
+              148,
+              1402,
+              387
+            ],
+            "homography_matrix": [
+              [
+                2.23248363,
+                0.57925964,
+                -142.34297465
+              ],
+              [
+                0.10415841,
+                2.41910937,
+                -136.28993467
+              ],
+              [
+                1.016e-05,
+                0.00024978,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      "artifact_path": "tests/fixtures/ocr_n2_02/recovered/perspective_medium_rectified.png",
+      "artifact_sha256": "04db2f6f525245628b28ab20744f59ec26d1e33660d5b949f1de86e8926b1703"
+    },
+    {
+      "sample_id": "perspective_strong",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/perspective_strong.png",
+      "sample_sha256": "54a0a1cc58a74392469b29f262247b4f1bcdf58bdb1c7093437b7e42591e531d",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "",
+        "lines": [],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "NO_NAMING_VALUE",
+        "title_value": "",
+        "naming_candidates": []
+      },
+      "trigger": {
+        "status": "GEOMETRIC_ABNORMAL",
+        "trigger_recovery": true,
+        "reasons": [
+          "GEOMETRIC_ABNORMAL"
+        ]
+      },
+      "applied": true,
+      "reason": "LOCAL_RECTIFICATION_EXECUTED",
+      "after": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校校合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校校合作座谈会"
+        ]
+      },
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selected_source": "PERSPECTIVE_RECOVERY",
+        "selected_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "RECOVERY_RELIABLE_COMPLETE_AND_STRUCTURALLY_CONSISTENT",
+        "structural_consistency": 1.0,
+        "real_gain": true
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "",
+        "final_value": "湖州市黔南州校校合作座谈会",
+        "before_accuracy": 0.0,
+        "after_accuracy": 1.0,
+        "accuracy_gain": 1.0
+      },
+      "geometry": {
+        "geometry_source": "N2_01_FROZEN_NORMAL_TEXT_BLOCK_PLUS_SAMPLE_HOMOGRAPHY",
+        "base_text_box_xyxy": [
+          90.25,
+          185.08,
+          1400.75,
+          390.8
+        ]
+      },
+      "rectification": {
+        "full_image_transform": false,
+        "source_dimensions": [
+          1450,
+          400
+        ],
+        "canvas_dimensions_before_scale": [
+          1310,
+          206
+        ],
+        "output_dimensions": [
+          2620,
+          412
+        ],
+        "scale": 2.0,
+        "interpolation": "INTER_CUBIC",
+        "color_mode": "BGR_8BIT",
+        "region_count": 1,
+        "source_area_ratio": 0.297917,
+        "regions": [
+          {
+            "label": "LOCAL_TITLE_QUAD",
+            "source_quad_xy": [
+              [
+                296.738,
+                218.9074
+              ],
+              [
+                1396.2229,
+                114.6585
+              ],
+              [
+                1400.4069,
+                262.7294
+              ],
+              [
+                185.0426,
+                379.6903
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                1309.0,
+                0.0
+              ],
+              [
+                1309.0,
+                205.0
+              ],
+              [
+                0.0,
+                205.0
+              ]
+            ],
+            "source_crop_xyxy": [
+              183,
+              112,
+              1404,
+              383
+            ],
+            "homography_matrix": [
+              [
+                2.74399918,
+                1.90624884,
+                -515.88918034
+              ],
+              [
+                0.31124672,
+                3.28263263,
+                -386.33843343
+              ],
+              [
+                6.139e-05,
+                0.00075601,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      "artifact_path": "tests/fixtures/ocr_n2_02/recovered/perspective_strong_rectified.png",
+      "artifact_sha256": "ae532d2c3814d5856a479af2a8727854351fd64c6a88cf98f0c4a158e62b9ed5"
+    },
+    {
+      "sample_id": "fragmented_title_control",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/fragmented_title_control.png",
+      "sample_sha256": "b43d68ade8b6a87df25cc1f78aeb8bde204b7a717449feb67ea3c2e8f438e315",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "CONTROLLED_DERIVATION_FROM_REAL_SOURCE",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 ． 黔 南 扩",
+        "lines": [
+          "湖 州 ． 黔 南 扩"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "NO_NAMING_VALUE",
+        "title_value": "",
+        "naming_candidates": []
+      },
+      "trigger": {
+        "status": "FRAGMENTED",
+        "trigger_recovery": true,
+        "reasons": [
+          "FRAGMENTED"
+        ]
+      },
+      "applied": true,
+      "reason": "LOCAL_RECTIFICATION_EXECUTED",
+      "after": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 。 黔 南 州 校 棱 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 。 黔 南 州 校 棱 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校棱合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校棱合作座谈会"
+        ]
+      },
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "湖 州 ． 黔 南 扩",
+          "title_value": "",
+          "normalized_text": "湖州黔南扩",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 1,
+          "character_completeness": 5
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 棱 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校棱合作座谈会",
+          "normalized_text": "湖州市黔南州校棱合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selected_source": "PERSPECTIVE_RECOVERY",
+        "selected_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 棱 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校棱合作座谈会",
+          "normalized_text": "湖州市黔南州校棱合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "RECOVERY_RELIABLE_COMPLETE_AND_STRUCTURALLY_CONSISTENT",
+        "structural_consistency": 0.8,
+        "real_gain": true
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "湖 州 ． 黔 南 扩",
+        "final_value": "湖州市黔南州校棱合作座谈会",
+        "before_accuracy": 0.3077,
+        "after_accuracy": 0.9231,
+        "accuracy_gain": 0.6154
+      },
+      "geometry": {
+        "geometry_source": "N2_01_FROZEN_FRAGMENT_DERIVATION_CONTRACT",
+        "base_text_box_xyxy": [
+          90.25,
+          185.08,
+          1400.75,
+          390.8
+        ],
+        "fragment_cuts_x": [
+          0,
+          362,
+          725,
+          1087,
+          1450
+        ],
+        "fragment_offsets_y": [
+          45,
+          -20,
+          60,
+          -35
+        ]
+      },
+      "rectification": {
+        "full_image_transform": false,
+        "source_dimensions": [
+          1450,
+          400
+        ],
+        "canvas_dimensions_before_scale": [
+          1310,
+          206
+        ],
+        "output_dimensions": [
+          2620,
+          412
+        ],
+        "scale": 2.0,
+        "interpolation": "INTER_CUBIC",
+        "color_mode": "BGR_8BIT",
+        "region_count": 4,
+        "source_area_ratio": 0.414337,
+        "regions": [
+          {
+            "label": "LOCAL_FRAGMENT_1",
+            "source_quad_xy": [
+              [
+                90.25,
+                230.08
+              ],
+              [
+                361.0,
+                230.08
+              ],
+              [
+                361.0,
+                399.0
+              ],
+              [
+                90.25,
+                399.0
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                270.75,
+                0.0
+              ],
+              [
+                270.75,
+                168.92
+              ],
+              [
+                0.0,
+                168.92
+              ]
+            ],
+            "source_crop_xyxy": [
+              88,
+              228,
+              364,
+              400
+            ],
+            "homography_matrix": [
+              [
+                2.0,
+                0.0,
+                -4.5
+              ],
+              [
+                0.0,
+                2.0,
+                -4.16000366
+              ],
+              [
+                -0.0,
+                -0.0,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_FRAGMENT_2",
+            "source_quad_xy": [
+              [
+                362.0,
+                165.08
+              ],
+              [
+                724.0,
+                165.08
+              ],
+              [
+                724.0,
+                370.8
+              ],
+              [
+                362.0,
+                370.8
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                271.75,
+                0.0
+              ],
+              [
+                633.75,
+                0.0
+              ],
+              [
+                633.75,
+                205.72
+              ],
+              [
+                271.75,
+                205.72
+              ]
+            ],
+            "source_crop_xyxy": [
+              360,
+              163,
+              727,
+              374
+            ],
+            "homography_matrix": [
+              [
+                2.0,
+                -0.0,
+                539.5
+              ],
+              [
+                0.0,
+                2.00000015,
+                -4.16000397
+              ],
+              [
+                -0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_FRAGMENT_3",
+            "source_quad_xy": [
+              [
+                725.0,
+                245.08
+              ],
+              [
+                1086.0,
+                245.08
+              ],
+              [
+                1086.0,
+                399.0
+              ],
+              [
+                725.0,
+                399.0
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                634.75,
+                0.0
+              ],
+              [
+                995.75,
+                0.0
+              ],
+              [
+                995.75,
+                153.92
+              ],
+              [
+                634.75,
+                153.92
+              ]
+            ],
+            "source_crop_xyxy": [
+              723,
+              243,
+              1089,
+              400
+            ],
+            "homography_matrix": [
+              [
+                2.0,
+                -0.0,
+                1265.5
+              ],
+              [
+                0.0,
+                2.0,
+                -4.16000366
+              ],
+              [
+                0.0,
+                -0.0,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_FRAGMENT_4",
+            "source_quad_xy": [
+              [
+                1087.0,
+                150.08
+              ],
+              [
+                1400.75,
+                150.08
+              ],
+              [
+                1400.75,
+                355.8
+              ],
+              [
+                1087.0,
+                355.8
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                996.75,
+                0.0
+              ],
+              [
+                1310.5,
+                0.0
+              ],
+              [
+                1310.5,
+                205.72
+              ],
+              [
+                996.75,
+                205.72
+              ]
+            ],
+            "source_crop_xyxy": [
+              1085,
+              148,
+              1404,
+              359
+            ],
+            "homography_matrix": [
+              [
+                2.0,
+                -0.0,
+                1989.5
+              ],
+              [
+                0.0,
+                2.00000015,
+                -4.16000397
+              ],
+              [
+                -0.0,
+                -0.0,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      "artifact_path": "tests/fixtures/ocr_n2_02/recovered/fragmented_title_control_rectified.png",
+      "artifact_sha256": "02f9e507b22f2b964532c7f67b9ca82c5be83b3d8dda319b43d8874e15a9d361"
+    },
+    {
+      "sample_id": "perspective_fragmented",
+      "sample_path": "tests/fixtures/ocr_n2_02/samples/perspective_fragmented.png",
+      "sample_sha256": "4ee96553cb4d3929bbb15cac54e7628ef9805f162b08a268bb6b41fca47b94f6",
+      "source_kind": "N2_01_FROZEN_REAL_SAMPLE",
+      "sample_kind": "CONTROLLED_PERSPECTIVE_FRAGMENTATION_FROM_N2_01_FROZEN_SAMPLE",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "",
+        "lines": [],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "NO_NAMING_VALUE",
+        "title_value": "",
+        "naming_candidates": []
+      },
+      "trigger": {
+        "status": "FRAGMENTED",
+        "trigger_recovery": true,
+        "reasons": [
+          "FRAGMENTED"
+        ]
+      },
+      "applied": true,
+      "reason": "LOCAL_RECTIFICATION_EXECUTED",
+      "after": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+        "lines": [
+          "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会"
+        ],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "PASSED",
+        "title_value": "湖州市黔南州校校合作座谈会",
+        "naming_candidates": [
+          "湖州市黔南州校校合作座谈会"
+        ]
+      },
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selected_source": "PERSPECTIVE_RECOVERY",
+        "selected_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "湖 州 市 。 黔 南 州 校 校 合 作 座 谈 会",
+          "title_value": "湖州市黔南州校校合作座谈会",
+          "normalized_text": "湖州市黔南州校校合作座谈会",
+          "relevance_filter": "PASSED",
+          "reliable": true,
+          "reliability_rank": 3,
+          "character_completeness": 13
+        },
+        "selection_reason": "RECOVERY_RELIABLE_COMPLETE_AND_STRUCTURALLY_CONSISTENT",
+        "structural_consistency": 1.0,
+        "real_gain": true
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "",
+        "final_value": "湖州市黔南州校校合作座谈会",
+        "before_accuracy": 0.0,
+        "after_accuracy": 1.0,
+        "accuracy_gain": 1.0
+      },
+      "geometry": {
+        "geometry_source": "N2_01_FROZEN_MEDIUM_HOMOGRAPHY_PLUS_N2_02_FRAGMENT_OFFSETS",
+        "base_text_box_xyxy": [
+          90.25,
+          185.08,
+          1400.75,
+          390.8
+        ],
+        "fragment_cuts_x": [
+          0,
+          362,
+          725,
+          1087,
+          1450
+        ],
+        "fragment_offsets_y": [
+          25,
+          -15,
+          35,
+          -20
+        ]
+      },
+      "rectification": {
+        "full_image_transform": false,
+        "source_dimensions": [
+          1450,
+          400
+        ],
+        "canvas_dimensions_before_scale": [
+          1310,
+          206
+        ],
+        "output_dimensions": [
+          2620,
+          412
+        ],
+        "scale": 2.0,
+        "interpolation": "INTER_CUBIC",
+        "color_mode": "BGR_8BIT",
+        "region_count": 4,
+        "source_area_ratio": 0.377518,
+        "regions": [
+          {
+            "label": "LOCAL_PERSPECTIVE_FRAGMENT_1",
+            "source_quad_xy": [
+              [
+                190.6969,
+                227.1991
+              ],
+              [
+                361.0,
+                219.8665
+              ],
+              [
+                361.0,
+                399.0
+              ],
+              [
+                143.605,
+                399.0
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                0.0,
+                -0.0
+              ],
+              [
+                185.6036,
+                -0.0
+              ],
+              [
+                226.822,
+                205.3802
+              ],
+              [
+                -2.6603,
+                195.0553
+              ]
+            ],
+            "source_crop_xyxy": [
+              141,
+              217,
+              364,
+              400
+            ],
+            "homography_matrix": [
+              [
+                2.21074583,
+                0.57361951,
+                -115.71772379
+              ],
+              [
+                0.10338803,
+                2.40121652,
+                -29.62837578
+              ],
+              [
+                1.005e-05,
+                0.00024706,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_PERSPECTIVE_FRAGMENT_2",
+            "source_quad_xy": [
+              [
+                362.0,
+                179.8234
+              ],
+              [
+                724.0,
+                164.2369
+              ],
+              [
+                724.0,
+                343.6416
+              ],
+              [
+                362.0,
+                359.2663
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                186.6935,
+                -0.0
+              ],
+              [
+                581.3407,
+                -0.0
+              ],
+              [
+                605.8745,
+                205.72
+              ],
+              [
+                227.934,
+                205.72
+              ]
+            ],
+            "source_crop_xyxy": [
+              360,
+              162,
+              727,
+              363
+            ],
+            "homography_matrix": [
+              [
+                2.21407897,
+                0.57448389,
+                360.37386991
+              ],
+              [
+                0.10354387,
+                2.40483656,
+                -43.06946984
+              ],
+              [
+                1.006e-05,
+                0.00024743,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_PERSPECTIVE_FRAGMENT_3",
+            "source_quad_xy": [
+              [
+                725.0,
+                214.1939
+              ],
+              [
+                1086.0,
+                198.6505
+              ],
+              [
+                1086.0,
+                378.0169
+              ],
+              [
+                725.0,
+                393.5984
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                582.4311,
+                -0.0
+              ],
+              [
+                976.156,
+                0.0
+              ],
+              [
+                983.976,
+                205.72
+              ],
+              [
+                606.9188,
+                205.72
+              ]
+            ],
+            "source_crop_xyxy": [
+              723,
+              196,
+              1089,
+              397
+            ],
+            "homography_matrix": [
+              [
+                2.21475732,
+                0.57466191,
+                1155.24639254
+              ],
+              [
+                0.10357567,
+                2.40557388,
+                -43.97390017
+              ],
+              [
+                1.007e-05,
+                0.00024751,
+                1.0
+              ]
+            ]
+          },
+          {
+            "label": "LOCAL_PERSPECTIVE_FRAGMENT_4",
+            "source_quad_xy": [
+              [
+                1087.0,
+                143.6074
+              ],
+              [
+                1392.4342,
+                130.4565
+              ],
+              [
+                1398.4948,
+                309.529
+              ],
+              [
+                1087.0,
+                322.9738
+              ]
+            ],
+            "destination_quad_xy": [
+              [
+                977.2469,
+                0.0
+              ],
+              [
+                1310.5,
+                0.0
+              ],
+              [
+                1310.4999,
+                205.72
+              ],
+              [
+                985.0208,
+                205.72
+              ]
+            ],
+            "source_crop_xyxy": [
+              1085,
+              128,
+              1402,
+              326
+            ],
+            "homography_matrix": [
+              [
+                2.21381266,
+                0.5744158,
+                1948.68745272
+              ],
+              [
+                0.10353141,
+                2.4045484,
+                -37.7358642
+              ],
+              [
+                1.006e-05,
+                0.00024741,
+                1.0
+              ]
+            ]
+          }
+        ]
+      },
+      "artifact_path": "tests/fixtures/ocr_n2_02/recovered/perspective_fragmented_rectified.png",
+      "artifact_sha256": "6434ad48ec4a3e6d4919f6d177757010be6dc55ba35729a5db9046eda32d70a2"
+    },
+    {
+      "sample_id": "no_text_control",
+      "sample_path": "tests/fixtures/ocr_n2_01/samples/no_text_control.png",
+      "sample_sha256": "20bea06b6b5460f1d77e1b3c4cf40d2fef314f9d7eb50ef5e14e291ece9007c8",
+      "source_kind": "REAL_REPOSITORY_IMAGE",
+      "sample_kind": "REAL_SOURCE_CROP_OR_COPY",
+      "before": {
+        "available": true,
+        "engine": "windows_media_ocr_zh_hans_cn",
+        "text": "",
+        "lines": [],
+        "confidence_available": false,
+        "confidence": "UNAVAILABLE",
+        "relevance_filter": "NO_NAMING_VALUE",
+        "title_value": "",
+        "naming_candidates": []
+      },
+      "trigger": {
+        "status": "OCR_EMPTY",
+        "trigger_recovery": true,
+        "reasons": [
+          "OCR_EMPTY"
+        ]
+      },
+      "applied": false,
+      "reason": "TRIGGER_STATUS_NOT_PERSPECTIVE_N2_02",
+      "after": {},
+      "fusion": {
+        "normal_candidate": {
+          "source": "NORMAL",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "perspective_recovery_candidate": {
+          "source": "PERSPECTIVE_RECOVERY",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "selected_source": "NORMAL",
+        "selected_candidate": {
+          "source": "NORMAL",
+          "text": "",
+          "title_value": "",
+          "normalized_text": "",
+          "relevance_filter": "NO_NAMING_VALUE",
+          "reliable": false,
+          "reliability_rank": 0,
+          "character_completeness": 0
+        },
+        "selection_reason": "RECOVERY_NO_PROVEN_GAIN",
+        "structural_consistency": 1.0,
+        "real_gain": false
+      },
+      "metrics": {
+        "reference_title": "湖州市黔南州校校合作座谈会",
+        "before_value": "",
+        "final_value": "",
+        "before_accuracy": 0.0,
+        "after_accuracy": 0.0,
+        "accuracy_gain": 0.0
+      },
+      "geometry": {
+        "geometry_source": "NONE"
+      },
+      "rectification": {},
+      "artifact_path": "",
+      "artifact_sha256": ""
+    }
+  ]
+}

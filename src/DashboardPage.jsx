@@ -2,14 +2,19 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import TaskDetailPage from "./TaskDetailPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
 import QualityReportPage from "./QualityReportPage.jsx";
-import UnifiedFeedback from "./UnifiedFeedback.jsx";
 import { HddePageHeader } from "./HddeUI.jsx";
 import { resolveDeliveryStatus, resolveReportCenterMeta } from "./deliveryStatus.js";
 import { getFileDisplayName } from "./fileDisplayName.js";
 import { PRODUCT_BRAND_LINE, PRODUCT_VERSION_LABEL } from "./productVersion.js";
 import { resolve1080pSizeTreatment } from "./sizeTreatment.js";
+import { processingModeDisplayName } from "./productDisplay.js";
+import {
+  beginFeedbackOperation,
+  extractFeedbackTarget,
+  setCurrentFeedbackTarget,
+} from "./feedbackTarget.js";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const OUTPUT_PROFILE = "delivery_1080p";
 const DEFAULT_OUTPUT_FORMAT = "auto";
 const DEFAULT_SCALE = "2";
@@ -20,6 +25,8 @@ const PROCESSING_MODE_FOUR_K = "4k_v1";
 const PROCESSING_MODE_COLOR_CORRECTION = "AUTO_COLOR_CORRECTION";
 const FOUR_K_OUTPUT_PROFILE = "delivery_4k_v1";
 const SAFE_BETA_FETCH_TIMEOUT_MS = 300000;
+const TASK_LIST_INITIAL_PAGE_SIZE = 24;
+const TASK_LIST_PAGE_SIZE = 50;
 
 function resolveProcessingOutputDirectory(workdirInfo, processingMode) {
   if (workdirInfo?.directory_ready === false) return "";
@@ -54,18 +61,13 @@ const JPG95_REVIEW_FIELD_NAMES = [
 const processingModeOptions = [
   {
     id: PROCESSING_MODE_STANDARD,
-    label: "1080P标准增强",
-    desc: "沿用当前高清交付流程，适合标准 1080P 交付。",
-  },
-  {
-    id: PROCESSING_MODE_SAFE_BETA,
-    label: "1080P安全增强",
-    desc: "适用于中文商业非人像图，使用 35% protected 策略进行安全增强。",
+    label: "1080P画质",
+    desc: "在保护文字、Logo、颜色和结构的前提下生成1080P交付成品。",
   },
   {
     id: PROCESSING_MODE_FOUR_K,
-    label: "4K高清画质增强",
-    desc: "保持原图比例，将长边高质量适配至3840px；不宣称真实细节重建。",
+    label: "4K画质增强",
+    desc: "保持原图比例与构图，长边提升至3840像素：超分重建细节，并以原图保真融合，防止色偏、重绘与过锐光晕。",
   },
 ];
 
@@ -97,27 +99,89 @@ const statusText = {
   queued: "待处理",
   uploading: "上传中",
   processing: "处理中",
-  completed: "已生成",
+  completed: "已完成",
   failed: "失败",
   need_reselect: "需重新选择",
 };
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "blocked"]);
+const DELETABLE_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "pending", "queued"]);
+
+function taskListItemKey(item) {
+  return String(item?.id || item?.taskId || "");
+}
+
+function compareTaskItemsNewestFirst(left, right) {
+  const leftCreatedAt = String(left?.created_at || "");
+  const rightCreatedAt = String(right?.created_at || "");
+  if (!leftCreatedAt && !rightCreatedAt) return 0;
+  const leftTime = Date.parse(leftCreatedAt);
+  const rightTime = Date.parse(rightCreatedAt);
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  const createdAtOrder = rightCreatedAt.localeCompare(leftCreatedAt);
+  if (createdAtOrder) return createdAtOrder;
+  return taskListItemKey(right).localeCompare(taskListItemKey(left));
+}
+
+export const BACKEND_INTERRUPTION_NOTICE = "处理服务异常中断，本次任务未完成。当前图片已保留，请在服务恢复后重新处理。";
+
+export function isBackendServiceInterruption(message) {
+  const text = String(message || "").toLowerCase();
+  return [
+    "backend_unavailable",
+    "failed to fetch",
+    "networkerror",
+    "无法连接本地后端服务",
+    "无法连接上传接口",
+    "fastapi 服务",
+    "sse 流式日志通道异常",
+  ].some((token) => text.includes(token));
+}
+
+export function splitProcessingTaskLists(
+  items,
+  currentSessionIds = new Set(),
+) {
+  const queue = Array.isArray(items) ? items : [];
+  const current = queue.filter((item) => {
+    const key = taskListItemKey(item);
+    const isTerminal = TERMINAL_TASK_STATUSES.has(item?.status);
+    const isUnregisteredLocalFile = Boolean(item?.file) && !item?.taskId;
+    return key && (isUnregisteredLocalFile || !isTerminal || currentSessionIds.has(key));
+  }).sort(compareTaskItemsNewestFirst);
+  const history = queue.filter((item) => {
+    const key = taskListItemKey(item);
+    return key
+      && item?.taskId
+      && TERMINAL_TASK_STATUSES.has(item?.status)
+      && !currentSessionIds.has(key);
+  }).sort(compareTaskItemsNewestFirst);
+  return { current, history };
+}
 
 const deliveryStatusLabel = {
-  PASS: "可交付",
-  PASS_WITH_LIMITATION: "建议人工复核",
-  FAIL: "不建议交付",
+  PASS: "可直接使用",
+  PASS_WITH_LIMITATION: "建议复核",
+  FAIL: "不可使用",
 };
+
+const RETIRED_IMAGE_DIAGNOSIS_FAMILY = "image_diagnosis";
+
+function isRetiredImageDiagnosisTask(item) {
+  return item?.taskFamily === RETIRED_IMAGE_DIAGNOSIS_FAMILY;
+}
 
 function getModeDisplay(mode) {
   const normalized = mode || "";
   if (["fidelity", "texture", "text_safe"].includes(normalized)) {
-    return { label: "1080P标准增强", className: "text-[var(--brand-primary)]" };
+    return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
   }
-  if (normalized === PROCESSING_MODE_SAFE_BETA) return { label: "1080P安全增强", className: "text-[var(--brand-primary)]" };
-  if (normalized === PROCESSING_MODE_FOUR_K) return { label: "4K高清画质增强", className: "text-[var(--brand-primary)]" };
+  if (normalized === PROCESSING_MODE_SAFE_BETA) return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
+  if (normalized === PROCESSING_MODE_FOUR_K) return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
   if (normalized === PROCESSING_MODE_COLOR_CORRECTION) return { label: "自动颜色校正", className: "text-[var(--brand-primary)]" };
-  if (normalized === "image_diagnosis") return { label: "图片诊断", className: "text-[var(--brand-primary)]" };
+  if (normalized === "LEVEL_PICK_COLOR_CORRECTION") return { label: "挑档校色", className: "text-[var(--brand-primary)]" };
+  if (normalized === RETIRED_IMAGE_DIAGNOSIS_FAMILY) return { label: "图片诊断（已下线）", className: "text-[var(--text-secondary)]" };
   return { label: normalized || "未选择", className: "text-[var(--text-secondary)]" };
 }
 function getOutputFormatDisplay(format) {
@@ -128,6 +192,30 @@ function getOutputFormatDisplay(format) {
 
 function getProcessingModeDisplay(mode) {
   return processingModeOptions.find((item) => item.id === mode) || processingModeOptions[0];
+}
+
+export function processingPathDisplayName(value) {
+  return String(value || "")
+    .replace(/1080P(?:画质|标准|安全|普通)增强/gi, "1080P画质")
+    .replace(/4K(?:尺寸适配|适配|画质适配|高清画质增强|高清增强)/gi, "4K画质增强");
+}
+
+export function processingResultDisplayName(item) {
+  const explicitName = item?.output_filename || item?.task_result?.output_filename || "";
+  const outputPath = item?.output_path || item?.task_result?.output_path || "";
+  const pathName = String(outputPath).split(/[\\/]/).pop() || "";
+  if (explicitName || pathName) return getFileDisplayName(explicitName || pathName, "成品已生成");
+  return item?.final_output_url ? "成品已生成，可打开查看" : "尚未生成";
+}
+
+export function resolveProcessingTaskBusinessRoute(item) {
+  const taskId = String(item?.taskId || "").trim();
+  if (!taskId) return "";
+  if (item?.taskFamily === "batch_watermark") {
+    return `/batch-watermark?batch_id=${encodeURIComponent(taskId)}`;
+  }
+  if (isRetiredImageDiagnosisTask(item)) return "";
+  return `/task-detail?task_id=${encodeURIComponent(taskId)}`;
 }
 
 function processingStageLabel(value, status = "") {
@@ -511,7 +599,7 @@ function makeSafeBetaTimeline(item, result) {
   return [
     { name: "读取图片", detail: "确认当前图片可以安全读取。", state: progress >= 15 || completed ? "完成" : phaseStatus(15) },
     { name: "内容检查", detail: "识别不适合增强的内容并优先保护原图。", state: skipped ? "跳过" : progress >= 35 || completed ? "完成" : phaseStatus(35) },
-    { name: "安全增强", detail: "在保持文字、Logo和画面结构的前提下提升清晰度。", state: phaseStatus(55) },
+    { name: "画质增强", detail: "在保持文字、Logo和画面结构的前提下提升清晰度。", state: phaseStatus(55) },
     { name: "生成对比", detail: "准备可拖动的处理前后对比。", state: hasContactSheet ? "完成" : completed ? "完成" : phaseStatus(80) },
     { name: "保存结果", detail: "将成品保存到当前输出文件夹。", state: hasOutput ? "完成" : phaseStatus(100) },
   ];
@@ -604,6 +692,7 @@ function extractTaskPayload(payload) {
     data,
     task,
     taskId,
+    feedbackTarget: extractFeedbackTarget(payload),
     filename: payload?.filename || data.filename || data.input_filename || data.fileName || data.original_filename || task.input_filename,
     originalUrl: normalizeApiUrl(originalUrl),
     task_result: taskResult,
@@ -639,9 +728,16 @@ function extractTaskPayload(payload) {
   };
 }
 
-function requestJson(method, url, body) {
+function requestJson(method, url, body, options = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const signal = options?.signal;
+    const cleanupAbortListener = () => signal?.removeEventListener("abort", abortRequest);
+    const abortRequest = () => xhr.abort();
+    if (signal?.aborted) {
+      reject(new DOMException("请求已取消", "AbortError"));
+      return;
+    }
     const shouldLogOutputDir = url.includes("/api/output/validate") || url.includes("/api/output/open") || url.includes("/api/output/select-popup");
     if (shouldLogOutputDir) {
       console.info("[VisualMasterPro output_dir] request", { method, url, body: body || null });
@@ -649,6 +745,7 @@ function requestJson(method, url, body) {
     xhr.open(method, url, true);
     if (method !== "GET") xhr.setRequestHeader("Content-Type", "application/json;charset=UTF-8");
     xhr.onload = () => {
+      cleanupAbortListener();
       let payload = {};
       try {
         payload = JSON.parse(xhr.responseText || "{}");
@@ -660,7 +757,9 @@ function requestJson(method, url, body) {
         if (shouldLogOutputDir) {
           console.info("[VisualMasterPro output_dir] response", { url, status: xhr.status, payload });
         }
-        reject(new Error(payload.message || payload.detail || `请求失败：HTTP ${xhr.status}`));
+        const detail = payload.detail;
+        const responseMessage = typeof detail === "object" && detail ? detail.message || detail.code : detail;
+        reject(new Error(payload.message || responseMessage || `请求失败：HTTP ${xhr.status}`));
         return;
       }
       if (shouldLogOutputDir) {
@@ -668,9 +767,37 @@ function requestJson(method, url, body) {
       }
       resolve(payload);
     };
-    xhr.onerror = () => reject(new Error("无法连接本地后端服务。"));
+    xhr.onerror = () => {
+      cleanupAbortListener();
+      reject(new Error("无法连接本地后端服务。"));
+    };
+    xhr.onabort = () => {
+      cleanupAbortListener();
+      reject(new DOMException("请求已取消", "AbortError"));
+    };
+    signal?.addEventListener("abort", abortRequest, { once: true });
     xhr.send(method === "GET" ? null : JSON.stringify(body || {}));
   });
+}
+
+const sharedStateRequestsInFlight = new Map();
+
+export function reuseSharedStateRequest(key, requestFactory) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey || typeof requestFactory !== "function") {
+    throw new TypeError("共享状态请求需要有效的 key 和 requestFactory。");
+  }
+  const existing = sharedStateRequestsInFlight.get(normalizedKey);
+  if (existing) return existing;
+  const request = Promise.resolve().then(requestFactory);
+  sharedStateRequestsInFlight.set(normalizedKey, request);
+  const clear = () => {
+    if (sharedStateRequestsInFlight.get(normalizedKey) === request) {
+      sharedStateRequestsInFlight.delete(normalizedKey);
+    }
+  };
+  void request.then(clear, clear);
+  return request;
 }
 
 async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
@@ -721,7 +848,7 @@ async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
     response = await responsePromise;
   } catch (error) {
     if (error?.name === "AbortError") {
-      const timeoutError = new Error(`安全增强请求超时（${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}秒）`);
+      const timeoutError = new Error(`画质增强请求超时（${Math.round(SAFE_BETA_FETCH_TIMEOUT_MS / 1000)}秒）`);
       timeoutError.isSafeBetaTimeout = true;
       timeoutError.timeout_source = "frontend";
       logSafeBeta(betaRunId, "BETA_FAILED_BRANCH_ENTERED", {
@@ -741,11 +868,11 @@ async function requestBetaSafeEnhance(url, items, betaRunId, outputDir = "") {
   try {
     payload = JSON.parse(rawText || "{}");
   } catch (error) {
-    throw new Error(`安全增强响应解析失败：${error.message}`);
+    throw new Error(`画质增强响应解析失败：${error.message}`);
   }
   logSafeBeta(betaRunId, "BETA_FETCH_RESPONSE_JSON", { payload });
   if (!response.ok || payload.ok === false || payload.success === false || payload.status === "FAILED" || payload.status === "failed") {
-    const error = new Error(formatBetaFailureMessage(payload, payload.stage || `安全增强请求失败：HTTP ${response.status}`));
+    const error = new Error(formatBetaFailureMessage(payload, payload.stage || `画质增强请求失败：HTTP ${response.status}`));
     error.payload = payload;
     throw error;
   }
@@ -807,13 +934,13 @@ function betaQueuePatchFromProcessed(item, processedRows, results, fallbackOutpu
   };
 }
 
-function formatBetaFailureMessage(payload, fallback = "1080P安全增强处理失败") {
+function formatBetaFailureMessage(payload, fallback = "1080P画质处理失败") {
   const data = payload?.data || {};
   const skipped = Array.isArray(payload?.skipped) ? payload.skipped : Array.isArray(data?.skipped) ? data.skipped : [];
   const firstSkip = skipped.find((item) => item && typeof item === "object") || {};
   if (firstSkip.reason) {
     const file = firstSkip.file || payload?.current_file || data?.failed_file || "";
-    return `${file ? `${file} ` : ""}被1080P安全增强策略跳过：${firstSkip.reason}`;
+    return `${file ? `${file} ` : ""}未通过1080P画质安全检查：${firstSkip.reason}`;
   }
   return payload?.error || payload?.message || data?.error_message || data?.reason || fallback;
 }
@@ -822,7 +949,8 @@ function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, o
   return new Promise((resolve, reject) => {
     const outputDirForRequest = (requestedOutputDir || "").trim();
     const formData = new FormData();
-    formData.append("file", item.file);
+    if (item.sourceResultId) formData.append("result_id", item.sourceResultId);
+    else formData.append("file", item.file);
     formData.append("mode", activeMode);
     if (activeMode === PROCESSING_MODE_FOUR_K) {
       formData.append("output_profile", FOUR_K_OUTPUT_PROFILE);
@@ -856,7 +984,11 @@ function uploadFileWithXhr(item, activeMode, requestedOutputDir, outputFormat, o
         return;
       }
       if (xhr.status < 200 || xhr.status >= 300 || payload.success === false) {
-        reject(new Error(payload.message || payload.detail || `上传失败：HTTP ${xhr.status}`));
+        const detail = payload?.detail;
+        const message = typeof detail === "object" && detail ? detail.message || detail.code : detail;
+        const uploadError = new Error(payload.message || message || `上传失败：HTTP ${xhr.status}`);
+        uploadError.feedbackTarget = extractFeedbackTarget(payload);
+        reject(uploadError);
         return;
       }
       resolve(extractTaskPayload(payload));
@@ -885,7 +1017,12 @@ function streamTask(taskId, onLog, onProgress) {
       try {
         const payload = JSON.parse(event.data);
         if (payload.message) onLog?.(payload.message);
-        if (payload.total && payload.index) onProgress?.(Math.min(99, Math.round((payload.index / payload.total) * 100)));
+        const reportedProgress = Number(payload.task_progress);
+        if (payload.task_progress !== undefined && payload.task_progress !== null && Number.isFinite(reportedProgress)) {
+          onProgress?.(Math.min(99, Math.max(0, Math.round(reportedProgress))));
+        } else if (payload.total && payload.index) {
+          onProgress?.(Math.min(99, Math.round((payload.index / payload.total) * 100)));
+        }
         const extracted = extractTaskPayload(payload);
         finalPayload = {
           ...finalPayload,
@@ -938,7 +1075,7 @@ function resolveQueueDelivery(item, status) {
 function DeliveryPill({ status, item }) {
   const delivery = resolveQueueDelivery(item, status);
   const normalized = delivery.status || "WAITING";
-  const label = normalized === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : delivery.label || deliveryStatusLabel[normalized] || "等待判定";
+  const label = normalized === "PASS_WITH_LIMITATION" ? "建议复核" : delivery.label || deliveryStatusLabel[normalized] || "待确认";
   return (
     <span
       className="hdde-processing-delivery-pill"
@@ -979,8 +1116,8 @@ function resolveReviewType(meta) {
 function resolveSuggestedUsage(meta, item) {
   const rawUsage = item?.final_delivery_recommended_usage || item?.task_result?.final_delivery_recommended_usage || "";
   if (meta.delivery.status === "PASS") return rawUsage || "可用于 1080P 本地交付，正式使用前建议快速查看成品。";
-  if (meta.delivery.status === "PASS_WITH_LIMITATION") return rawUsage || "已生成本地预览，建议查看文字、Logo、边缘、品牌色和关键局部后使用。";
-  if (meta.delivery.status === "FAIL") return rawUsage || "不建议作为正式成品使用，请回到原图或调整输入后重新处理。";
+  if (meta.delivery.status === "PASS_WITH_LIMITATION") return rawUsage || "建议查看文字、Logo、边缘、品牌色和关键局部后再使用。";
+  if (meta.delivery.status === "FAIL") return rawUsage || "当前结果不可使用，请回到原图或调整输入后重新处理。";
   return rawUsage || "等待任务完成后再判断用途。";
 }
 
@@ -1007,7 +1144,7 @@ function buildBatchReport(fileQueue) {
   const items = fileQueue.map((item, index) => {
     const payload = buildQualityPayload(item);
     const meta = resolveReportCenterMeta(payload);
-    const userStatusLabel = meta.delivery.status === "PASS_WITH_LIMITATION" ? "已生成｜建议查看后使用" : meta.delivery.label;
+    const userStatusLabel = meta.delivery.status === "PASS_WITH_LIMITATION" ? "建议复核" : meta.delivery.label;
     return {
       index: index + 1,
       filename: item.name,
@@ -1145,7 +1282,7 @@ function taskToQueueItem(task) {
     size: formatBytesToMb(task?.input_size_bytes || result?.input_size_bytes, "-"),
     type: task?.input_format || result?.input_format || "image",
     status,
-    mode: task?.feature_key === "image_diagnosis" ? "image_diagnosis" : task?.mode || "fidelity",
+    mode: task?.feature_key === RETIRED_IMAGE_DIAGNOSIS_FAMILY ? RETIRED_IMAGE_DIAGNOSIS_FAMILY : task?.mode || "fidelity",
     taskFamily: task?.task_family || task?.feature_key || "",
     output_format: result?.output_format || task?.output_format || "",
     output_dir: task?.output_directory || result?.output_dir || "",
@@ -1192,7 +1329,7 @@ function taskToQueueItem(task) {
 }
 
 function isRunnableProcessingItem(item) {
-  return !["color_correction", "image_diagnosis"].includes(item?.taskFamily);
+  return item?.taskFamily !== "color_correction" && !isRetiredImageDiagnosisTask(item);
 }
 
 function colorBatchTaskToQueueItem(entry, batch) {
@@ -1200,6 +1337,8 @@ function colorBatchTaskToQueueItem(entry, batch) {
   const result = entry?.result || {};
   const ui = entry?.ui || {};
   const taskId = task.task_id || "";
+  const protectionBlocked = (task.d3_status || result.d3_status) === "PROTECTION_BLOCKED"
+    || (task.output_selected || result.output_selected) === "NONE";
   return {
     id: `color-task-${taskId}`,
     file: null,
@@ -1236,7 +1375,9 @@ function colorBatchTaskToQueueItem(entry, batch) {
     },
     task_report: null,
     debug_quality: null,
-    error: task.failure_reason || "",
+    error: protectionBlocked
+      ? "本次未进行自动校正。检测到自动调整可能影响原图质量，已保留原图。"
+      : task.failure_reason || "",
     logs: [],
     progress: Number(task.progress || 0),
     processing_stage: task.status || "pending",
@@ -1257,15 +1398,20 @@ export default function DashboardPage({
   initialSourceFile = null,
   initialSourceRequestId = "",
   onInitialSourceConsumed,
+  continueResultId = "",
 }) {
   const fileInputRef = useRef(null);
   const processingRef = useRef(false);
   const consumedSourceRequestRef = useRef("");
+  const currentSessionTaskIdsRef = useRef(new Set());
+  const taskListLoadGenerationRef = useRef(0);
   const [activeScreen, setActiveScreen] = useState("dashboard");
   const [activeItemId, setActiveItemId] = useState("");
   const [debugItemId, setDebugItemId] = useState("");
   const [fileQueue, setFileQueue] = useState([]);
   const [taskView, setTaskView] = useState(initialTaskView === "history" ? "history" : "current");
+  const [isClearingTasks, setIsClearingTasks] = useState(false);
+  const [taskListReloadVersion, setTaskListReloadVersion] = useState(0);
   const [colorBatches, setColorBatches] = useState([]);
   const [processingMode, setProcessingMode] = useState(PROCESSING_MODE_STANDARD);
   const [activeMode] = useState("fidelity");
@@ -1278,7 +1424,7 @@ export default function DashboardPage({
   const [workdirError, setWorkdirError] = useState("");
   const [outputDirError, setOutputDirError] = useState("");
   const [outputDirSuccess, setOutputDirSuccess] = useState("");
-  const [notice, setNotice] = useState("请选择图片，或更换输出文件夹后开始处理。");
+  const [notice, setNotice] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
@@ -1292,32 +1438,45 @@ export default function DashboardPage({
 
   useEffect(() => {
     setTaskView(initialTaskView === "history" ? "history" : "current");
+    setActiveItemId("");
+    setNotice("");
   }, [initialTaskView]);
 
   useEffect(() => {
-    requestJson("GET", `${API_BASE}/api/app/workdir`)
+    let cancelled = false;
+    const endpoint = `${API_BASE}/api/app/workdir`;
+    reuseSharedStateRequest(endpoint, () => requestJson("GET", endpoint))
       .then((payload) => {
+        if (cancelled) return;
         const data = payload?.data || payload || {};
         setWorkdirInfo(data);
         setWorkdirError(data.directory_ready === false ? data.directory_message || "正式目录未就绪，请前往系统设置重新选择目录。" : "");
       })
       .catch((error) => {
+        if (cancelled) return;
         setWorkdirInfo(null);
         setWorkdirError(error.message || "工作目录初始化失败，请检查权限");
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     let timer = null;
     const requestedBatchId = new URLSearchParams(window.location.search).get("batch") || "";
+    const endpoint = `${API_BASE}/api/color-correction/batches`;
     const loadColorBatches = async () => {
       try {
-        const payload = await requestJson("GET", `${API_BASE}/api/color-correction/batches`);
+        const payload = await reuseSharedStateRequest(endpoint, () => requestJson("GET", endpoint));
         if (cancelled) return;
         const batches = payload?.data?.batches || [];
         setColorBatches(batches);
         const colorItems = batches.flatMap((batch) => (batch.items || []).map((item) => colorBatchTaskToQueueItem(item, batch)));
+        colorItems.forEach((item) => {
+          if (!TERMINAL_TASK_STATUSES.has(item.status)) currentSessionTaskIdsRef.current.add(taskListItemKey(item));
+        });
         setFileQueue((current) => {
           const otherItems = current.filter((item) => item.taskFamily !== "color_correction");
           return [...colorItems, ...otherItems];
@@ -1330,7 +1489,8 @@ export default function DashboardPage({
         if (batches.some((batch) => ["pending", "processing"].includes(batch.status))) {
           timer = window.setTimeout(loadColorBatches, 700);
         }
-      } catch {
+      } catch (error) {
+        if (error?.name === "AbortError") return;
         // 旧运行实例没有批量颜色校正接口时，保留现有处理中心能力。
       }
     };
@@ -1342,20 +1502,49 @@ export default function DashboardPage({
   }, []);
 
   useEffect(() => {
-    requestJson("GET", `${API_BASE}/api/v1/tasks`)
-      .then((payload) => {
-        const tasks = payload?.data?.tasks || payload?.tasks || [];
-        const restored = tasks.map(taskToQueueItem).filter((item) => item.taskId);
-        if (!restored.length) return;
-        setFileQueue((current) => {
-          const known = new Set(current.map((item) => item.taskId).filter(Boolean));
-          return [...restored.filter((item) => !known.has(item.taskId)), ...current];
+    const generation = taskListLoadGenerationRef.current + 1;
+    taskListLoadGenerationRef.current = generation;
+    const controller = new AbortController();
+    let timer = 0;
+    const loadTaskPage = async (offset, limit, replacePersistedTasks) => {
+      try {
+        const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+        const payload = await requestJson("GET", `${API_BASE}/api/v1/tasks?${params}`, null, {
+          signal: controller.signal,
         });
-      })
-      .catch(() => {
+        if (taskListLoadGenerationRef.current !== generation) return;
+        const data = payload?.data || {};
+        const restored = (data.tasks || payload?.tasks || []).map(taskToQueueItem).filter((item) => item.taskId);
+        restored.forEach((item) => {
+          if (!TERMINAL_TASK_STATUSES.has(item.status)) currentSessionTaskIdsRef.current.add(taskListItemKey(item));
+        });
+        setFileQueue((current) => {
+          const base = replacePersistedTasks
+            ? current.filter((item) => !item.taskId || item.taskFamily === "color_correction")
+            : current;
+          const known = new Set(base.map((item) => item.taskId).filter(Boolean));
+          return [...base, ...restored.filter((item) => !known.has(item.taskId))];
+        });
+        if (data.has_more && data.next_offset != null) {
+          timer = window.setTimeout(
+            () => loadTaskPage(data.next_offset, TASK_LIST_PAGE_SIZE, false),
+            replacePersistedTasks ? 300 : 50,
+          );
+        }
+      } catch {
         // 当前运行实例没有可恢复任务时，处理中心仍可正常创建新任务。
-      });
-  }, []);
+      }
+    };
+    timer = window.setTimeout(
+      () => void loadTaskPage(0, TASK_LIST_INITIAL_PAGE_SIZE, true),
+      0,
+    );
+    return () => {
+      if (taskListLoadGenerationRef.current === generation) taskListLoadGenerationRef.current += 1;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [taskListReloadVersion]);
 
   useEffect(() => {
     if (safeBetaResult?.status !== "RUNNING") return () => {};
@@ -1363,12 +1552,18 @@ export default function DashboardPage({
     return () => window.clearInterval(timer);
   }, [safeBetaResult?.status]);
 
+  const { current: currentTaskItems, history: historyTaskItems } = splitProcessingTaskLists(
+    fileQueue,
+    currentSessionTaskIdsRef.current,
+  );
+  const visibleTaskItems = taskView === "history" ? historyTaskItems : currentTaskItems;
+  const clearableCurrentTaskItems = currentTaskItems.filter((item) => DELETABLE_TASK_STATUSES.has(item.status));
+  const clearableHistoryTaskItems = historyTaskItems.filter((item) => DELETABLE_TASK_STATUSES.has(item.status));
   const activeItem = useMemo(() => {
-    const belongsToView = (item) => (taskView === "history" ? TERMINAL_TASK_STATUSES.has(item.status) : !TERMINAL_TASK_STATUSES.has(item.status));
-    const selected = fileQueue.find((item) => item.id === activeItemId);
-    if (selected && belongsToView(selected)) return selected;
-    return fileQueue.find((item) => belongsToView(item) && item.status === "processing") || fileQueue.find(belongsToView) || null;
-  }, [fileQueue, activeItemId, taskView]);
+    const selected = visibleTaskItems.find((item) => item.id === activeItemId);
+    if (selected) return selected;
+    return visibleTaskItems.find((item) => item.status === "processing") || visibleTaskItems[0] || null;
+  }, [visibleTaskItems, activeItemId]);
   const debugItem = useMemo(() => fileQueue.find((item) => item.id === debugItemId) || activeItem, [fileQueue, debugItemId, activeItem]);
   const taskContextSnapshot = useMemo(() => {
     if (!activeItem?.taskId || activeItem?.taskFamily === "color_correction") return null;
@@ -1405,13 +1600,10 @@ export default function DashboardPage({
     onTaskContextChange(taskContextSnapshot);
   }, [onTaskContextChange, taskContextSnapshot]);
 
-  const completedItems = fileQueue.filter((item) => item.status === "completed" && item.taskFamily !== "image_diagnosis");
-  const currentTaskItems = fileQueue.filter((item) => !TERMINAL_TASK_STATUSES.has(item.status));
-  const historyTaskItems = fileQueue.filter((item) => item.taskId && TERMINAL_TASK_STATUSES.has(item.status));
-  const visibleTaskItems = taskView === "history" ? historyTaskItems : currentTaskItems;
   const requestedColorBatchId = new URLSearchParams(window.location.search).get("batch") || "";
   const activeColorBatch = colorBatches.find((batch) => batch.batch_id === requestedColorBatchId) || colorBatches[0] || null;
-  const localQueueItems = fileQueue.filter(isRunnableProcessingItem);
+  const localQueueItems = currentTaskItems.filter((item) => Boolean(item.file || item.sourceResultId) && isRunnableProcessingItem(item));
+  const workdirPending = !workdirInfo && !workdirError;
   const directoryReady = Boolean(workdirInfo?.directory_ready) && !workdirError;
   const directoryMessage = workdirError || workdirInfo?.directory_message || "正式目录未就绪，请前往系统设置重新选择目录。";
   const canStartExecution = directoryReady && (processingMode === PROCESSING_MODE_SAFE_BETA || localQueueItems.length > 0) && !isProcessingQueue;
@@ -1424,6 +1616,53 @@ export default function DashboardPage({
   const updateQueueItem = (id, patch) => {
     setFileQueue((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   };
+
+  const clearTaskRecords = async (items, scopeLabel) => {
+    if (isClearingTasks || !items.length) return;
+    const taskIds = [...new Set(items.map((item) => String(item.taskId || "").trim()).filter(Boolean))];
+    const localQueueIds = new Set(items.filter((item) => !item.taskId && ["pending", "queued"].includes(item.status)).map(taskListItemKey));
+    const confirmed = window.confirm(
+      `确定清除${scopeLabel}中的 ${items.length} 条可清任务吗？\n\nTask 记录会被永久删除；正式 Result、Delivery 和成品文件会保留。运行任务不会删除。`,
+    );
+    if (!confirmed) return;
+    setIsClearingTasks(true);
+    try {
+      let outcome = { deleted_count: 0, protected_count: 0, protected_tasks: [] };
+      if (taskIds.length) {
+        for (let offset = 0; offset < taskIds.length; offset += 100) {
+          const batchTaskIds = taskIds.slice(offset, offset + 100);
+          const response = await requestJson("DELETE", `${API_BASE}/api/v1/tasks`, { task_ids: batchTaskIds });
+          const batchOutcome = response?.data || {};
+          outcome.deleted_count += Number(batchOutcome.deleted_count || 0);
+          outcome.protected_count += Number(batchOutcome.protected_count || 0);
+          outcome.deleted_task_ids = [...(outcome.deleted_task_ids || []), ...(batchOutcome.deleted_task_ids || [])];
+          outcome.protected_tasks = [...outcome.protected_tasks, ...(batchOutcome.protected_tasks || [])];
+        }
+      }
+      const deletedTaskIds = new Set(outcome.deleted_task_ids || []);
+      setFileQueue((current) => {
+        return current
+          .filter((item) => !localQueueIds.has(taskListItemKey(item)))
+          .filter((item) => !item.taskId || !deletedTaskIds.has(item.taskId));
+      });
+      [...taskIds, ...localQueueIds].forEach((id) => currentSessionTaskIdsRef.current.delete(id));
+      setTaskListReloadVersion((current) => current + 1);
+      const deletedCount = Number(outcome.deleted_count || 0) + localQueueIds.size;
+      const protectedCount = Number(outcome.protected_count || 0);
+      setNotice(
+        protectedCount
+          ? `已清除 ${deletedCount} 条；${protectedCount} 条因正在运行、已经开始或状态受保护而保留。`
+          : `已清除 ${deletedCount} 条 Task 记录；正式 Result、Delivery 和成品保持不变。`,
+      );
+    } catch (error) {
+      setNotice(`任务清除失败：${error.message || "请检查本地服务后重试。"}`);
+    } finally {
+      setIsClearingTasks(false);
+    }
+  };
+
+  const clearCurrentTaskList = () => clearTaskRecords(clearableCurrentTaskItems, "当前列表");
+  const clearHistoryTaskList = () => clearTaskRecords(clearableHistoryTaskItems, "历史列表");
 
   const handleSetJpg95CandidateReview = (decision) => {
     if (!activeItem) return;
@@ -1504,7 +1743,9 @@ export default function DashboardPage({
       duration_ms: null,
       final_output_exists: false,
     }));
+    nextItems.forEach((item) => currentSessionTaskIdsRef.current.add(taskListItemKey(item)));
     if (replaceQueue) {
+      currentSessionTaskIdsRef.current = new Set(nextItems.map(taskListItemKey));
       setFileQueue(nextItems);
       setActiveItemId(nextItems[0]?.id || null);
       setDebugItemId(nextItems[0]?.id || null);
@@ -1512,7 +1753,7 @@ export default function DashboardPage({
       setSafeBetaStartedAt(null);
       setSafeBetaTick(0);
       setCurrentIndex(0);
-      setNotice(`已重新选择 ${nextItems.length} 张，安全增强状态已重置。`);
+      setNotice(`已重新选择 ${nextItems.length} 张，画质增强状态已重置。`);
       return;
     }
     setFileQueue((prev) => [...prev, ...nextItems]);
@@ -1526,6 +1767,57 @@ export default function DashboardPage({
     addFiles([initialSourceFile], { replaceQueue: processingMode === PROCESSING_MODE_SAFE_BETA });
     if (typeof onInitialSourceConsumed === "function") onInitialSourceConsumed(initialSourceRequestId);
   }, [initialSourceFile, initialSourceRequestId, onInitialSourceConsumed, processingMode]);
+
+  useEffect(() => {
+    const normalized = String(continueResultId || "").trim();
+    if (!normalized || consumedSourceRequestRef.current === `result:${normalized}`) return undefined;
+    const controller = new AbortController();
+    requestJson("GET", `${API_BASE}/api/result-assets/${encodeURIComponent(normalized)}`)
+      .then((payload) => {
+        if (controller.signal.aborted) return;
+        const source = payload?.data || {};
+        const item = {
+          id: `result-${normalized}`,
+          file: null,
+          sourceResultId: normalized,
+          name: source.file_name || "result.png",
+          size: formatBytesToMb(source.size_bytes, "-") ,
+          type: `image/${String(source.format || "png").toLowerCase()}`,
+          status: "queued",
+          mode: PROCESSING_MODE_FOUR_K,
+          output_format: "png",
+          output_dir: "",
+          taskId: "",
+          resultId: "",
+          streamEndpoint: "",
+          originalUrl: normalizeApiUrl(source.preview_url),
+          input_width: Number(source.width || 0),
+          input_height: Number(source.height || 0),
+          input_size_bytes: Number(source.size_bytes || 0),
+          output_width: 0,
+          output_height: 0,
+          output_size_bytes: 0,
+          task_result: null,
+          task_report: null,
+          error: "",
+          logs: ["已从输出中心载入当前成品。"],
+          progress: 0,
+          created_at: "",
+          completed_at: "",
+          final_output_exists: false,
+        };
+        consumedSourceRequestRef.current = `result:${normalized}`;
+        currentSessionTaskIdsRef.current.add(taskListItemKey(item));
+        setFileQueue((current) => [item, ...current.filter((entry) => entry.id !== item.id)]);
+        setActiveItemId(item.id);
+        setDebugItemId(item.id);
+        setNotice(`已载入当前成品：${item.name}`);
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setNotice(reason.message || "当前成品无法作为4K输入。")
+      });
+    return () => controller.abort();
+  }, [continueResultId]);
 
   const handleFileChange = (event) => {
     addFiles(event.target.files, { replaceQueue: processingMode === PROCESSING_MODE_SAFE_BETA });
@@ -1661,7 +1953,7 @@ export default function DashboardPage({
     const betaItems = fileQueue.filter(isCurrentSafeBetaInputItem);
     const betaItemIds = betaItems.map((item) => item.id);
     const firstFileName = betaItems[0]?.name || "";
-    const firstCurrentFile = firstFileName || "正在连接安全增强服务";
+    const firstCurrentFile = firstFileName || "正在连接画质增强服务";
     logSafeBeta(betaRunId, "BETA_CLICK_HANDLER_ENTERED", {
       selected_count: betaItems.length,
       processing_mode: processingMode,
@@ -1843,7 +2135,7 @@ export default function DashboardPage({
             beta_processed: processed,
             beta_status: "PASS",
             final_delivery_status: "PASS_WITH_LIMITATION",
-            final_delivery_reason: "1080P安全增强成品已生成，建议查看后使用。",
+            final_delivery_reason: "1080P画质成品已生成，建议查看处理前后再使用。",
             final_delivery_recommended_usage: "打开输出目录查看增强图，确认文字、Logo、边缘和颜色后使用。",
             error: "",
             logs: ["处理完成"],
@@ -1873,10 +2165,10 @@ export default function DashboardPage({
       output_dir: betaOutputDir,
       output_filename: "",
       final_delivery_status: "",
-      final_delivery_reason: "安全增强处理中",
+      final_delivery_reason: "画质增强处理中",
       final_output_url: "",
       error: "",
-      logs: ["正在连接安全增强服务"],
+      logs: ["正在连接画质增强服务"],
     });
     setSafeBetaResult({
       status: "RUNNING",
@@ -1891,12 +2183,12 @@ export default function DashboardPage({
       has_enhanced: false,
       has_contact_sheet: false,
       elapsed_seconds: 0,
-      message: "正在连接安全增强服务",
+      message: "正在连接画质增强服务",
     });
-    setNotice("1080P安全增强：正在连接处理服务。");
+    setNotice("1080P画质：正在连接处理服务。");
     const stageTimers = [
       window.setTimeout(() => setBetaStage(15, firstFileName || "正在读取图片", "正在读取图片"), 250),
-      window.setTimeout(() => setBetaStage(35, firstFileName || "正在执行 1080P安全增强", "正在执行 1080P安全增强，处理中请稍候"), 1000),
+      window.setTimeout(() => setBetaStage(35, firstFileName || "正在执行1080P画质", "正在执行1080P画质，请稍候"), 1000),
     ];
     try {
       if (!betaItems.some((item) => item.file)) {
@@ -1917,7 +2209,7 @@ export default function DashboardPage({
       const payload = await requestBetaSafeEnhance(`${API_BASE}/api/beta/safe-1080p/enhance`, betaItems, betaRunId, betaOutputDir);
       const data = payload?.data || {};
       if (!isBetaSuccess(payload) && !isBetaSuccess(data)) {
-        throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "安全增强处理失败");
+        throw new Error(payload?.error || payload?.message || data?.error_message || data?.reason || "画质增强处理失败");
       }
       logSafeBeta(betaRunId, "BETA_SUCCESS_BRANCH_ENTERED", {
         response_beta_run_id: payload.beta_run_id || data.beta_run_id || "",
@@ -1981,7 +2273,7 @@ export default function DashboardPage({
         progress: 100,
         processed_count: processedCount,
       });
-      setNotice(`1080P安全增强完成：${resultStatus}`);
+      setNotice(`1080P画质完成：${resultStatus}`);
     } catch (error) {
       const errorPayload = error?.payload || {};
       const errorData = errorPayload?.data || {};
@@ -2070,7 +2362,7 @@ export default function DashboardPage({
               logs: [timeoutMessage],
             };
           }
-          const itemMessage = skipped?.reason ? `${item.name} 被1080P安全增强策略跳过：${skipped.reason}` : failureMessage;
+          const itemMessage = skipped?.reason ? `${item.name} 未通过1080P画质安全检查：${skipped.reason}` : failureMessage;
           return {
             ...item,
             status: "failed",
@@ -2090,7 +2382,7 @@ export default function DashboardPage({
         status: isFrontendTimeout ? "TIMEOUT_PENDING" : hasPartialOutput ? "PASS_WITH_NOTES" : "BLOCKED",
         error: timeoutMessage,
       });
-      setNotice(`1080P安全增强处理失败：${failureMessage}`);
+      setNotice(`1080P画质处理失败：${failureMessage}`);
       setNotice(timeoutMessage);
     } finally {
       stageTimers.forEach((timer) => window.clearTimeout(timer));
@@ -2101,6 +2393,7 @@ export default function DashboardPage({
     }
   };
   const processOneItem = async (item, index, total, queueOutputDir) => {
+    let taskId = "";
     const requestMode = processingMode === PROCESSING_MODE_FOUR_K ? PROCESSING_MODE_FOUR_K : activeMode;
     const activeOutputDir = requestMode === PROCESSING_MODE_FOUR_K
       ? resolveProcessingOutputDirectory(workdirInfo, PROCESSING_MODE_FOUR_K)
@@ -2112,16 +2405,26 @@ export default function DashboardPage({
       mode: requestMode,
       output_format: requestMode === PROCESSING_MODE_FOUR_K ? "png" : outputFormat,
       output_dir: activeOutputDir,
+      taskId: "",
+      resultId: "",
+      deliveryId: "",
+      streamEndpoint: "",
+      task_result: null,
+      task_report: null,
+      final_output_url: "",
+      preview_output_url: "",
       error: "",
       logs: ["正在确认输出目录"],
       progress: 1,
     });
+    beginFeedbackOperation();
 
     try {
       const uploadPayload = await uploadFileWithXhr(item, requestMode, activeOutputDir, outputFormat, (percent) => {
         updateQueueItem(item.id, { progress: Math.min(30, percent) });
       });
-      const taskId = uploadPayload.taskId;
+      if (uploadPayload.feedbackTarget) setCurrentFeedbackTarget(uploadPayload.feedbackTarget);
+      taskId = uploadPayload.taskId;
       if (!taskId) throw new Error("后端未返回任务编号。");
 
       updateQueueItem(item.id, {
@@ -2197,16 +2500,19 @@ export default function DashboardPage({
         error: "",
       });
       setNotice(`当前处理：第 ${index + 1} / ${total} 张已完成。`);
-      return true;
+      return { status: "completed", taskId, itemId: item.id };
     } catch (error) {
+      if (error.feedbackTarget) setCurrentFeedbackTarget(error.feedbackTarget);
+      const backendInterrupted = isBackendServiceInterruption(error.message);
+      const failureMessage = backendInterrupted ? BACKEND_INTERRUPTION_NOTICE : error.message;
       updateQueueItem(item.id, {
         status: "failed",
         progress: 0,
-        error: error.message,
-        logs: [...(item.logs || []), error.message],
+        error: failureMessage,
+        logs: [...(item.logs || []), error.message, ...(backendInterrupted ? [BACKEND_INTERRUPTION_NOTICE] : [])],
       });
-      setNotice(`第 ${index + 1} 张处理失败，已自动顺延后续队列：${error.message}`);
-      return false;
+      setNotice(backendInterrupted ? BACKEND_INTERRUPTION_NOTICE : `第 ${index + 1} 张处理失败，已保留当前图片：${error.message}`);
+      return { status: "failed", taskId, itemId: item.id, backendInterrupted, error: error.message };
     }
   };
 
@@ -2220,7 +2526,7 @@ export default function DashboardPage({
       await runSafeBetaModeV2();
       return;
     }
-    const runnable = fileQueue.filter((item) => isRunnableProcessingItem(item) && (item.status === "queued" || item.status === "failed"));
+    const runnable = localQueueItems.filter((item) => item.status === "queued" || item.status === "failed");
     if (!runnable.length) {
       setNotice("队列中没有待处理图片。");
       return;
@@ -2236,37 +2542,59 @@ export default function DashboardPage({
     setNotice(`逐张高清处理，共 ${runnable.length} 张。`);
     let successCount = fileQueue.filter((item) => item.status === "completed").length;
     let failedCount = 0;
+    let lastCompletedTaskId = "";
+    const outcomes = [];
     for (let index = 0; index < runnable.length; index += 1) {
       // 串行处理是 V0.4.4 的安全边界，不能改成并发。
       // eslint-disable-next-line no-await-in-loop
-      const success = await processOneItem(runnable[index], index, runnable.length, queueOutputDir);
-      if (success) successCount += 1;
+      const outcome = await processOneItem(runnable[index], index, runnable.length, queueOutputDir);
+      outcomes.push(outcome);
+      if (outcome.status === "completed") {
+        successCount += 1;
+        lastCompletedTaskId = outcome.taskId;
+      }
       else failedCount += 1;
     }
     processingRef.current = false;
     setIsProcessingQueue(false);
     setCurrentIndex(0);
     setActiveScreen("dashboard");
-    setNotice(`全部处理完成：成功 ${successCount} 张，失败 ${failedCount} 张。`);
+    outcomes
+      .filter((outcome) => outcome.status === "completed")
+      .forEach((outcome) => currentSessionTaskIdsRef.current.delete(outcome.itemId));
+    const failedOutcomes = outcomes.filter((outcome) => outcome.status === "failed");
+    if (failedOutcomes.length) {
+      setActiveItemId(failedOutcomes[0].itemId);
+      setDebugItemId(failedOutcomes[0].itemId);
+      setNotice(
+        failedOutcomes.some((outcome) => outcome.backendInterrupted)
+          ? BACKEND_INTERRUPTION_NOTICE
+          : `处理未完成：成功 ${successCount} 张，失败 ${failedCount} 张。失败图片已保留，可重新处理。`,
+      );
+    } else {
+      currentSessionTaskIdsRef.current.clear();
+      setActiveItemId("");
+      setNotice("");
+    }
+    if (!failedOutcomes.length && lastCompletedTaskId && typeof onNavigate === "function") {
+      onNavigate(`/task-detail?task_id=${encodeURIComponent(lastCompletedTaskId)}`);
+    }
   };
 
   const locateQueueItem = (item) => {
     if (!item) return;
     setActiveItemId(item.id);
     setDebugItemId(item.id);
+    if (isRetiredImageDiagnosisTask(item)) {
+      setNotice(`历史图片诊断任务已下线，无法继续处理：${item.name}。`);
+      return;
+    }
     if (item.taskFamily === "color_correction") {
       if (item.status === "completed" && item.taskId && typeof onNavigate === "function") {
-        const batchQuery = item.batchId ? `&batch=${encodeURIComponent(item.batchId)}` : "";
-        onNavigate(`/color-correction/result?task_id=${encodeURIComponent(item.taskId)}${batchQuery}`);
+        onNavigate(`/task-detail?task_id=${encodeURIComponent(item.taskId)}`);
         return;
       }
       setNotice(item.status === "failed" ? `已定位失败图片：${item.name}。${item.error || "请查看失败原因。"}` : `当前颜色校正结果尚未完成：${item.name}。`);
-      return;
-    }
-    if (item.taskFamily === "image_diagnosis") {
-      if (item.taskId && typeof onNavigate === "function") {
-        onNavigate(`/image-diagnosis?task_id=${encodeURIComponent(item.taskId)}`);
-      }
       return;
     }
     if (item.mode === PROCESSING_MODE_SAFE_BETA) {
@@ -2276,8 +2604,9 @@ export default function DashboardPage({
       setNotice(`已定位：${item.name}｜${stateText}${outputPath ? `｜${outputPath}` : ""}`);
       return;
     }
-    if (item.taskId && typeof onNavigate === "function") {
-      onNavigate(`/task-detail?task_id=${encodeURIComponent(item.taskId)}`);
+    const businessRoute = resolveProcessingTaskBusinessRoute(item);
+    if (businessRoute && typeof onNavigate === "function") {
+      onNavigate(businessRoute);
       return;
     }
     setActiveScreen("task_detail");
@@ -2291,10 +2620,10 @@ export default function DashboardPage({
       const outputPath = firstSafeBetaOutputPath(item, safeBetaResult);
       if (contactSheet || outputPath) {
         setActiveScreen("safe_beta_compare");
-        setNotice(contactSheet ? "已打开1080P安全增强前后对比。" : "当前图片没有可用对比图，请打开输出目录查看增强图。");
+        setNotice(contactSheet ? "已打开1080P画质前后对比。" : "当前图片没有可用对比图，请打开输出目录查看成品。");
         return;
       }
-      setNotice("当前图片尚未生成对比图，请先运行1080P安全增强。");
+      setNotice("当前图片尚未生成对比图，请先运行1080P画质。");
       return;
     }
     if (!item?.final_output_url) return;
@@ -2314,7 +2643,7 @@ export default function DashboardPage({
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
       locateQueueItem(item);
       setActiveScreen("safe_beta_report");
-      setNotice("已打开1080P安全增强交付报告。");
+      setNotice("已打开1080P画质交付报告。");
       return;
     }
     if (!item?.task_report && !item?.debug_quality) return;
@@ -2335,7 +2664,7 @@ export default function DashboardPage({
       return;
     }
     if (item?.mode === PROCESSING_MODE_SAFE_BETA) {
-      setNotice("安全增强成品为本地文件，请使用“打开当前目录”或复制成品路径查看。");
+      setNotice("画质增强成品为本地文件，请使用“打开当前目录”或复制成品路径查看。");
       return;
     }
     if (!item?.final_output_url) return;
@@ -2370,14 +2699,14 @@ export default function DashboardPage({
   const handleCopyFinalOutputUrl = async (item) => {
     const betaPath = item?.mode === PROCESSING_MODE_SAFE_BETA ? firstSafeBetaOutputPath(item, safeBetaResult) : "";
     const colorPath = item?.taskFamily === "color_correction" ? item?.output_path || "" : "";
-    const value = colorPath || betaPath || item?.final_output_url || "";
+    const value = colorPath || betaPath || item?.output_path || item?.task_result?.output_path || "";
     if (!value) {
-      setNotice(item?.mode === PROCESSING_MODE_SAFE_BETA ? "当前安全增强任务还没有可复制的成品路径。" : "当前任务还没有可复制的成品映射路径。");
+      setNotice(item?.mode === PROCESSING_MODE_SAFE_BETA ? "当前画质增强任务还没有可复制的成品路径。" : "当前任务还没有可复制的本地成品路径。");
       return;
     }
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(colorPath ? "已复制颜色校正成品路径。" : betaPath ? "已复制安全增强成品路径。" : "已复制成品映射 URL。");
+      setNotice(colorPath ? "已复制颜色校正成品路径。" : betaPath ? "已复制画质增强成品路径。" : "已复制成品路径。");
     } catch (error) {
       setNotice(error.message || "复制成品路径失败。");
     }
@@ -2434,7 +2763,7 @@ export default function DashboardPage({
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);
-    setNotice("已生成 batch_report.json，本地报告中心导出完成。");
+    setNotice("本地处理报告已生成。");
   };
 
   if (activeScreen === "task_detail") {
@@ -2477,7 +2806,7 @@ export default function DashboardPage({
     const reasonText = safeBetaReasonText(activeItem, safeBetaResult);
     const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
     const isPortraitSkip = reasonText === "人物图保护跳过";
-    const deliveryConclusion = isPortraitSkip ? "人物图保护跳过" : outputPath ? "建议查看后使用" : activeItem?.status === "failed" ? "不建议交付" : "等待";
+    const deliveryConclusion = isPortraitSkip ? "已保护原图" : outputPath ? "建议复核" : activeItem?.status === "failed" ? "不可使用" : "待确认";
     const canViewCompare = Boolean(outputPath);
     const timeline = makeSafeBetaTimeline(activeItem, safeBetaResult);
     const progressValue = safeBetaResult?.progress ?? activeItem?.progress ?? 0;
@@ -2497,7 +2826,7 @@ export default function DashboardPage({
       >
         <header className="mb-4 flex shrink-0 items-center justify-between gap-5 rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-4 shadow-sm">
           <div className="min-w-0">
-            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">安全增强任务</p>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">画质增强任务</p>
             <h1 className="mt-2 truncate text-xl font-semibold tracking-wide text-[var(--text-primary)]">{taskHeading}</h1>
             <p className="mt-1 truncate text-sm text-[var(--text-secondary)]" title={rawInputName}>
               当前文件：{inputDisplayName}
@@ -2508,11 +2837,11 @@ export default function DashboardPage({
           </div>
         </header>
 
-        <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-4">
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-4" role="region" aria-label="画质增强任务结果">
           <section className="flex min-h-0 flex-col gap-4 overflow-hidden">
             <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border border-[var(--border-color)] bg-[var(--card-background)] p-4 text-sm">
               {[
-                ["处理方式", "1080P安全增强"],
+                ["处理方式", "1080P画质"],
                 ["当前状态", statusTextValue],
                 ["结果建议", deliveryConclusion],
               ].map(([label, value]) => (
@@ -2578,7 +2907,7 @@ export default function DashboardPage({
               </div>
             </section>
           </aside>
-        </main>
+        </div>
 
         <footer className="mt-3 shrink-0 truncate border-t border-[var(--divider-color)] pt-2 text-center font-mono text-xs tracking-wider text-[var(--text-muted)]">
           {PRODUCT_BRAND_LINE}
@@ -2592,7 +2921,7 @@ export default function DashboardPage({
     const processed = findSafeBetaProcessedRow(activeItem, safeBetaResult);
     const outputName = activeItem?.output_filename || processed?.output_name || (outputPath ? outputPath.split(/[\\/]/).pop() : "");
     const statusTextValue = safeBetaItemStatusText(activeItem, safeBetaResult);
-    const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议查看后使用" : activeItem?.final_delivery_reason || statusTextValue;
+    const deliveryText = activeItem?.final_delivery_status === "PASS_WITH_LIMITATION" ? "建议复核" : activeItem?.final_delivery_reason || statusTextValue;
     const outputPreviewUrl = firstSafeBetaOutputPreviewUrl(activeItem, safeBetaResult);
     const originalPreviewUrl = activeItem?.originalUrl || activeItem?.task_result?.original_url || activeItem?.task_result?.input_url || "";
     const compareMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
@@ -2604,7 +2933,7 @@ export default function DashboardPage({
         <div className="pointer-events-none absolute inset-0 bg-[var(--content-background)]" />
         <header className="relative z-10 mb-4 flex h-[82px] shrink-0 items-center justify-between gap-6 border-b border-[var(--divider-color)] pb-4">
           <div className="min-w-0">
-            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">安全增强对比</p>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--brand-primary)]">画质增强对比</p>
             <h1 className="mt-2 truncate text-2xl font-semibold tracking-wide text-[var(--text-primary)]">处理前后对比</h1>
             <p className="mt-1 truncate text-sm text-[var(--text-secondary)]" title={rawInputName}>
               {inputDisplayName} · 拖动中线查看清晰度、边缘与颜色变化
@@ -2621,7 +2950,7 @@ export default function DashboardPage({
           </div>
         </header>
 
-        <main className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-5">
+        <div className="relative z-10 grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-5" role="region" aria-label="画质增强前后对比">
           <SafeBetaBeforeAfterCompare
             originalFile={activeItem?.file}
             originalUrl={originalPreviewUrl}
@@ -2664,7 +2993,7 @@ export default function DashboardPage({
               </div>
             </section>
           </aside>
-        </main>
+        </div>
 
         <footer className="relative z-10 mt-3 w-full shrink-0 truncate border-t border-[var(--divider-color)] px-3 pt-2 text-center font-mono text-xs tracking-wider text-[var(--text-muted)]">
           {PRODUCT_BRAND_LINE}
@@ -2699,13 +3028,13 @@ export default function DashboardPage({
       inputHeight: processed?.input_height,
       outputWidth: activeItem?.output_width || processed?.output_width,
       outputHeight: activeItem?.output_height || processed?.output_height,
-      modeLabel: "1080P安全增强",
+      modeLabel: "1080P画质",
     });
     const reportMetrics = makeSafeBetaQualityMetrics(activeItem, safeBetaResult);
     const visibleReportMetrics = reportMetrics.filter(([, , value]) => Number.isFinite(Number(value)));
     const isPortraitSkip = reasonText === "人物图保护跳过";
-    const reportConclusion = isPortraitSkip ? "已保护原图" : outputPath ? "成品已生成" : activeItem?.status === "failed" ? "未生成成品" : "等待处理";
-    const deliveryAdvice = outputPath ? "建议查看后使用" : "不建议交付";
+    const reportConclusion = isPortraitSkip ? "已保护原图" : outputPath ? "建议复核" : activeItem?.status === "failed" ? "不可使用" : "待确认";
+    const deliveryAdvice = outputPath ? "建议复核" : "不可使用";
     const reviewReasons = [
       "检查文字与Logo是否保持清晰、没有笔画变形",
       "检查主体边缘是否自然、没有明显光晕",
@@ -2748,26 +3077,17 @@ export default function DashboardPage({
           <div className="hdde-report-heading">
             <p className="hdde-eyebrow">质量报告</p>
             <h1>高清交付评估</h1>
-            <p title={rawInputName}>{inputDisplayName} · 1080P安全增强</p>
+            <p title={rawInputName}>{inputDisplayName} · 1080P画质</p>
           </div>
           <div className="hdde-report-actions">
             <button type="button" className="hdde-report-button hdde-report-button--secondary" onClick={() => setActiveScreen("safe_beta_compare")}>
               返回对比结果
             </button>
-            <UnifiedFeedback
-              taskId={activeItem?.taskId || ""}
-              sourceFeature="enhancement_1080p"
-              stage="quality_review"
-              triggerLabel="反馈问题"
-              triggerClassName="hdde-report-button hdde-report-button--primary"
-              testId="safe-quality-report-feedback-package"
-              disabled={!safeBetaResult?.output_dir || isProcessingQueue}
-            />
           </div>
         </header>
 
         <div className="hdde-report-layout">
-          <main className="hdde-report-main">
+          <div className="hdde-report-main">
             <section className="hdde-report-panel">
               <div className="hdde-report-section-heading">
                 <div>
@@ -2800,7 +3120,7 @@ export default function DashboardPage({
                 ))}
               </dl>
             </section>
-          </main>
+          </div>
 
           <aside className="hdde-report-side">
             <section className="hdde-report-panel hdde-report-verdict">
@@ -2872,7 +3192,7 @@ export default function DashboardPage({
   }
 
   const outputLocationLabel = processingMode === PROCESSING_MODE_SAFE_BETA
-    ? "当前状态：安全增强输出目录"
+    ? "当前状态：1080P画质输出目录"
     : processingMode === PROCESSING_MODE_FOUR_K
       ? "当前状态：固定4K输出目录"
       : appliedOutputDir.trim()
@@ -2901,7 +3221,7 @@ export default function DashboardPage({
     : "";
   const safeBetaDeliveryConclusion =
     activeSafeBetaItem?.status === "completed"
-      ? "建议查看后使用"
+      ? "建议复核"
       : activeSafeBetaItem?.status === "failed"
         ? "处理失败"
     : safeBetaResult?.status === "RUNNING"
@@ -2911,7 +3231,7 @@ export default function DashboardPage({
       : safeBetaResult?.status === "BLOCKED"
         ? "处理失败"
         : safeBetaResult?.status
-          ? "建议查看后使用"
+          ? "建议复核"
           : "等待任务";
   const safeBetaOutputUrlText =
     activeSafeBetaOutputPath
@@ -2927,7 +3247,7 @@ export default function DashboardPage({
           : "等待生成";
   const safeBetaCurrentState =
     activeSafeBetaStatusText || (safeBetaResult?.status === "RUNNING"
-      ? "安全增强处理中"
+      ? "画质增强处理中"
       : safeBetaResult?.status === "NEED_RESELECT"
         ? safeBetaResult?.message || "本地文件访问已失效"
       : safeBetaResult?.status === "BLOCKED"
@@ -2935,75 +3255,101 @@ export default function DashboardPage({
         : safeBetaResult?.status
           ? "处理完成"
           : "等待任务");
-  const isDiagnosisActive = activeItem?.taskFamily === "image_diagnosis";
-  const deliveryActionItem = activeItem?.status === "completed" && !isDiagnosisActive
-    ? activeItem
-    : completedItems[completedItems.length - 1] || null;
-  const betaActionItem = isSafeBetaSelected ? deliveryActionItem || activeItem : null;
+  const summaryItem = taskView === "current" ? activeItem : null;
+  const isRetiredDiagnosisTask = isRetiredImageDiagnosisTask(summaryItem);
+  const currentCompletedItems = currentTaskItems.filter((item) => item.status === "completed" && !isRetiredImageDiagnosisTask(item));
+  const deliveryActionItem = taskView === "current"
+    ? summaryItem?.status === "completed" && !isRetiredDiagnosisTask
+      ? summaryItem
+      : currentCompletedItems[currentCompletedItems.length - 1] || null
+    : null;
+  const betaActionItem = isSafeBetaSelected ? deliveryActionItem || summaryItem : null;
   const safeBetaPrimaryOutputPath = isSafeBetaSelected ? firstSafeBetaOutputPath(betaActionItem, safeBetaResult) : "";
-  const canCopyDeliveryPath = isSafeBetaSelected ? Boolean(safeBetaPrimaryOutputPath) : Boolean(deliveryActionItem?.final_output_url);
+  const deliveryFilePath = deliveryActionItem?.output_path || deliveryActionItem?.task_result?.output_path || "";
+  const canCopyDeliveryPath = isSafeBetaSelected ? Boolean(safeBetaPrimaryOutputPath) : Boolean(deliveryFilePath);
 
-  const queueCompletedCount = fileQueue.filter((item) => item.status === "completed" && item.taskFamily !== "image_diagnosis").length;
-  const queueFailedCount = fileQueue.filter((item) => (item.status === "failed" || item.status === "blocked") && item.taskFamily !== "image_diagnosis").length;
+  const queueCompletedCount = currentTaskItems.filter((item) => item.status === "completed" && !isRetiredImageDiagnosisTask(item)).length;
+  const queueFailedCount = currentTaskItems.filter((item) => (item.status === "failed" || item.status === "blocked") && !isRetiredImageDiagnosisTask(item)).length;
+  const showCurrentSummary = taskView === "current"
+    && (currentTaskItems.length > 0 || localQueueItems.length > 0 || Boolean(activeColorBatch) || isProcessingQueue);
   const currentProgress = isProcessingQueue
-    ? Math.max(0, Math.min(100, Number(activeItem?.progress || safeBetaResult?.progress || 0)))
-    : activeItem?.status === "completed"
+    ? Math.max(0, Math.min(100, Number(summaryItem?.progress || safeBetaResult?.progress || 0)))
+    : summaryItem?.status === "completed"
       ? 100
-      : Math.max(0, Math.min(100, Number(activeItem?.progress || 0)));
-  const currentStageLabel = !directoryReady
-    ? "正式目录阻断"
+      : Math.max(0, Math.min(100, Number(summaryItem?.progress || 0)));
+  const currentStageLabel = workdirPending
+    ? "正在检测正式目录"
+    : !directoryReady
+      ? "正式目录阻断"
     : isProcessingQueue
       ? currentIndex
         ? `正在处理第 ${currentIndex} 张`
         : "正在处理"
-      : isDiagnosisActive && activeItem?.status === "completed"
-        ? "诊断完成"
-      : activeItem?.status === "processing"
+      : isRetiredDiagnosisTask
+        ? "历史功能已下线"
+      : summaryItem?.status === "processing"
         ? "正在处理图片"
-        : activeItem?.status === "pending"
+        : summaryItem?.status === "pending"
           ? "等待队列处理"
-      : activeItem?.status === "completed"
+      : summaryItem?.status === "completed"
         ? "处理完成"
-        : activeItem?.status === "failed"
+        : summaryItem?.status === "failed"
           ? "处理失败"
-          : fileQueue.length
+          : currentTaskItems.length
             ? "等待开始"
             : "等待导入";
-  const currentNextAction = !directoryReady
-    ? "前往系统设置恢复或重新选择正式目录"
+  const currentNextAction = workdirPending
+    ? "等待目录检测完成"
+    : !directoryReady
+      ? "前往系统设置恢复或重新选择正式目录"
     : isProcessingQueue
       ? "请保持应用运行，等待当前任务完成"
-      : isDiagnosisActive && activeItem?.status === "completed"
-        ? "打开图片诊断记录查看结论与推荐"
-      : activeItem?.status === "processing" || activeItem?.status === "pending"
+      : isRetiredDiagnosisTask
+        ? "该历史任务仅保留记录，不能继续处理"
+      : summaryItem?.status === "processing" || summaryItem?.status === "pending"
         ? "请保持应用运行，队列会逐张完成处理"
-      : activeItem?.status === "completed"
+      : summaryItem?.status === "completed"
         ? "查看结果并确认交付信息"
-        : activeItem?.status === "failed"
+        : summaryItem?.status === "failed"
           ? "查看失败原因后重新处理"
-          : fileQueue.length
+          : localQueueItems.length
             ? "确认模式和输出目录后开始处理"
             : "选择或拖入一张图片";
   const blockedFormalPath = workdirInfo?.app_data_root || workdirInfo?.failed_path || "";
   const blockedFormalReason = workdirInfo?.failure_reason || directoryMessage;
   const noticeIsError =
-    !directoryReady ||
-    activeItem?.status === "failed" ||
-    activeItem?.status === "blocked" ||
+    (!workdirPending && !directoryReady) ||
+    summaryItem?.status === "failed" ||
+    summaryItem?.status === "blocked" ||
     safeBetaResult?.status === "BLOCKED" ||
     safeBetaResult?.status === "NEED_RESELECT";
-  const deliveryOutputPath = isSafeBetaSelected
-    ? safeBetaPrimaryOutputPath || safeBetaResult?.output_dir || currentOutputDir
-    : activeItem?.taskFamily === "color_correction" && !deliveryActionItem?.output_path
-      ? activeItem.output_path || activeItem.output_dir || currentOutputDir
-    : deliveryActionItem?.taskFamily === "color_correction"
-      ? deliveryActionItem.output_path || deliveryActionItem.output_dir || currentOutputDir
-      : deliveryActionItem?.final_output_url || currentOutputDir;
-  const deliveryOutputDirectory = activeItem?.taskFamily === "color_correction"
-    ? activeItem.output_dir || currentOutputDir
+  const deliveryOutputPath = processingResultDisplayName(
+    isSafeBetaSelected && safeBetaPrimaryOutputPath
+      ? { ...deliveryActionItem, output_path: safeBetaPrimaryOutputPath }
+      : deliveryActionItem,
+  );
+  const deliveryOutputDirectoryRaw = summaryItem?.taskFamily === "color_correction"
+    ? summaryItem.output_dir || currentOutputDir
     : deliveryActionItem?.taskFamily === "color_correction"
     ? deliveryActionItem.output_dir || currentOutputDir
     : currentOutputDir;
+  const currentOutputDisplayDirectory = processingPathDisplayName(currentOutputDir);
+  const deliveryOutputDirectory = processingPathDisplayName(deliveryOutputDirectoryRaw);
+  const processingNotice = workdirPending
+    ? "正在检测正式目录，请稍候。"
+    : !directoryReady
+      ? directoryMessage
+    : taskView === "history"
+      ? historyTaskItems.length
+        ? "正在查看历史任务；历史结果不会影响当前处理。"
+        : "暂无历史任务。"
+      : isProcessingQueue
+        ? notice || "正在处理当前队列，请保持应用运行。"
+        : ["processing", "pending", "uploading"].includes(summaryItem?.status)
+          ? "当前任务正在运行或等待处理。"
+          : localQueueItems.length
+            ? `已选择 ${localQueueItems.length} 张图片，请确认模式和输出目录后开始处理。`
+            : notice || "请选择图片开始处理。";
   const handleOpenDeliveryOutputDirectory = () => {
     if (deliveryActionItem?.taskFamily === "color_correction") {
       handleOpenItemOutputFolder(deliveryActionItem);
@@ -3048,8 +3394,8 @@ export default function DashboardPage({
 
       <div className="hdde-processing-stack hdde-page-stack">
         <HddePageHeader
-          title="处理中心"
-          description="集中创建与查看当前任务，已结束记录继续保留在同一处理中心的历史任务中。"
+          title={processingMode === PROCESSING_MODE_FOUR_K ? "4K画质增强" : "处理中心"}
+          description={processingMode === PROCESSING_MODE_FOUR_K ? "共享上传、进度与结果流程；当前已预选4K画质增强：超分重建细节，并以原图保真融合。" : "集中创建与查看当前任务，已结束记录继续保留在同一处理中心的历史任务中。"}
         />
         <section className="hdde-processing-panel hdde-processing-prepare" aria-labelledby="processing-prepare-title">
           <header className="hdde-processing-section-heading">
@@ -3060,10 +3406,10 @@ export default function DashboardPage({
             </div>
             <span
               className="hdde-processing-readiness"
-              data-tone={directoryReady ? "positive" : "negative"}
+              data-tone={workdirPending ? "neutral" : directoryReady ? "positive" : "negative"}
               data-testid="processing-directory-status"
             >
-              {directoryReady ? "正式目录可用" : "正式目录不可用"}
+              {workdirPending ? "正在检测正式目录" : directoryReady ? "正式目录可用" : "正式目录不可用"}
             </span>
           </header>
 
@@ -3119,7 +3465,7 @@ export default function DashboardPage({
               <span className="hdde-processing-step-index">3</span>
               <div className="hdde-processing-step-body">
                 <label>输出目录</label>
-                <code className="hdde-processing-path" title={currentOutputDir}>{currentOutputDir}</code>
+                <code className="hdde-processing-path" title={currentOutputDisplayDirectory}>{currentOutputDisplayDirectory}</code>
                 <button
                   type="button"
                   className="hdde-processing-tertiary-action"
@@ -3144,14 +3490,14 @@ export default function DashboardPage({
                 >
                   {isProcessingQueue ? "正在处理…" : "开始处理"}
                 </button>
-                <p>{!directoryReady ? "请先修复正式目录" : !localQueueItems.length && processingMode !== PROCESSING_MODE_SAFE_BETA ? "请先选择图片" : isProcessingQueue ? "任务执行期间不可重复提交" : "所有必要条件已满足"}</p>
+                <p>{workdirPending ? "正在检测正式目录" : !directoryReady ? "请先修复正式目录" : !localQueueItems.length && processingMode !== PROCESSING_MODE_SAFE_BETA ? "请先选择图片" : isProcessingQueue ? "任务执行期间不可重复提交" : "所有必要条件已满足"}</p>
               </div>
             </article>
           </div>
 
           {processingMode === PROCESSING_MODE_SAFE_BETA ? (
             <details className="hdde-processing-boundary">
-              <summary>查看1080P安全增强使用边界</summary>
+              <summary>查看1080P画质历史兼容边界</summary>
               <ul>
                 {safeBetaBoundaryItems.map((item) => <li key={item}>{item}</li>)}
               </ul>
@@ -3188,14 +3534,37 @@ export default function DashboardPage({
 
         <section className="hdde-processing-panel hdde-processing-queue" aria-labelledby="processing-queue-title">
           <div className="hdde-processing-task-tabs" role="tablist" aria-label="处理中心任务范围">
-            <button type="button" role="tab" aria-selected={taskView === "current"} onClick={() => setTaskView("current")}>当前任务</button>
-            <button type="button" role="tab" aria-selected={taskView === "history"} onClick={() => setTaskView("history")}>历史任务</button>
+            <button type="button" role="tab" aria-selected={taskView === "current"} onClick={() => { setTaskView("current"); setActiveItemId(""); setNotice(""); }}>当前任务</button>
+            <button type="button" role="tab" aria-selected={taskView === "history"} onClick={() => { setTaskView("history"); setActiveItemId(""); setNotice(""); }}>历史任务</button>
           </div>
           <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
             <div>
-              <h2 id="processing-queue-title">任务列表</h2>
+              <h2 id="processing-queue-title">{taskView === "history" ? "历史任务" : "当前任务"}</h2>
             </div>
-            <span className="hdde-processing-count">{visibleTaskItems.length} 条</span>
+            <div className="hdde-processing-list-heading-actions">
+              <span className="hdde-processing-count">{visibleTaskItems.length} 条</span>
+              {taskView === "history" ? (
+                <button
+                  type="button"
+                  className="hdde-secondary-action hdde-processing-clear-action"
+                  data-testid="clear-history-task-list"
+                  disabled={isClearingTasks || !clearableHistoryTaskItems.length}
+                  onClick={clearHistoryTaskList}
+                >
+                  {isClearingTasks ? "正在清除…" : "清除历史列表"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="hdde-secondary-action hdde-processing-clear-action"
+                  data-testid="clear-current-task-list"
+                  disabled={isClearingTasks || !clearableCurrentTaskItems.length}
+                  onClick={clearCurrentTaskList}
+                >
+                  {isClearingTasks ? "正在清除…" : "清除当前列表"}
+                </button>
+              )}
+            </div>
           </header>
 
           <div className="hdde-processing-table-wrap">
@@ -3215,7 +3584,7 @@ export default function DashboardPage({
                     <td colSpan={5}>
                       <div className="hdde-processing-empty">
                         <strong>{taskView === "history" ? "暂无历史任务" : "暂无当前任务"}</strong>
-                        <span>{taskView === "history" ? "已结束的真实任务会从统一任务事实源显示在这里。" : "选择或拖入图片后，进行中的任务会在这里显示。"}</span>
+                        <span>{taskView === "history" ? "已结束且保留的 Task 记录会从统一任务事实源显示在这里。" : "选择或拖入图片后，当前会话任务会在这里显示。"}</span>
                       </div>
                     </td>
                   </tr>
@@ -3225,7 +3594,7 @@ export default function DashboardPage({
                   const itemProgress = Math.max(0, Math.min(100, Number(item.progress || 0)));
                   const resultText = item.output_filename || item.error || (
                     item.status === "completed"
-                      ? item.taskFamily === "image_diagnosis" ? "诊断结果已记录" : "已生成结果"
+                      ? isRetiredImageDiagnosisTask(item) ? "历史图片诊断任务已下线" : "处理已完成"
                       : "等待输出"
                   );
                   return (
@@ -3236,7 +3605,6 @@ export default function DashboardPage({
                           {item.input_width && item.input_height ? `${item.input_width} × ${item.input_height}` : item.size}
                           {item.created_at ? ` · ${new Date(item.created_at).toLocaleString("zh-CN")}` : ""}
                         </span>
-                        {taskView === "history" ? <small className="hdde-processing-trace">功能：{item.featureKey || "未记录"}<br />TASK_ID：{item.taskId}</small> : null}
                       </td>
                       <td>{getModeDisplay(item.mode || activeMode).label}</td>
                       <td>
@@ -3263,13 +3631,10 @@ export default function DashboardPage({
                         {item.taskFamily === "color_correction" && item.status === "completed" ? (
                           <span className="hdde-processing-review-state" data-status={item.review_status}>{item.review_status === "confirmed" ? "已确认" : "待确认"}</span>
                         ) : null}
-                        {taskView === "history" ? (
-                          <small className="hdde-processing-trace">RESULT_ID：{item.resultId || "无"}<br />DELIVERY_ID：{item.deliveryId || "无"}</small>
-                        ) : null}
                       </td>
                       <td>
                         <div className="hdde-processing-row-actions">
-                          <button type="button" disabled={!item.taskId} onClick={() => locateQueueItem(item)}>{item.taskFamily === "color_correction" ? "复核结果" : item.taskFamily === "image_diagnosis" ? "查看诊断" : "查看详情"}</button>
+                          <button type="button" disabled={!item.taskId || isRetiredImageDiagnosisTask(item)} onClick={() => locateQueueItem(item)}>{item.taskFamily === "color_correction" ? "复核结果" : isRetiredImageDiagnosisTask(item) ? "已下线" : "查看详情"}</button>
                           <button type="button" disabled={compareDisabled} onClick={() => handleOpenFinalOutput(item)}>打开成品</button>
                           <button type="button" disabled={!item.output_path && !isSafeBetaRow} onClick={() => handleOpenItemOutputFolder(item)}>打开文件夹</button>
                         </div>
@@ -3282,6 +3647,7 @@ export default function DashboardPage({
           </div>
         </section>
 
+        {showCurrentSummary ? (
         <div className="hdde-processing-summary-grid">
           <section className="hdde-processing-panel hdde-processing-summary" aria-labelledby="processing-status-title">
             <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
@@ -3289,12 +3655,15 @@ export default function DashboardPage({
                 <p className="hdde-eyebrow">任务进度</p>
                 <h2 id="processing-status-title">进度与下一步</h2>
               </div>
-              <span className="hdde-processing-readiness" data-tone={directoryReady ? "positive" : "negative"}>
-                {directoryReady ? "允许处理" : "禁止处理"}
+              <span className="hdde-processing-readiness" data-tone={workdirPending ? "neutral" : directoryReady ? "positive" : "negative"}>
+                {workdirPending ? "正在检测" : directoryReady ? "允许处理" : "禁止处理"}
               </span>
             </header>
             <dl>
-              <div><dt>当前任务</dt><dd>{activeItem?.name || "尚未选择图片"}</dd></div>
+              <div>
+                <dt>{summaryItem ? "当前任务" : localQueueItems.length ? "已选素材" : "当前任务"}</dt>
+                <dd>{summaryItem?.name || (localQueueItems.length ? `${localQueueItems.length} 张图片，等待创建任务` : "尚未选择图片")}</dd>
+              </div>
               <div><dt>当前阶段</dt><dd>{currentStageLabel}</dd></div>
               <div><dt>整体进度</dt><dd>{currentProgress}%</dd></div>
               <div><dt>下一步</dt><dd>{currentNextAction}</dd></div>
@@ -3303,9 +3672,9 @@ export default function DashboardPage({
               <span style={{ width: `${currentProgress}%` }} />
             </div>
             <p className={noticeIsError ? "hdde-processing-notice is-error" : "hdde-processing-notice"} aria-live="polite">
-              {activeColorBatch && ["pending", "processing"].includes(activeColorBatch.status)
+              {taskView === "current" && activeColorBatch && ["pending", "processing"].includes(activeColorBatch.status)
                 ? `批量颜色校正正在逐张处理 · ${activeColorBatch.completed_count + activeColorBatch.failed_count} / ${activeColorBatch.total_count} 张已结束`
-                : <>{isProcessingQueue && currentIndex ? `逐张处理 · 第 ${currentIndex} / ${fileQueue.length} 张 · ` : ""}{notice}</>}
+                : <>{isProcessingQueue && currentIndex ? `逐张处理 · 第 ${currentIndex} / ${Math.max(1, localQueueItems.length)} 张 · ` : ""}{processingNotice}</>}
             </p>
           </section>
 
@@ -3331,6 +3700,7 @@ export default function DashboardPage({
             </div>
           </section>
         </div>
+        ) : null}
       </div>
     </section>
   );

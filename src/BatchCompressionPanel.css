@@ -1,0 +1,316 @@
+.hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs {
+  display: inline-grid;
+  min-width: 184px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs button[aria-pressed="true"] {
+  background: var(--card-background);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-strong) 12%, transparent);
+  color: var(--brand-primary);
+  font-weight: 700;
+}
+.hdde-batch-compression {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+.hdde-batch-compression-list-card {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+  padding: 18px;
+}
+.hdde-batch-compression-format {
+  width: min(100%, 420px);
+}
+.hdde-batch-compression-format .hdde-compression-target-field {
+  display: grid;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.hdde-batch-compression-format select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 34px 8px 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--card-background);
+  font-size: 13px;
+}
+.hdde-batch-compression-list-card > .hdde-section-header,
+.hdde-batch-compression-summary__header > .hdde-section-header {
+  align-items: center;
+}
+.hdde-batch-compression-list-card .hdde-section-header__aside,
+.hdde-batch-compression-summary__header .hdde-section-header__aside {
+  flex: 0 0 auto;
+}
+.hdde-batch-compression-actions,
+.hdde-batch-compression-progress__lead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.hdde-batch-compression h2 { margin: 0; font-size: 17px; }
+.hdde-batch-compression h2 span { margin-left: 8px; color: var(--text-secondary); font-size: 14px; }
+.hdde-batch-compression p { margin: 7px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
+.hdde-batch-compression-progress {
+  padding: 16px 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-background);
+}
+.hdde-batch-compression-progress {
+  display: grid;
+  row-gap: 13px;
+}
+.hdde-batch-compression-progress[data-phase="processing"] {
+  border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+}
+.hdde-batch-compression-progress__lead > div:first-child { min-width: 0; }
+.hdde-batch-compression-progress__lead > div:first-child > strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.35;
+}
+.hdde-batch-compression-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.hdde-batch-compression-counts strong { margin-left: 5px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.hdde-batch-compression progress { width: 100%; height: 7px; margin: 0; accent-color: var(--brand-primary); }
+.hdde-batch-compression button { min-height: 44px; }
+.hdde-batch-compression-current {
+  margin: 0 !important;
+  padding: 9px 11px;
+  border-radius: 8px;
+  color: var(--text-primary) !important;
+  background: var(--brand-primary-soft);
+}
+.hdde-batch-compression-error { color: var(--status-danger, #dc3f4f) !important; overflow-wrap: anywhere; }
+.hdde-batch-compression-error--global {
+  margin: 0 !important;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--status-danger, #dc3f4f) 34%, var(--border-color));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--status-danger, #dc3f4f) 8%, var(--card-background));
+}
+.hdde-batch-compression-table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-background);
+}
+.hdde-batch-compression-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+.hdde-batch-compression-table th { padding: 10px 12px; background: var(--surface-subtle); color: var(--text-secondary); font-weight: 650; }
+.hdde-batch-compression-table td { padding: 8px 12px; }
+.hdde-batch-compression-table th,
+.hdde-batch-compression-table td { border-bottom: 1px solid var(--divider-color); vertical-align: middle; }
+.hdde-batch-compression-table tr:last-child td { border-bottom: 0; }
+.hdde-batch-compression-table tr[data-status="PROCESSING"] td { background: var(--brand-primary-soft); }
+.hdde-batch-compression-table th:nth-child(1) { width: 42px; }
+.hdde-batch-compression-table th:nth-child(2) { width: 76px; }
+.hdde-batch-compression-table th:nth-child(4) { width: 108px; }
+.hdde-batch-compression-table th:nth-child(5) { width: 172px; }
+.hdde-batch-compression-table th:nth-child(6) { width: 68px; }
+.hdde-batch-compression-table th:nth-child(7) { width: 92px; }
+.hdde-batch-compression-table td:not(.hdde-batch-compression-name) { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hdde-batch-compression-name { min-width: 0; }
+.hdde-batch-compression-name > strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hdde-batch-compression-name .hdde-batch-compression-error { margin-top: 4px; }
+.hdde-batch-delivery-state {
+  margin-top: 4px !important;
+  color: var(--brand-primary) !important;
+  overflow-wrap: anywhere;
+}
+.hdde-batch-compression-select { padding-inline: 11px !important; text-align: center; }
+.hdde-batch-compression-select input { width: 17px; height: 17px; margin: 0; accent-color: var(--brand-primary); }
+.hdde-batch-thumbnail {
+  display: inline-grid;
+  width: 56px;
+  height: 56px;
+  min-height: 56px !important;
+  place-items: center;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  font-size: 11px;
+}
+button.hdde-batch-thumbnail { cursor: zoom-in; }
+button.hdde-batch-thumbnail:hover,
+button.hdde-batch-thumbnail:focus-visible { border-color: var(--brand-primary); outline: 2px solid var(--brand-primary-soft); }
+.hdde-batch-thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.hdde-batch-compression-summary { display: grid; gap: 12px; padding: 18px; }
+.hdde-batch-compression-summary__header {
+  min-width: 0;
+}
+.hdde-batch-compression-summary__header > .hdde-section-header { width: 100%; }
+.hdde-batch-compression-summary__header .hdde-eyebrow { margin: 0 0 5px; }
+.hdde-batch-compression-summary__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+.hdde-batch-compression-summary__actions button {
+  height: 48px;
+  min-height: 48px;
+  margin: 0;
+  padding: 9px 16px;
+  border-radius: 8px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.hdde-batch-compression-summary__relation {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(180px, 1fr);
+  align-items: end;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--divider-color);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+.hdde-batch-compression-summary__relation > div { display: grid; gap: 4px; }
+.hdde-batch-compression-summary__relation span { color: var(--text-secondary); font-size: 12px; }
+.hdde-batch-compression-summary__relation strong { color: var(--text-primary); font-size: 21px; font-variant-numeric: tabular-nums; }
+.hdde-batch-compression-summary__arrow { align-self: center; color: var(--brand-primary) !important; font-size: 21px !important; }
+.hdde-batch-compression-summary__saving { justify-self: end; text-align: right; }
+.hdde-batch-compression-summary__saving strong { color: var(--brand-primary); font-size: 17px; }
+.hdde-batch-compression-summary__note { margin: 0 !important; }
+.hdde-batch-delivery-progress,
+.hdde-batch-delivery-report {
+  display: grid;
+  gap: 5px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+  border-radius: 9px;
+  background: var(--brand-primary-soft);
+}
+.hdde-batch-delivery-progress span,
+.hdde-batch-delivery-report > span { color: var(--text-secondary); font-size: 13px; }
+.hdde-batch-delivery-report ul { display: grid; gap: 5px; margin: 3px 0 0; padding-left: 20px; color: var(--text-primary); font-size: 13px; }
+.hdde-batch-delivery-report li span { font-weight: 700; }
+.hdde-batch-delivery-confirm {
+  justify-self: start;
+  margin-top: 5px;
+}
+.hdde-batch-dialog-backdrop {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(2 8 18 / 72%);
+}
+.hdde-batch-preview-dialog,
+.hdde-batch-delivery-dialog {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 13px;
+  background: var(--card-background);
+  box-shadow: 0 20px 70px rgb(0 0 0 / 32%);
+}
+.hdde-batch-preview-dialog { padding: 14px; }
+.hdde-batch-preview-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.hdde-batch-preview-dialog header h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hdde-batch-preview-dialog > img { display: block; max-width: 100%; max-height: calc(100vh - 140px); margin: auto; border-radius: 9px; object-fit: contain; }
+.hdde-batch-delivery-dialog { display: grid; gap: 16px; width: min(520px, 100%); padding: 22px; }
+.hdde-batch-delivery-dialog .hdde-eyebrow { margin: 0 0 5px; }
+.hdde-batch-delivery-dialog > p { margin: 0; }
+.hdde-batch-delivery-dialog > label { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: 9px; background: var(--surface-subtle); color: var(--text-primary); font-size: 13px; line-height: 1.5; }
+.hdde-batch-delivery-dialog > label input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 1px; accent-color: var(--brand-primary); }
+.hdde-batch-delivery-dialog .hdde-batch-compression-actions {
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+.hdde-batch-delivery-dialog .hdde-batch-compression-actions button {
+  height: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 9px 15px;
+  border-radius: 8px;
+  line-height: 1.2;
+}
+
+@media (max-width: 860px) {
+  .hdde-batch-compression-table th,
+  .hdde-batch-compression-table td { padding-inline: 7px; }
+  .hdde-batch-compression-table th:nth-child(1) { width: 36px; }
+  .hdde-batch-compression-table th:nth-child(2) { width: 66px; }
+  .hdde-batch-compression-table th:nth-child(4) { width: 92px; }
+  .hdde-batch-compression-table th:nth-child(5) { width: 142px; }
+  .hdde-batch-compression-table th:nth-child(6) { width: 58px; }
+  .hdde-batch-compression-table th:nth-child(7) { width: 82px; }
+  .hdde-batch-thumbnail { width: 50px; height: 50px; min-height: 50px !important; }
+  .hdde-batch-compression-summary__relation { grid-template-columns: auto auto auto; }
+  .hdde-batch-compression-summary__saving { grid-column: 1 / -1; justify-self: start; text-align: left; }
+}
+
+@media (max-width: 620px) {
+  .hdde-compression-page > .hdde-page-header .hdde-page-header__actions,
+  .hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs { width: 100%; }
+  .hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs { min-width: 0; }
+  .hdde-batch-compression-list-card,
+  .hdde-batch-compression-summary { padding: 14px; }
+  .hdde-batch-compression-list-card > .hdde-section-header,
+  .hdde-batch-compression-summary__header > .hdde-section-header { align-items: stretch; flex-direction: column; }
+  .hdde-batch-compression-summary__actions { justify-content: stretch; }
+  .hdde-batch-compression-summary__actions button { flex: 1 1 0; min-width: 0; }
+  .hdde-batch-compression-summary__relation { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .hdde-batch-compression-summary__relation strong { font-size: 17px; }
+  .hdde-batch-compression-preview-column,
+  .hdde-batch-compression-table td:nth-child(2) { display: none; }
+  .hdde-batch-compression-table th:nth-child(5) { width: 126px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hdde-batch-compression * { scroll-behavior: auto; }
+}

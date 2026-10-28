@@ -64,7 +64,7 @@ def _default_app_data_root() -> Path:
     return documents / "影界HDDE"
 
 
-DEFAULT_FEEDBACK_DIR = _default_app_data_root() / "诊断" / "反馈包" / "1080P安全增强"
+DEFAULT_FEEDBACK_DIR = _default_app_data_root() / "诊断" / "反馈包" / "1080P画质"
 README_NAME = "README_请把整个ZIP发给开发者.txt"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 

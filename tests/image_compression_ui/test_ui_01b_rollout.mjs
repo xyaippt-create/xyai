@@ -9,7 +9,6 @@ const read = (relativePath) => fs.readFileSync(path.join(ROOT, relativePath), "u
 
 const pages = {
   processing: read("src/DashboardPage.jsx"),
-  diagnosis: read("src/ImageDiagnosisPage.jsx"),
   compression: read("src/CompressionPage.jsx"),
   color: read("src/ColorCorrectionPage.jsx"),
   retouch: read("src/LocalRetouchPage.jsx"),
@@ -23,15 +22,16 @@ const shell = read("src/AppShell.jsx");
 const styles = read("src/index.css");
 
 test("UI-01B rolls the shared page hierarchy through formal work areas", () => {
-  for (const key of ["diagnosis", "compression", "color", "retouch", "outputs", "delivery", "settings"]) {
+  for (const key of ["compression", "color", "outputs", "delivery", "settings"]) {
     assert.match(pages[key], /HddePageHeader/, `${key} must use the shared formal page header`);
   }
+  assert.match(pages.retouch, /hdde-retouch-workspace__topbar/);
   assert.match(styles, /UI-01B — roll the precision-workspace language/);
   assert.match(styles, /\.hdde-detail-header,[\s\S]*\.hdde-compare-header,[\s\S]*\.hdde-report-header/);
 });
 
 test("UI-01B keeps one current-task hierarchy and one sequential preparation surface", () => {
-  assert.match(pages.processing, /<h2 id="processing-queue-title">任务列表<\/h2>/);
+  assert.match(pages.processing, /<h2 id="processing-queue-title">\{taskView === "history" \? "历史任务" : "当前任务"\}<\/h2>/);
   assert.doesNotMatch(pages.processing, /<p className="hdde-eyebrow">处理中心<\/p>/);
   assert.doesNotMatch(pages.processing, /正式目录 READY|正式目录 BLOCKED/);
   assert.match(styles, /\.hdde-processing-steps[\s\S]*gap: 0;[\s\S]*overflow: hidden;/);
@@ -47,8 +47,9 @@ test("UI-01B gives output center and retouch actionable restrained empty states"
 });
 
 test("UI-01B translates historical output metadata into the formal product names", () => {
-  assert.match(pages.outputs, /"4k": "4K高清画质增强"/);
-  assert.match(pages.outputs, /processingType === "1080p"\) return "1080P标准增强 \/ 安全增强"/);
+  assert.match(pages.outputs, /processingTypeDisplayName\(processingType, fallback\)/);
+  assert.match(read("src/productDisplay.js"), /normalized === "4k"\) return PRODUCT_DISPLAY_NAMES\.enhancement4k/);
+  assert.match(read("src/productDisplay.js"), /"safe_1080p_beta"\]\.includes\(normalized\)/);
   assert.match(pages.outputs, /formalCategoryLabel\(category\)/);
   assert.doesNotMatch(pages.outputs, />\{category\.label\}</);
 });
@@ -62,21 +63,19 @@ test("UI-01B removes duplicate settings facts and obsolete public wording", () =
     + read("src/QualityReportPage.jsx")
     + read("src/LaunchPage.jsx");
   assert.doesNotMatch(publicSources, /4K增强适配|1080P标准版|1080P安全增强版|当前为独立 Beta 功能|Beta Entry|LOCAL RETOUCH/);
-  for (const label of ["4K高清增强", "1080P标准增强", "1080P安全增强", "4K高清画质增强"]) {
+  for (const label of ["4K画质增强", "1080P画质"]) {
     assert.ok(read("src/appRoutes.js").includes(label) || publicSources.includes(label), `missing formal label: ${label}`);
   }
+  assert.doesNotMatch(read("src/appRoutes.js"), /name: "(?:4K尺寸适配|4K高清增强|1080P画质增强|1080P标准增强|1080P安全增强|1080P普通增强)"/);
 });
 
-test("UI-01B closes diagnosis compression output delivery and feedback hierarchy", () => {
-  assert.match(pages.diagnosis, /DIAGNOSIS_STEPS/);
-  assert.match(pages.diagnosis, /导入图片.*诊断结论.*推荐动作.*进入处理/);
-  assert.match(pages.diagnosis, /hdde-diagnosis-outcome-preview/);
-
+test("UI-01B closes compression output delivery and feedback hierarchy", () => {
   assert.doesNotMatch(pages.compression, /ImageProcessingPreflightPanel|阶段5预检|图片分析与处理建议|分析并推荐/);
-  assert.match(pages.compression, /不确定如何处理？先进行图片诊断/);
+  assert.doesNotMatch(pages.compression, /href="\/image-diagnosis"|先进行图片诊断/);
   assert.match(pages.compression, /长图输出核对/);
 
-  assert.match(pages.outputs, /hdde-output-next-step/);
+  assert.doesNotMatch(pages.outputs, /hdde-output-next-step/);
+  assert.match(pages.outputs, /hdde-output-action--compact/);
   assert.ok(pages.outputs.indexOf("加入交付清单") < pages.outputs.indexOf("打开成品"));
   assert.match(pages.delivery, /交付副本明细/);
   assert.match(pages.delivery, /源成品未移动/);
@@ -84,21 +83,19 @@ test("UI-01B closes diagnosis compression output delivery and feedback hierarchy
   assert.match(feedback, /hdde-feedback-context/);
   assert.match(feedback, /hdde-feedback-upload/);
   assert.doesNotMatch(feedback, />取消<\/button>/);
-  assert.match(feedback, /aria-label="关闭问题反馈"[^>]*>×<\/button>/);
+  assert.match(feedback, /aria-label="关闭问题反馈"[^>]*><HddeIcon name="close"/);
 });
 
-test("UI-01B follow-up keeps diagnosis work areas balanced and retouch header compact", () => {
-  assert.match(styles, /--hdde-diagnosis-workspace-height: 520px/);
-  assert.match(styles, /\.hdde-diagnosis-layout\[data-state="idle"\][\s\S]*align-items: stretch/);
-  assert.match(styles, /\.hdde-diagnosis-layout\[data-state="idle"\][\s\S]*\.hdde-diagnosis-run[\s\S]*margin-top: 16px/);
+test("UI-01B keeps the retouch header compact", () => {
   assert.doesNotMatch(pages.retouch, /eyebrow="局部工作区"/);
   assert.match(styles, /\.hdde-retouch-page > \.hdde-page-header[\s\S]*margin-bottom: 4px;[\s\S]*padding: 0 0 12px/);
 });
 
 test("UI-01B uses one title hierarchy across formal pages and compatibility subpages", () => {
-  for (const key of ["processing", "diagnosis", "compression", "color", "retouch", "outputs", "delivery", "settings"]) {
+  for (const key of ["processing", "compression", "color", "outputs", "delivery", "settings"]) {
     assert.match(pages[key], /HddePageHeader/, `${key} must use the shared page title component`);
   }
+  assert.match(pages.retouch, /aria-labelledby="retouch-title"/);
   for (const token of [
     "--font-weight-page-title",
     "--line-height-page-title",
@@ -113,9 +110,10 @@ test("UI-01B uses one title hierarchy across formal pages and compatibility subp
 });
 
 test("UI-01B uses one shared page frame and header rhythm across formal pages", () => {
-  for (const key of ["processing", "diagnosis", "compression", "color", "retouch", "outputs", "delivery", "settings"]) {
+  for (const key of ["processing", "compression", "color", "outputs", "delivery", "settings"]) {
     assert.match(pages[key], /hdde-page-frame/, `${key} must opt into the shared formal-page frame`);
   }
+  assert.match(pages.retouch, /hdde-retouch-workspace/);
   assert.match(shell, /hdde-topbar-inner/);
   assert.match(styles, /--page-frame-content-max-width: 1360px/);
   assert.match(styles, /--page-frame-inline-gutter: 22px/);

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import tempfile
 import time
 import unittest
@@ -13,6 +14,8 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+
+from tests.support.app_runtime import controlled_test_app_paths, isolated_runtime_logging
 
 import main
 from engine.diagnostics import runtime_logging
@@ -130,6 +133,7 @@ class WorkdirResolutionTests(unittest.TestCase):
             formal_root.rmdir()
 
             with (
+                isolated_runtime_logging("real-app-saved-root-disappearance"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 TestClient(build_web_app()) as client,
@@ -172,17 +176,8 @@ class WorkdirResolutionTests(unittest.TestCase):
             settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
             settings_before = settings_path.read_bytes()
 
-            class DummyTk:
-                def withdraw(self):
-                    return None
-
-                def attributes(self, *_args):
-                    return None
-
-                def destroy(self):
-                    return None
-
             with (
+                isolated_runtime_logging("real-app-select-root-failure"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 patch.object(
@@ -194,8 +189,7 @@ class WorkdirResolutionTests(unittest.TestCase):
             ):
                 before = client.get("/api/app/workdir").json()["data"]
                 with (
-                    patch("tkinter.Tk", DummyTk),
-                    patch("tkinter.filedialog.askdirectory", return_value=str(candidate_root)),
+                    patch("runtime.windows_dialog.select_directory", return_value=str(candidate_root)),
                     patch.object(
                         main,
                         "write_settings_if_changed",
@@ -215,6 +209,93 @@ class WorkdirResolutionTests(unittest.TestCase):
             self.assertTrue(after["processing_allowed"])
             self.assertNotEqual(Path(after["app_data_root"]), candidate_root)
             self.assertEqual(settings_path.read_bytes(), settings_before)
+            self.assertEqual(REPOSITORY_SETTINGS_PATH.read_bytes(), repository_before)
+
+    def test_reset_formal_root_uses_authoritative_default_persists_and_preserves_old_files(self):
+        repository_before = REPOSITORY_SETTINGS_PATH.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom_root = root / "custom-formal-root"
+            default_root = root / "default-formal-root"
+            custom_root.mkdir()
+            default_root.mkdir()
+            sentinel = custom_root / "preserve-me.txt"
+            sentinel.write_bytes(b"old-custom-file-must-survive")
+            settings_path = root / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {"app_data_root": str(custom_root), "last_app_data_root": str(custom_root)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                isolated_runtime_logging("real-app-reset-formal-root"),
+                patch.object(main, "SETTINGS_PATH", settings_path),
+                patch.object(main, "_initial_formal_app_data_root", return_value=default_root),
+                patch.object(main, "_formal_root_validation_error", return_value=("", "")),
+                patch.object(
+                    main,
+                    "initialize_file_logging",
+                    return_value={"initialized": False, "degraded": False, "path": None, "reason": "test_controlled"},
+                ),
+            ):
+                with TestClient(build_web_app()) as client:
+                    before = client.get("/api/app/workdir").json()["data"]
+                    restored = client.post("/api/app/workdir/reset-default", json={})
+
+                    self.assertEqual(Path(before["app_data_root"]), custom_root)
+                    self.assertEqual(Path(before["default_app_data_root"]), default_root)
+                    self.assertFalse(before["is_default_app_data_root"])
+                    self.assertEqual(restored.status_code, 200, restored.text)
+                    restored_data = restored.json()["data"]
+                    self.assertEqual(Path(restored_data["app_data_root"]), default_root)
+                    self.assertEqual(Path(restored_data["formal_output_root"]), default_root / main.OUTPUT_ROOT_RELATIVE)
+                    self.assertTrue(restored_data["is_default_app_data_root"])
+                    self.assertEqual(sentinel.read_bytes(), b"old-custom-file-must-survive")
+
+                    persisted = json.loads(settings_path.read_text(encoding="utf-8"))
+                    self.assertEqual(Path(persisted["app_data_root"]), default_root)
+                    self.assertEqual(Path(persisted["last_app_data_root"]), default_root)
+                    self.assertEqual(Path(persisted["default_output_dir"]), default_root / main.DEFAULT_OUTPUT_DIR_NAME)
+                    self.assertEqual(
+                        Path(persisted["image_compression_default_output_root"]),
+                        default_root / main.IMAGE_COMPRESSION_OUTPUT_DIR_NAME,
+                    )
+
+                    unchanged_before = settings_path.read_bytes()
+                    unchanged_mtime = settings_path.stat().st_mtime_ns
+                    unchanged = client.post("/api/app/workdir/reset-default", json={})
+                    self.assertEqual(unchanged.status_code, 200, unchanged.text)
+                    self.assertEqual(unchanged.json()["status"], "unchanged")
+                    self.assertTrue(unchanged.json()["write_skipped"])
+                    self.assertEqual(settings_path.read_bytes(), unchanged_before)
+                    self.assertEqual(settings_path.stat().st_mtime_ns, unchanged_mtime)
+
+                with TestClient(build_web_app()) as restarted_client:
+                    after_restart = restarted_client.get("/api/app/workdir").json()["data"]
+                    self.assertEqual(Path(after_restart["app_data_root"]), default_root)
+                    self.assertEqual(Path(after_restart["formal_output_root"]), default_root / main.OUTPUT_ROOT_RELATIVE)
+                    self.assertTrue(after_restart["directory_ready"])
+                    self.assertTrue(after_restart["is_default_app_data_root"])
+
+                    from PIL import Image
+
+                    image_buffer = io.BytesIO()
+                    Image.new("RGB", (8, 8), color=(45, 111, 232)).save(image_buffer, format="PNG")
+                    uploaded = restarted_client.post(
+                        "/api/upload",
+                        files={"file": ("after-reset.png", image_buffer.getvalue(), "image/png")},
+                        data={"mode": "fidelity"},
+                    )
+                    self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                    created_task = restarted_client.app.state.task_registry[uploaded.json()["task_id"]]
+                    self.assertEqual(Path(created_task["input_dir"]), default_root / main.DEFAULT_INPUT_DIR_NAME)
+                    self.assertEqual(Path(created_task["output_root"]), default_root / main.DEFAULT_OUTPUT_DIR_NAME)
+
+            self.assertEqual(sentinel.read_bytes(), b"old-custom-file-must-survive")
             self.assertEqual(REPOSITORY_SETTINGS_PATH.read_bytes(), repository_before)
 
 
@@ -284,6 +365,7 @@ class RequiredDirectoryReadinessTests(unittest.TestCase):
             before_mtime = settings_path.stat().st_mtime_ns
 
             with (
+                isolated_runtime_logging("real-app-required-directory-ready"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
             ):
@@ -320,6 +402,7 @@ class RequiredDirectoryReadinessTests(unittest.TestCase):
             settings_mtime_before = settings_path.stat().st_mtime_ns
 
             with (
+                isolated_runtime_logging("real-app-required-directory-failure"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 TestClient(build_web_app()) as client,
@@ -365,6 +448,7 @@ class RequiredDirectoryReadinessTests(unittest.TestCase):
                 return original_mkdir(path, *args, **kwargs)
 
             with (
+                isolated_runtime_logging("real-app-directory-blocking"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 patch.object(Path, "mkdir", new=controlled_mkdir),
@@ -689,6 +773,7 @@ class DirectoryFailureBlockingTests(unittest.TestCase):
             }
 
             with (
+                isolated_runtime_logging("real-app-unavailable-formal-directory"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "PROJECT_ROOT", isolated_project_root),
                 patch.object(main, "resolve_app_data_root", return_value=failure_info),
@@ -803,6 +888,9 @@ class RealApplicationPreflightTests(unittest.TestCase):
         )
         cls.app_data_root_patch.start()
         cls.addClassCleanup(cls.app_data_root_patch.stop)
+        cls.runtime_log_isolation = isolated_runtime_logging("real-app-preflight-class")
+        cls.runtime_log_isolation.__enter__()
+        cls.addClassCleanup(cls.runtime_log_isolation.__exit__, None, None, None)
         cls.addClassCleanup(runtime_logging.reset_runtime_logging_for_tests)
         cls.client = TestClient(build_web_app())
         cls.addClassCleanup(cls.client.close)
@@ -904,7 +992,7 @@ class RealApplicationPreflightTests(unittest.TestCase):
         self.assertEqual(data["product"]["version"], main.APP_VERSION)
         self.assertRegex(
             data["product"]["build_id"],
-            r"^V0\.5\.4-dev\+(?:[0-9a-f]{7,12}|nogit)\.(?:clean|dirty|unknown)\.\d{8}T\d{9}Z$",
+            rf"^V{re.escape(main.PRODUCT_VERSION)}\+(?:[0-9a-f]{{7,12}}|nogit)\.(?:clean|dirty|unknown)\.\d{{8}}T\d{{9}}Z$",
         )
         self.assertEqual(data["product"]["build_status"], "loaded")
         self.assertEqual(data["application"]["status"], "running")
@@ -925,6 +1013,7 @@ class RealApplicationPreflightTests(unittest.TestCase):
     def test_real_app_registers_preflight_route(self):
         routes = {route.path for route in self.client.app.routes}
         self.assertIn("/api/image-processing/preflight", routes)
+        self.assertFalse(any(route.startswith("/api/image-diagnosis") for route in routes))
 
     def test_real_app_preserves_stage4_missing_token_semantics(self):
         response = self.client.post(
@@ -1081,6 +1170,7 @@ class RuntimeLoggingTests(unittest.TestCase):
             settings_mtime_before = settings_path.stat().st_mtime_ns
 
             with (
+                controlled_test_app_paths(settings_path, formal_root),
                 capture_runtime_log() as captured,
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
@@ -1111,6 +1201,7 @@ class RuntimeLoggingTests(unittest.TestCase):
             invalid_before = invalid_settings_path.read_bytes()
             default_root = root / "default-formal-root"
             with (
+                controlled_test_app_paths(invalid_settings_path, default_root),
                 capture_runtime_log() as configuration_events,
                 patch.object(main, "SETTINGS_PATH", invalid_settings_path),
                 patch.object(main, "_initial_formal_app_data_root", return_value=default_root),
@@ -1132,6 +1223,7 @@ class RuntimeLoggingTests(unittest.TestCase):
             )
             blocked_before = blocked_settings_path.read_bytes()
             with (
+                controlled_test_app_paths(blocked_settings_path, blocked_root),
                 capture_runtime_log() as directory_events,
                 patch.object(main, "SETTINGS_PATH", blocked_settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
@@ -1228,6 +1320,7 @@ class RuntimeLoggingTests(unittest.TestCase):
                 return await original_upload_read(upload, size)
 
             with (
+                controlled_test_app_paths(settings_path, formal_root),
                 capture_runtime_records() as captured_records,
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
@@ -1278,6 +1371,22 @@ class RuntimeLoggingTests(unittest.TestCase):
                 )
                 self.assertEqual(non_output_io_error.status_code, 200, non_output_io_error.text)
                 wait_for_status(client, non_output_io_error.json()["task_id"], "failed")
+
+                terminal_task_ids = {
+                    success.json()["task_id"],
+                    product_error.json()["task_id"],
+                    non_output_io_error.json()["task_id"],
+                }
+                for _attempt in range(50):
+                    current_events = [parse_runtime_record(record) for record in captured_records]
+                    terminal_seen = {
+                        item.get("task_id")
+                        for item in current_events
+                        if item.get("event") in {"IMAGE_TASK_SUCCEEDED", "IMAGE_TASK_FAILED"}
+                    }
+                    if terminal_task_ids <= terminal_seen:
+                        break
+                    time.sleep(0.01)
 
                 parsed_events = [parse_runtime_record(record) for record in captured_records]
                 started_task_ids = [
@@ -1413,6 +1522,7 @@ class RuntimeLoggingTests(unittest.TestCase):
                 self.assertEqual(categories, {error_category})
 
             with (
+                controlled_test_app_paths(settings_path, formal_root),
                 capture_runtime_records() as captured_records,
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
@@ -1504,6 +1614,7 @@ class RuntimeLoggingTests(unittest.TestCase):
             attempted_root = root / "attempted-compression-default"
 
             with (
+                isolated_runtime_logging("real-app-settings-write-failure"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 TestClient(build_web_app(), raise_server_exceptions=False) as client,
@@ -1560,6 +1671,7 @@ class RuntimeLoggingTests(unittest.TestCase):
                 self.fail(f"task {task_id} did not reach failed")
 
             with (
+                isolated_runtime_logging("real-app-output-write-failure"),
                 capture_runtime_records() as captured_records,
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
@@ -1706,6 +1818,82 @@ class AppDataMigrationTests(unittest.TestCase):
                 new_four_k.resolve(),
             )
 
+    def test_all_retired_output_folders_migrate_to_the_two_official_folders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            formal_root = Path(directory) / "formal-root"
+            retired = {
+                "4K尺寸适配": "four-k-size.bin",
+                "4K适配": "four-k-adapt.bin",
+                "4K增强": "four-k-enhance.bin",
+                "4K画质": "four-k-quality.bin",
+                "4K画质适配": "four-k-quality-adapt.bin",
+                "4K高清增强": "four-k-hd.bin",
+                "1080P画质增强": "1080-quality-enhance.bin",
+                "1080P标准增强": "1080-standard.bin",
+                "1080P安全增强": "1080-safe.bin",
+                "1080P增强": "1080-enhance.bin",
+                "1080P标准版": "1080-standard-edition.bin",
+            }
+            originals = {}
+            for index, (folder, filename) in enumerate(retired.items(), start=1):
+                source = formal_root / "输出" / folder / filename
+                source.parent.mkdir(parents=True, exist_ok=True)
+                payload = f"payload-{index}".encode("ascii")
+                source.write_bytes(payload)
+                originals[source] = payload
+
+            result = app_data_migration.execute_migration_cycle(
+                formal_root,
+                {"app_data_root": str(formal_root)},
+                write_report=False,
+            )
+
+            self.assertEqual(result["status"], "APPLIED")
+            self.assertEqual(app_data_migration.TARGET_PATHS["standard_output"], Path("输出") / "1080P画质")
+            self.assertEqual(app_data_migration.TARGET_PATHS["four_k_output"], Path("输出") / "4K画质增强")
+            for source, payload in originals.items():
+                target_root = (
+                    formal_root / app_data_migration.TARGET_PATHS["four_k_output"]
+                    if source.parent.name.startswith("4K")
+                    else formal_root / app_data_migration.TARGET_PATHS["standard_output"]
+                )
+                target = target_root / source.name
+                self.assertFalse(source.parent.exists())
+                self.assertEqual(target.read_bytes(), payload)
+                self.assertEqual(
+                    app_data_migration.resolve_migrated_formal_output_path(source, formal_root),
+                    target.resolve(),
+                )
+
+    def test_retired_local_retouch_folders_migrate_to_defect_repair_without_changing_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            formal_root = Path(directory) / "formal-root"
+            originals = {}
+            for index, folder in enumerate(("标记修整", "瑕疵修整", "局部修整", "局部修复"), start=1):
+                source = formal_root / "输出" / folder / f"retouch-{index}.png"
+                source.parent.mkdir(parents=True, exist_ok=True)
+                payload = f"retouch-payload-{index}".encode("ascii")
+                source.write_bytes(payload)
+                originals[source] = payload
+
+            result = app_data_migration.execute_migration_cycle(
+                formal_root,
+                {"app_data_root": str(formal_root)},
+                write_report=False,
+            )
+
+            target_root = formal_root / app_data_migration.TARGET_PATHS["local_retouch_output"]
+            self.assertEqual(result["status"], "APPLIED")
+            self.assertEqual(app_data_migration.TARGET_PATHS["local_retouch_output"], Path("输出") / "瑕疵修复")
+            for source, payload in originals.items():
+                target = target_root / source.name
+                self.assertFalse(source.parent.exists())
+                self.assertEqual(target.read_bytes(), payload)
+                self.assertEqual(
+                    app_data_migration.resolve_migrated_formal_output_path(source, formal_root),
+                    target.resolve(),
+                )
+
     def test_conflicts_and_move_failures_preserve_sources_and_unknown_content(self):
         with tempfile.TemporaryDirectory() as directory:
             formal_root = Path(directory) / "formal-root"
@@ -1755,10 +1943,10 @@ class AppDataMigrationTests(unittest.TestCase):
             first = result["first"]
             self.assertEqual(result["status"], "BLOCKED")
             self.assertEqual(result["second_run"], "NOT_RUN")
-            self.assertEqual(first["deduplicated_files"], 1)
-            self.assertEqual(first["stage"], "move")
-            self.assertEqual(first["rollback_status"], "SUCCESS")
-            self.assertEqual(first["action_taken"], "ROLLED_BACK")
+            self.assertEqual(first["deduplicated_files"], 0)
+            self.assertEqual(first["stage"], "collision")
+            self.assertEqual(first["rollback_status"], "NOT_REQUIRED")
+            self.assertEqual(first["action_taken"], "KEPT_IN_PLACE")
             self.assertEqual((legacy / "same.txt").read_bytes(), b"same")
             self.assertEqual((legacy / "conflict.txt").read_bytes(), b"source-content")
             self.assertEqual((target / "same.txt").read_bytes(), b"same")
@@ -2128,6 +2316,7 @@ class AppDataMigrationTests(unittest.TestCase):
                 }
 
             with (
+                isolated_runtime_logging("real-app-normal-processing"),
                 patch.object(main, "SETTINGS_PATH", settings_path),
                 patch.object(main, "_formal_root_validation_error", return_value=("", "")),
                 patch("backend.v036_output_core.build_output_plan", side_effect=fake_output_plan),
@@ -2175,6 +2364,98 @@ class AppDataMigrationTests(unittest.TestCase):
                 "配置",
             ):
                 self.assertFalse((formal_root / legacy).exists(), legacy)
+            runtime_logging.reset_runtime_logging_for_tests()
+
+    def test_completed_task_stream_does_not_replay_false_completion_or_delay_result_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            formal_root = Path(directory) / "formal-root"
+            formal_root.mkdir()
+            settings_path = Path(directory) / "settings.json"
+            settings = json.loads(REPOSITORY_SETTINGS_PATH.read_bytes())
+            settings["app_data_root"] = str(formal_root)
+            settings["last_app_data_root"] = str(formal_root)
+            settings["default_output_dir"] = str(formal_root / app_data_migration.TARGET_PATHS["standard_output"])
+            settings["last_output_dir"] = str(formal_root / app_data_migration.TARGET_PATHS["standard_output"])
+            settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            def fake_output_plan(input_path, output_root, *_args, **_kwargs):
+                source = Path(input_path)
+                return {
+                    "paths": {"final": Path(output_root) / f"{source.stem}_final.png"},
+                    "image_type": "test_fixture",
+                    "input_width": 1,
+                    "input_height": 1,
+                    "output_width": 1,
+                    "output_height": 1,
+                    "resize_policy": "none",
+                    "was_upscaled": False,
+                    "was_downscaled": False,
+                }
+
+            def fake_process(payload):
+                source = Path(payload["input_path"])
+                final_path = Path(payload["output_root"]) / f"{source.stem}_final.png"
+                final_path.write_bytes(b"processed")
+                return {
+                    "final_output_path": final_path,
+                    "task_result": {"output_format": "png", "output_size": 9},
+                    "task_report": {},
+                    "image_type": "test_fixture",
+                    "degradation_type": "none",
+                    "input_width": 1,
+                    "input_height": 1,
+                    "output_width": 1,
+                    "output_height": 1,
+                    "input_size_bytes": source.stat().st_size,
+                    "output_changed": True,
+                    "hash_equal": False,
+                    "pixel_diff_score": 1.0,
+                    "debug_timing": {},
+                    "debug_quality": {},
+                }
+
+            with (
+                isolated_runtime_logging("real-app-result-ready-stream"),
+                patch.object(main, "SETTINGS_PATH", settings_path),
+                patch.object(main, "_formal_root_validation_error", return_value=("", "")),
+                patch("backend.v036_output_core.build_output_plan", side_effect=fake_output_plan),
+                patch("backend.v036_output_core.sha256_file", return_value="fixture-sha256"),
+                patch("engine.pipeline.process_v046_delivery", side_effect=fake_process),
+                TestClient(build_web_app()) as client,
+            ):
+                response = client.post(
+                    "/api/upload",
+                    files={"file": ("stream-ready.png", b"fixture", "image/png")},
+                    data={"mode": "texture"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                task_id = response.json()["task_id"]
+                for _attempt in range(100):
+                    task = client.get(f"/api/v1/tasks/{task_id}").json()["data"]
+                    if task["task_status"] == "completed":
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("stream-ready task did not complete")
+
+                started = time.perf_counter()
+                stream_response = client.get(f"/api/v1/tasks/{task_id}/stream")
+                stream_elapsed = time.perf_counter() - started
+                payloads = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in stream_response.text.splitlines()
+                    if line.startswith("data: {")
+                ]
+
+            premature_completion = [
+                payload
+                for payload in payloads
+                if payload.get("done") is not True and "输出完成" in str(payload.get("message") or "")
+            ]
+            self.assertEqual(premature_completion, [])
+            self.assertLess(stream_elapsed, 0.75)
+            self.assertTrue(payloads[-1]["done"])
+            self.assertEqual(payloads[-1]["task"]["task_status"], "completed")
             runtime_logging.reset_runtime_logging_for_tests()
 
 

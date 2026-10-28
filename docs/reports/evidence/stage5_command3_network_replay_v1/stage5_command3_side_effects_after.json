@@ -1,0 +1,32 @@
+{
+  "schema_version": "hdde.stage5.output-side-effect-snapshot.v1",
+  "phase": "after",
+  "captured_at": "2026-07-18T07:25:53.858247+00:00",
+  "root_label": "图片压缩输出",
+  "root_exists": true,
+  "top_level_directories": [
+    "PNG无损压缩",
+    "上传适配",
+    "尺寸缩小"
+  ],
+  "file_count": 3,
+  "image_file_count": 2,
+  "feedback_package_count": 1,
+  "files": [
+    {
+      "relative_path": "PNG无损压缩/ChatGPT Image 2026年7月17日 12_18_12_PNG无损压缩_20260718-143425_4d02.png",
+      "size_bytes": 2052889,
+      "sha256": "07340458e63882686f97f4d57a8f547e607e66ec00c2870964d4189398786b88"
+    },
+    {
+      "relative_path": "尺寸缩小/ChatGPT Image 2026年7月17日 12_18_12_尺寸缩小_短边900_20260718-143501_4b35.png",
+      "size_bytes": 1976154,
+      "sha256": "9223137e6e286ebb6b5fe902158fa4131955eda13cbfdc1bf0d93d9422a93780"
+    },
+    {
+      "relative_path": "尺寸缩小/ChatGPT Image 2026年7月17日 12_18_12_尺寸缩小_短边900_20260718-143501_4b35_测试反馈包.zip",
+      "size_bytes": 5655,
+      "sha256": "ef185c08c13a367e37c870e6d6a749c2e4ac5a27ecf1961edb6481f9237c6954"
+    }
+  ]
+}

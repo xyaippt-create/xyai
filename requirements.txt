@@ -2,6 +2,11 @@ numpy>=2.0
 opencv-python-headless>=4.10
 Pillow>=10.0
 onnxruntime>=1.20,<2
+torch==2.6.0
+torchvision==0.21.0
+transformers==4.49.0
+timm==1.0.15
+einops==0.8.1
 Flask>=3.0
 Flask-Cors>=4.0
 fastapi>=0.115

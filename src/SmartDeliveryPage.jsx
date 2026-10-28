@@ -1,27 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { getFileDisplayName } from "./fileDisplayName.js";
 import { HddePageHeader } from "./HddeUI.jsx";
-
-const DEFAULT_RULES = Object.freeze({
-  base_mode: "original",
-  base_name: "客户交付",
-  prefix: "",
-  suffix: "",
-  find_text: "",
-  replace_text: "",
-  sequence_enabled: true,
-  sequence_start: 1,
-  sequence_padding: 2,
-  date_enabled: true,
-  template: "{prefix}{base}{suffix}_{date}_{seq}",
-});
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
     const detail = payload?.detail;
-    const error = new Error(detail?.message || payload?.message || "智能交付暂时无法完成该操作。");
+    const error = new Error(detail?.message || payload?.message || "文件交付暂时无法完成该操作。");
     error.payload = payload;
     throw error;
   }
@@ -35,18 +20,7 @@ function formatBytes(value) {
   return `${(size / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-function RuleField({ label, helper, children }) {
-  return (
-    <label className="hdde-delivery-field">
-      <span>{label}</span>
-      {children}
-      {helper ? <small>{helper}</small> : null}
-    </label>
-  );
-}
-
 export default function SmartDeliveryPage({ selectedItemIds = [], selectedResultIds = [], onBackToOutputs }) {
-  const [rules, setRules] = useState(DEFAULT_RULES);
   const [preflight, setPreflight] = useState(null);
   const [preflightState, setPreflightState] = useState("loading");
   const [error, setError] = useState("");
@@ -61,36 +35,29 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
     const selectedValues = selectionKey ? selectionKey.split("|") : [];
     if (!selectedValues.length || delivery) return undefined;
     let active = true;
-    const timer = window.setTimeout(() => {
-      setPreflightState("loading");
-      setError("");
-      setConfirmed(false);
-      requestJson("/api/smart-delivery/preflight", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [selectionMode]: selectedValues, rules }),
+    setPreflightState("loading");
+    setError("");
+    setConfirmed(false);
+    requestJson("/api/smart-delivery/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [selectionMode]: selectedValues, rules: {} }),
+    })
+      .then((payload) => {
+        if (!active) return;
+        setPreflight(payload.data);
+        setPreflightState(payload.data?.ready ? "ready" : "blocked");
       })
-        .then((payload) => {
-          if (!active) return;
-          setPreflight(payload.data);
-          setPreflightState(payload.data?.ready ? "ready" : "blocked");
-        })
-        .catch((reason) => {
-          if (!active) return;
-          setError(reason.message);
-          setPreflight(null);
-          setPreflightState("failed");
-        });
-    }, 250);
+      .catch((reason) => {
+        if (!active) return;
+        setError(reason.message);
+        setPreflight(null);
+        setPreflightState("failed");
+      });
     return () => {
       active = false;
-      window.clearTimeout(timer);
     };
-  }, [delivery, rules, selectionKey, selectionMode]);
-
-  const updateRule = (name, value) => {
-    setRules((current) => ({ ...current, [name]: value }));
-  };
+  }, [delivery, selectionKey, selectionMode]);
 
   const executeDelivery = async () => {
     if (!preflight?.ready || !confirmed || executing) return;
@@ -127,27 +94,28 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
 
   if (!selectedIds.length) {
     return (
-      <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="smart-delivery-title">
-        <HddePageHeader eyebrow="交付副本" title="智能交付" headingId="smart-delivery-title" description="请先从输出中心选择需要生成交付副本的真实成品。" />
-        <div className="hdde-delivery-empty">
-          <strong>还没有待交付成品</strong>
-          <span>返回输出中心选择一个或多个正式结果，再生成独立交付副本。</span>
-          <button type="button" className="hdde-primary-action" onClick={onBackToOutputs}>返回输出中心</button>
-        </div>
+      <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="file-delivery-title" data-testid="file-delivery-empty">
+        <HddePageHeader
+          eyebrow="正式文件交付"
+          title="文件交付"
+          headingId="file-delivery-title"
+          description="请从输出中心选择正式成品，或在处理结果中直接确认交付。"
+          actions={<button type="button" className="hdde-primary-action" onClick={onBackToOutputs}>返回输出中心</button>}
+        />
       </section>
     );
   }
 
   if (delivery) {
     return (
-      <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="smart-delivery-title" data-testid="smart-delivery-result">
+      <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="file-delivery-title" data-testid="file-delivery-result">
         <HddePageHeader
           eyebrow={delivery.failure_count ? "交付已结束" : "正式交付完成"}
           title={delivery.failure_count ? "部分交付副本未能生成" : "交付副本已生成"}
-          headingId="smart-delivery-title"
+          headingId="file-delivery-title"
           description={delivery.failure_count
             ? "已完成的副本可以正常使用；失败项保留原因，源成品与已生成文件均未被覆盖。"
-            : "源成品保持原位，所有交付副本已按确认时的名称写入正式目录。"}
+            : "源成品保持原位，交付副本已写入正式目录。"}
           actions={<div className="hdde-delivery-result-summary">
             <strong>{delivery.success_count}</strong><span>成功</span>
             <strong data-tone={delivery.failure_count ? "danger" : "success"}>{delivery.failure_count}</strong><span>失败</span>
@@ -160,14 +128,12 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
         </div>
         <div className="hdde-delivery-result-heading">
           <div><p className="hdde-eyebrow">文件映射</p><h2>交付副本明细</h2></div>
-          <p>逐项核对源成品、最终文件名与写入结果。</p>
+          <p>逐项核对源成品、交付文件与写入结果。</p>
         </div>
         <div className="hdde-delivery-result-list" aria-label="源成品到交付副本映射">
           {delivery.results.map((item) => (
             <article key={item.delivery_item_id || item.result_id} data-status={item.status}>
-              <div>
-                <span>源成品</span><strong>{getFileDisplayName(item.source_file_name)}</strong>
-              </div>
+              <div><span>源成品</span><strong>{item.source_file_name}</strong></div>
               <div className="hdde-delivery-arrow" aria-hidden="true">→</div>
               <div className="hdde-delivery-target">
                 <span>交付副本</span><strong>{item.delivery_file_name}</strong>
@@ -179,8 +145,8 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
             </article>
           ))}
         </div>
-        <div className="hdde-delivery-footer-actions">
-          <div><span>下一步</span><strong>{delivery.failure_count ? "检查失败原因或返回重新交付" : "继续整理下一批正式成品"}</strong></div>
+        <div className="hdde-delivery-footer-actions" aria-label="交付完成后的下一步">
+          <div className="hdde-delivery-footer-actions__copy"><span>下一步</span><strong>{delivery.failure_count ? "检查失败原因或返回输出中心" : "继续查看正式成品"}</strong></div>
           <button type="button" className="hdde-primary-action" onClick={onBackToOutputs}>返回输出中心</button>
         </div>
       </section>
@@ -188,98 +154,52 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
   }
 
   return (
-    <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="smart-delivery-title" data-testid="smart-delivery-page">
+    <section className="hdde-delivery-page hdde-page-frame hdde-page-stack" aria-labelledby="file-delivery-title" data-testid="file-delivery-page">
       <HddePageHeader
-        eyebrow="交付副本"
-        title="智能交付"
-        headingId="smart-delivery-title"
-        description="为已完成的真实成品生成规范命名副本；源成品、任务映射与对比关系不会改变。"
+        eyebrow="正式文件交付"
+        title="确认交付"
+        headingId="file-delivery-title"
+        description="核对从输出中心选择的正式成品与目标文件；源成品、Result 映射和对比关系不会改变。"
         actions={<button type="button" className="hdde-secondary-action" onClick={onBackToOutputs}>返回输出中心</button>}
       />
 
-      <ol className="hdde-delivery-steps" aria-label="智能交付步骤">
-        <li data-complete="true">选择成品</li>
-        <li data-active="true">命名规则</li>
-        <li>名称预览</li>
-        <li>安全检查</li>
-        <li>确认交付</li>
-        <li>交付结果</li>
-      </ol>
-
       {error ? <div className="hdde-delivery-alert" role="alert">{error}</div> : null}
 
-      <div className="hdde-delivery-layout">
-        <form className="hdde-delivery-rules" onSubmit={(event) => event.preventDefault()}>
-          <div className="hdde-delivery-section-heading">
-            <div><p className="hdde-eyebrow">命名规则</p><h2>设置最终文件名</h2></div>
-            <span>{selectedIds.length} 份成品</span>
-          </div>
-          <RuleField label="基础名称">
-            <select value={rules.base_mode} onChange={(event) => updateRule("base_mode", event.target.value)}>
-              <option value="original">保留原文件名</option>
-              <option value="custom">使用自定义基础名</option>
-            </select>
-          </RuleField>
-          {rules.base_mode === "custom" ? (
-            <RuleField label="自定义基础名">
-              <input value={rules.base_name} onChange={(event) => updateRule("base_name", event.target.value)} />
-            </RuleField>
-          ) : null}
-          <div className="hdde-delivery-two-column">
-            <RuleField label="前缀"><input value={rules.prefix} onChange={(event) => updateRule("prefix", event.target.value)} /></RuleField>
-            <RuleField label="后缀"><input value={rules.suffix} onChange={(event) => updateRule("suffix", event.target.value)} /></RuleField>
-            <RuleField label="查找"><input value={rules.find_text} onChange={(event) => updateRule("find_text", event.target.value)} /></RuleField>
-            <RuleField label="替换为"><input value={rules.replace_text} onChange={(event) => updateRule("replace_text", event.target.value)} /></RuleField>
-          </div>
-          <div className="hdde-delivery-option-row">
-            <label><input type="checkbox" checked={rules.sequence_enabled} onChange={(event) => updateRule("sequence_enabled", event.target.checked)} />连续编号</label>
-            <input aria-label="编号起始值" type="number" min="0" max="999999" value={rules.sequence_start} disabled={!rules.sequence_enabled} onChange={(event) => updateRule("sequence_start", Number(event.target.value))} />
-            <select aria-label="编号位数" value={rules.sequence_padding} disabled={!rules.sequence_enabled} onChange={(event) => updateRule("sequence_padding", Number(event.target.value))}>
-              <option value="1">1位</option><option value="2">2位</option><option value="3">3位</option><option value="4">4位</option>
-            </select>
-          </div>
-          <label className="hdde-delivery-option-row hdde-delivery-date-option"><input type="checkbox" checked={rules.date_enabled} onChange={(event) => updateRule("date_enabled", event.target.checked)} />加入当天日期</label>
-          <RuleField label="简单组合模板" helper="可用字段：{prefix} {base} {suffix} {date} {seq}">
-            <input value={rules.template} onChange={(event) => updateRule("template", event.target.value)} />
-          </RuleField>
-        </form>
-
-        <div className="hdde-delivery-review">
-          <div className="hdde-delivery-section-heading">
-            <div><p className="hdde-eyebrow">实时结果</p><h2>名称预览与安全检查</h2></div>
-            <span data-state={preflightState}>{preflightState === "loading" ? "检查中" : preflight?.ready ? "可以交付" : "需要修正"}</span>
-          </div>
-          {preflight?.items?.length ? (
-            <div className="hdde-delivery-preview-list" aria-label="最终交付名称预览">
-              {preflight.items.map((item) => (
-                <article key={item.item_id}>
-                  <img src={item.preview_url} alt="" />
-                  <div><span>{getFileDisplayName(item.source_file_name)}</span><strong>{item.delivery_file_name}</strong></div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-          {preflight?.issues?.length ? (
-            <div className="hdde-delivery-blockers" role="alert">
-              <strong>预检已阻止写入</strong>
-              <ul>{preflight.issues.map((issue, index) => <li key={`${issue.code}-${issue.item_id}-${index}`}>{issue.file_name ? `${issue.file_name}：` : ""}{issue.message}</li>)}</ul>
-            </div>
-          ) : null}
-          {preflight?.ready ? (
-            <div className="hdde-delivery-ready" role="status">
-              <strong>安全预检通过</strong>
-              <span>未发现批次重名、目标冲突、非法字符、空名称、编号重复、过长名称或扩展名异常。</span>
-              <span>交付位置：{preflight.delivery_location_label}</span>
-            </div>
-          ) : null}
-          <label className="hdde-delivery-confirm">
-            <input type="checkbox" checked={confirmed} disabled={!preflight?.ready || preflightState === "loading"} onChange={(event) => setConfirmed(event.target.checked)} />
-            <span>我已核对源文件名与最终交付文件名，确认生成交付副本。</span>
-          </label>
-          <button type="button" className="hdde-primary-action hdde-delivery-submit" disabled={!preflight?.ready || !confirmed || executing} onClick={executeDelivery}>
-            {executing ? "正在生成交付副本…" : "确认并生成交付副本"}
-          </button>
+      <div className="hdde-delivery-review">
+        <div className="hdde-delivery-section-heading">
+          <div><p className="hdde-eyebrow">交付清单</p><h2>文件与安全状态</h2></div>
+          <span data-state={preflightState}>{preflightState === "loading" ? "检查中" : preflight?.ready ? "可以交付" : "已阻断"}</span>
         </div>
+        {preflight?.items?.length ? (
+          <div className="hdde-delivery-preview-list" aria-label="待交付文件清单">
+            {preflight.items.map((item) => (
+              <article key={item.item_id}>
+                <img src={item.preview_url} alt={`待交付成品：${item.source_file_name}`} />
+                <div><span>{item.source_file_name}</span><strong>{item.delivery_file_name}</strong></div>
+              </article>
+            ))}
+          </div>
+        ) : null}
+        {preflight?.issues?.length ? (
+          <div className="hdde-delivery-blockers" role="alert">
+            <strong>安全检查已阻止写入</strong>
+            <ul>{preflight.issues.map((issue, index) => <li key={`${issue.code}-${issue.item_id}-${index}`}>{issue.file_name ? `${issue.file_name}：` : ""}{issue.message}</li>)}</ul>
+          </div>
+        ) : null}
+        {preflight?.ready ? (
+          <div className="hdde-delivery-ready" role="status">
+            <strong>公共文件安全检查通过</strong>
+            <span>目标路径、文件名、扩展名、批次唯一性与同名冲突均已检查；不会静默覆盖现有文件。</span>
+            <span>交付位置：{preflight.delivery_location_label}</span>
+          </div>
+        ) : null}
+        <label className="hdde-delivery-confirm">
+          <input type="checkbox" checked={confirmed} disabled={!preflight?.ready || preflightState === "loading"} onChange={(event) => setConfirmed(event.target.checked)} />
+          <span>我已核对源成品与交付文件，确认生成独立副本。</span>
+        </label>
+        <button type="button" className="hdde-primary-action hdde-delivery-submit" disabled={!preflight?.ready || !confirmed || executing} onClick={executeDelivery}>
+          {executing ? "正在生成交付副本…" : "确认并生成交付副本"}
+        </button>
       </div>
     </section>
   );

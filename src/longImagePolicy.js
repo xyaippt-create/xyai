@@ -153,12 +153,19 @@ export function longImageReviewChecklist() {
 export function noCandidateUiState(result) {
   const candidateRole = String(result?.candidate_delivery_role || "NONE");
   const hasCandidate = Boolean(result?.output_created) && candidateRole !== "NONE";
+  const sourceNoProcessing = result?.technical_status === "NO_PROCESSING_NEEDED"
+    && !result?.output_created
+    && candidateRole === "SOURCE_NO_PROCESSING";
+  const candidateDeliveryReady = hasCandidate
+    && ["DELIVERY_READY", "DELIVERY_READY_WITH_NOTES"].includes(result?.delivery_gate_status);
   return {
     hasCandidate,
+    sourceNoProcessing,
+    candidateDeliveryReady,
     showComparison: hasCandidate,
     showReview: hasCandidate && result?.visual_review_status === "PENDING",
     showOpenFolder: hasCandidate,
-    message: hasCandidate ? "" : "未生成处理结果",
+    message: hasCandidate ? "" : sourceNoProcessing ? "原图已满足要求，未生成新成品。" : "未生成处理结果",
   };
 }
 

@@ -11,6 +11,14 @@ const MODE_LABELS = [
   [PREVIEW_MODES.OVERVIEW, "全图概览"],
 ];
 
+function formatFileSize(value) {
+  const size = Number(value || 0);
+  if (!size) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 export default function CompressionPreview({
   title,
   src,
@@ -19,6 +27,12 @@ export default function CompressionPreview({
   isLong = false,
   scrollRatio = 0,
   onScrollRatioChange,
+  dimensions,
+  sizeBytes,
+  sourceSizeBytes,
+  reductionRatio,
+  fileName,
+  actions,
   testId,
 }) {
   const canvasRef = useRef(null);
@@ -36,6 +50,21 @@ export default function CompressionPreview({
 
   if (!src) return null;
 
+  const dimensionText = dimensions?.width && dimensions?.height ? `${dimensions.width} × ${dimensions.height}` : "";
+  const currentSizeText = formatFileSize(sizeBytes);
+  const sourceSizeText = formatFileSize(sourceSizeBytes);
+  const reductionValue = Number(reductionRatio);
+  const reductionText = reductionRatio != null && Number.isFinite(reductionValue)
+    ? reductionValue > 0
+      ? `减少 ${(reductionValue * 100).toFixed(1)}%`
+      : reductionValue < 0
+        ? `增加 ${(Math.abs(reductionValue) * 100).toFixed(1)}%`
+        : "大小不变"
+    : "";
+  const sizeText = sourceSizeText && currentSizeText
+    ? `${sourceSizeText} → ${currentSizeText}${reductionText ? ` · ${reductionText}` : ""}`
+    : currentSizeText;
+
   const jumpTo = (ratio) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -48,8 +77,30 @@ export default function CompressionPreview({
       className={`hdde-product-preview is-${mode} ${isLong ? "is-long-image" : ""} ${fullscreen ? "is-fullscreen" : ""}`}
       data-testid={testId}
     >
-      <div className="hdde-compression-preview-toolbar">
+      <div
+        ref={canvasRef}
+        className="hdde-compression-preview-canvas"
+        onScroll={(event) => {
+          if (!isLong) return;
+          const target = event.currentTarget;
+          const programmaticScrollTop = programmaticScrollTopRef.current;
+          if (programmaticScrollTop != null && Math.abs(target.scrollTop - programmaticScrollTop) <= 1) {
+            programmaticScrollTopRef.current = null;
+            return;
+          }
+          programmaticScrollTopRef.current = null;
+          onScrollRatioChange?.(normalizedScrollPosition(target.scrollTop, target.scrollHeight, target.clientHeight));
+        }}
+      >
+        <img src={src} alt={title} />
+      </div>
+      <div className="hdde-compression-preview-summary">
         <figcaption>{title}</figcaption>
+        {fileName ? <small className="hdde-compression-preview-file-name" title={fileName}>{fileName}</small> : null}
+        {dimensionText || sizeText ? <strong>{[dimensionText, sizeText].filter(Boolean).join(" · ")}</strong> : null}
+      </div>
+      <div className="hdde-compression-preview-toolbar">
+        {actions ? <div className="hdde-compression-source-actions">{actions}</div> : null}
         <div className="hdde-compression-preview-modes" aria-label={`${title}查看模式`}>
           {MODE_LABELS.map(([value, label]) => (
             <button
@@ -75,23 +126,6 @@ export default function CompressionPreview({
           <span>{Math.round(scrollRatio * 100)}%</span>
         </div>
       ) : null}
-      <div
-        ref={canvasRef}
-        className="hdde-compression-preview-canvas"
-        onScroll={(event) => {
-          if (!isLong) return;
-          const target = event.currentTarget;
-          const programmaticScrollTop = programmaticScrollTopRef.current;
-          if (programmaticScrollTop != null && Math.abs(target.scrollTop - programmaticScrollTop) <= 1) {
-            programmaticScrollTopRef.current = null;
-            return;
-          }
-          programmaticScrollTopRef.current = null;
-          onScrollRatioChange?.(normalizedScrollPosition(target.scrollTop, target.scrollHeight, target.clientHeight));
-        }}
-      >
-        <img src={src} alt={title} />
-      </div>
       {mode === PREVIEW_MODES.ACTUAL_SIZE ? <small className="hdde-preview-scale-note">1 图片像素约等于 1 CSS 像素；浏览器缩放可能影响查看。</small> : null}
     </figure>
   );

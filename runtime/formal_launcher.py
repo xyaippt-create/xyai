@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -15,7 +16,9 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections import deque
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 
 
@@ -25,6 +28,10 @@ VITE_ENTRY = PROJECT_ROOT / "node_modules" / "vite" / "bin" / "vite.js"
 BACKEND_PORT = 8787
 FRONTEND_PORT = 5173
 STATE_PATH = PROJECT_ROOT / "logs" / ".hdde_formal_runtime.json"
+SETTINGS_PATH = PROJECT_ROOT / "settings" / "settings.json"
+LIFECYCLE_CURRENT_NAME = "formal_runtime_lifecycle.json"
+LIFECYCLE_HISTORY_NAME = "formal_runtime_lifecycle.jsonl"
+BACKEND_TAIL_LINE_LIMIT = 80
 EVENT_NAME = "Local\\HDDE_VisualMasterPro_" + hashlib.sha256(
     str(PROJECT_ROOT).lower().encode("utf-8")
 ).hexdigest()[:16]
@@ -32,6 +39,151 @@ EVENT_NAME = "Local\\HDDE_VisualMasterPro_" + hashlib.sha256(
 
 class FormalStartupError(RuntimeError):
     pass
+
+
+class _BackendOutputCapture:
+    def __init__(self, process: subprocess.Popen, combined_log) -> None:
+        self.process = process
+        self.combined_log = combined_log
+        self.stdout_tail: deque[str] = deque(maxlen=BACKEND_TAIL_LINE_LIMIT)
+        self.stderr_tail: deque[str] = deque(maxlen=BACKEND_TAIL_LINE_LIMIT)
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+
+    def _pump(self, stream, tail: deque[str]) -> None:
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ""):
+                tail.append(line.rstrip("\r\n"))
+                with self._lock:
+                    self.combined_log.write(line)
+                    self.combined_log.flush()
+        finally:
+            stream.close()
+
+    def start(self) -> None:
+        for name, stream, tail in (
+            ("stdout", self.process.stdout, self.stdout_tail),
+            ("stderr", self.process.stderr, self.stderr_tail),
+        ):
+            thread = threading.Thread(
+                target=self._pump,
+                args=(stream, tail),
+                name=f"HDDE-Backend-{name}-Capture",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
+
+    def join(self, timeout: float = 3.0) -> None:
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _resolve_lifecycle_paths(settings_path: Path | None = None) -> tuple[Path, Path] | None:
+    path = settings_path or SETTINGS_PATH
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for key in ("app_data_root", "last_app_data_root"):
+        value = str(settings.get(key) or "").strip()
+        if not value:
+            continue
+        try:
+            formal_root = Path(value).expanduser().resolve()
+        except OSError:
+            continue
+        if not formal_root.is_dir():
+            continue
+        log_dir = formal_root / "诊断" / "日志"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        return log_dir / LIFECYCLE_CURRENT_NAME, log_dir / LIFECYCLE_HISTORY_NAME
+    return None
+
+
+def _sanitize_output_tail(lines: deque[str] | list[str]) -> list[str]:
+    try:
+        from engine.diagnostics.runtime_logging import sanitize_diagnostic_value
+    except Exception:
+        return ["DIAGNOSTIC_SANITIZATION_UNAVAILABLE"] if lines else []
+    return [sanitize_diagnostic_value(line) for line in lines if str(line).strip()]
+
+
+def _last_backend_context(stdout_tail: deque[str], stderr_tail: deque[str]) -> dict[str, str | None]:
+    fields = {
+        "last_operation_id": "operation_id",
+        "last_trace_id": "trace_id",
+        "last_task_id": "task_id",
+        "last_route": "route",
+        "last_stage": "stage",
+    }
+    context: dict[str, str | None] = {name: None for name in fields}
+    lines = list(stdout_tail) + list(stderr_tail)
+    for line in reversed(lines):
+        for output_name, log_name in fields.items():
+            if context[output_name] is not None:
+                continue
+            match = re.search(rf"(?:^|\s|\|){re.escape(log_name)}=([^|\r\n]+)", line)
+            if match:
+                value = match.group(1).strip()
+                context[output_name] = value or None
+        if all(value is not None for value in context.values()):
+            break
+    return context
+
+
+def _write_lifecycle_snapshot(
+    paths: tuple[Path, Path] | None,
+    record: dict,
+    *,
+    append_history: bool,
+) -> bool:
+    if paths is None:
+        return False
+    current_path, history_path = paths
+    payload = json.dumps(record, ensure_ascii=False, indent=2)
+    temporary = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(current_path)
+        if append_history:
+            with history_path.open("a", encoding="utf-8") as history:
+                history.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return True
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+
+
+def _archive_unfinished_lifecycle(paths: tuple[Path, Path] | None) -> None:
+    if paths is None:
+        return
+    current_path, _ = paths
+    try:
+        previous = json.loads(current_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if previous.get("status") not in {"STARTING", "RUNNING"}:
+        return
+    previous.update(
+        {
+            "status": "EXITED_WITHOUT_FINALIZATION",
+            "exit_at": _now_iso(),
+            "exit_code": None,
+            "exit_reason": "LAUNCHER_TERMINATED_WITHOUT_FINALIZATION",
+        }
+    )
+    _write_lifecycle_snapshot(paths, previous, append_history=True)
 
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
@@ -414,9 +566,23 @@ def run_formal_desktop(*, open_browser: bool = True, startup_timeout: float = 45
     job = None
     backend_log = None
     frontend_log = None
+    backend_capture = None
+    backend_listener_pid = None
+    lifecycle_paths = _resolve_lifecycle_paths()
+    lifecycle_started_at = _now_iso()
+    runtime_id = None
+    exit_reason = "STARTUP_FAILURE"
+    launcher_error = None
+    backend_exited_before_shutdown = False
+    stop_signal = None
     stop_requested = threading.Event()
 
     def handle_stop(_signum, _frame):
+        nonlocal stop_signal
+        try:
+            stop_signal = signal.Signals(_signum).name
+        except ValueError:
+            stop_signal = str(_signum)
         stop_requested.set()
 
     previous_handlers = {}
@@ -424,6 +590,7 @@ def run_formal_desktop(*, open_browser: bool = True, startup_timeout: float = 45
         previous_handlers[sig] = signal.signal(sig, handle_stop)
 
     try:
+        _archive_unfinished_lifecycle(lifecycle_paths)
         cleaned = ensure_ports_available()
         if cleaned:
             print(f"已安全清理历史 HDDE 进程：{', '.join(map(str, cleaned))}", flush=True)
@@ -440,18 +607,59 @@ def run_formal_desktop(*, open_browser: bool = True, startup_timeout: float = 45
             cwd=PROJECT_ROOT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
             stdin=subprocess.DEVNULL,
-            stdout=backend_log,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
             creationflags=creationflags,
         )
+        backend_capture = _BackendOutputCapture(backend, backend_log)
+        backend_capture.start()
         job.assign(backend)
         _write_state(backend, None)
+        _write_lifecycle_snapshot(
+            lifecycle_paths,
+            {
+                "status": "STARTING",
+                "runtime_id": None,
+                "launcher_pid": os.getpid(),
+                "backend_pid": backend.pid,
+                "backend_process_pid": backend.pid,
+                "started_at": lifecycle_started_at,
+                "exit_at": None,
+                "exit_code": None,
+                "exit_reason": None,
+                "stdout_tail": [],
+                "stderr_tail": [],
+            },
+            append_history=False,
+        )
         health = _wait_http(f"http://127.0.0.1:{BACKEND_PORT}/api/health", backend, startup_timeout)
         runtime_status = _wait_http(
             f"http://127.0.0.1:{BACKEND_PORT}/api/runtime/status", backend, startup_timeout
         )
         backend_listener_pid = int(runtime_status["data"]["application"]["process_id"])
+        runtime_id = str(runtime_status["data"]["application"].get("runtime_id") or "") or None
         _write_state(backend, None, backend_listener_pid=backend_listener_pid)
+        _write_lifecycle_snapshot(
+            lifecycle_paths,
+            {
+                "status": "RUNNING",
+                "runtime_id": runtime_id,
+                "launcher_pid": os.getpid(),
+                "backend_pid": backend_listener_pid,
+                "backend_process_pid": backend.pid,
+                "started_at": lifecycle_started_at,
+                "exit_at": None,
+                "exit_code": None,
+                "exit_reason": None,
+                "stdout_tail": [],
+                "stderr_tail": [],
+            },
+            append_history=False,
+        )
 
         frontend = subprocess.Popen(
             frontend_command(),
@@ -488,16 +696,58 @@ def run_formal_desktop(*, open_browser: bool = True, startup_timeout: float = 45
         if open_browser:
             webbrowser.open(f"http://127.0.0.1:{FRONTEND_PORT}/processing")
 
-        while not stop_requested.is_set() and not lifecycle_event.is_signaled():
+        exit_reason = "UNKNOWN"
+        while True:
+            if stop_requested.is_set():
+                exit_reason = f"LAUNCHER_SIGNAL_{stop_signal or 'UNKNOWN'}"
+                break
+            if lifecycle_event.is_signaled():
+                exit_reason = "LIFECYCLE_STOP_REQUEST"
+                break
             if backend.poll() is not None:
+                exit_reason = "BACKEND_PROCESS_EXIT"
+                backend_exited_before_shutdown = True
                 raise FormalStartupError(f"正式后端意外退出，退出码 {backend.returncode}。")
             if frontend.poll() is not None:
+                exit_reason = "FRONTEND_PROCESS_EXIT"
                 raise FormalStartupError(f"正式前端意外退出，退出码 {frontend.returncode}。")
             time.sleep(0.25)
         return 0
+    except BaseException as exc:
+        if exit_reason in {"STARTUP_FAILURE", "UNKNOWN"}:
+            exit_reason = f"LAUNCHER_EXCEPTION_{type(exc).__name__}"
+        launcher_error = str(exc)
+        raise
     finally:
         _stop_owned_process(frontend)
         _stop_owned_process(backend)
+        if backend_capture:
+            backend_capture.join()
+        if backend:
+            stdout_tail = backend_capture.stdout_tail if backend_capture else deque()
+            stderr_tail = backend_capture.stderr_tail if backend_capture else deque()
+            final_record = {
+                "status": "EXITED",
+                "runtime_id": runtime_id,
+                "launcher_pid": os.getpid(),
+                "backend_pid": backend_listener_pid or backend.pid,
+                "backend_process_pid": backend.pid,
+                "started_at": lifecycle_started_at,
+                "exit_at": _now_iso(),
+                "exit_code": backend.poll(),
+                "exit_reason": exit_reason,
+                "backend_exit_observed_before_launcher_shutdown": backend_exited_before_shutdown,
+                "launcher_error": (
+                    _sanitize_output_tail(deque([launcher_error]))[0]
+                    if launcher_error
+                    else None
+                ),
+                "stdout_tail": _sanitize_output_tail(stdout_tail),
+                "stderr_tail": _sanitize_output_tail(stderr_tail),
+                **_last_backend_context(stdout_tail, stderr_tail),
+            }
+            if not _write_lifecycle_snapshot(lifecycle_paths, final_record, append_history=True):
+                print("影界 HDDE 未能写入正式运行生命周期证据。", file=sys.stderr, flush=True)
         if job:
             job.close()
         if frontend_log:

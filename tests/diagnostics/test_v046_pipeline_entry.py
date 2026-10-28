@@ -33,6 +33,9 @@ def read_sse(client, endpoint: str) -> dict:
 def main() -> int:
     from fastapi.testclient import TestClient
     import engine.pipeline as engine_pipeline
+    from tests.support.app_runtime import activate_test_app_runtime
+
+    activate_test_app_runtime("diagnostics-v046-pipeline-entry")
     from main import build_web_app
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

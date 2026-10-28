@@ -62,6 +62,8 @@ def detect_format(path: str | Path) -> str:
         return "PNG"
     if header.startswith(JPEG_SIGNATURE):
         return "JPEG"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "WEBP"
     return "UNKNOWN"
 
 
@@ -81,13 +83,15 @@ def _xmp_bytes(info: dict[str, Any]) -> bytes:
     return value if isinstance(value, bytes) else b""
 
 
-def read_image_info(path: str | Path) -> dict[str, Any]:
+def read_image_info(path: str | Path, *, allow_webp: bool = False) -> dict[str, Any]:
     source = Path(path)
     magic = detect_format(source)
-    if magic not in {"PNG", "JPEG"}:
+    if magic not in ({"PNG", "JPEG", "WEBP"} if allow_webp else {"PNG", "JPEG"}):
         raise CompressionRuntimeError("SOURCE_FORMAT_UNSUPPORTED", "Only PNG and JPEG are supported.", TechnicalStatus.CANNOT_MEET_SAFELY)
     try:
         with Image.open(source) as opened:
+            if allow_webp and (getattr(opened, "is_animated", False) or getattr(opened, "n_frames", 1) != 1):
+                raise CompressionRuntimeError("MULTI_FRAME_SOURCE_UNSUPPORTED", "仅支持单帧静态图片。", TechnicalStatus.CANNOT_MEET_SAFELY)
             opened.load()
             file_format = "JPEG" if opened.format == "JPG" else str(opened.format or "UNKNOWN").upper()
             info = dict(opened.info or {})
@@ -460,6 +464,7 @@ def apply_delivery_gate(
     result: ImageCompressionResult,
     *,
     strict_lossless_evidence: bool = False,
+    automated_quality_evidence: bool = False,
     evidence_candidate: bool | None = None,
 ) -> ImageCompressionResult:
     if evidence_candidate is None:
@@ -468,6 +473,7 @@ def apply_delivery_gate(
         result.technical_status,
         result.visual_review_status,
         strict_lossless_evidence=strict_lossless_evidence,
+        automated_quality_evidence=automated_quality_evidence,
         evidence_candidate=evidence_candidate,
         risk_reasons=result.risk_reasons,
     )

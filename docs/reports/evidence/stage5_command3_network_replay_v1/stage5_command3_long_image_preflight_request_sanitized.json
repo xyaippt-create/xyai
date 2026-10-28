@@ -1,0 +1,26 @@
+{
+  "captured_from": "real_chrome",
+  "capture_method": "local_reverse_proxy_from_real_browser_interaction",
+  "method": "POST",
+  "url": "http://127.0.0.1:5174/api/image-processing/preflight",
+  "content_type": "application/json",
+  "request_body": {
+    "file_token": "[REDACTED_VALID_TOKEN]",
+    "purpose": "REDUCE_DIMENSIONS",
+    "targets": {
+      "resize_strategy": "FIXED_SHORT_SIDE",
+      "target_short_side": 599
+    },
+    "requested_action": null
+  },
+  "absolute_path_in_request": false,
+  "source_token_redacted": true,
+  "raw_image_binary_in_request": false,
+  "browser_signals": {
+    "user_agent_family": "Google Chrome",
+    "sec_fetch_mode": "cors",
+    "sec_fetch_site": "same-origin",
+    "origin": "http://127.0.0.1:5174"
+  },
+  "captured_at": "2026-07-18T07:24:09.506140+00:00"
+}

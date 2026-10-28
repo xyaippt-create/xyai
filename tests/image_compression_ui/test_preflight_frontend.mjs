@@ -72,8 +72,8 @@ test("处理中心目录只由workdir响应提供且health不能覆盖", () => {
 test("health与workdir两种返回顺序都保持标准和Beta目录映射", () => {
   const healthResponse = { default_output_dir: "D:\\internal\\tmp\\runtime_data\\output" };
   const workdirResponse = {
-    output_dir: "D:\\影界文件\\输出\\1080P标准增强",
-    beta_output_dir: "D:\\影界文件\\输出\\1080P安全增强",
+    output_dir: "D:\\影界文件\\输出\\1080P画质",
+    beta_output_dir: "D:\\影界文件\\输出\\1080P画质",
   };
   const resolveAfter = (responses) => {
     let workdirInfo = null;
@@ -260,7 +260,7 @@ test("正式API只在显式按钮调用且请求支持取消", () => {
 test("图片压缩正式页面不再接入重复诊断与推荐面板", () => {
   assert.doesNotMatch(page, /ImageProcessingPreflightPanel|applyPreflightRecommendation|buildRecommendationPrefill/);
   assert.doesNotMatch(page, /阶段5预检|图片分析与处理建议|分析并推荐/);
-  assert.match(page, /href="\/image-diagnosis"/);
+  assert.doesNotMatch(page, /href="\/image-diagnosis"|先进行图片诊断/);
 });
 
 test("图片压缩执行按钮和运行函数保持独立", () => {

@@ -1,10 +1,17 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import {
   captureFeedbackContext,
   feedbackBundleDownload,
   generateUnifiedFeedbackBundle,
   sanitizeFeedbackText,
 } from "./feedbackFlow.js";
+import HddeIcon from "./HddeIcon.jsx";
+import {
+  getCurrentFeedbackTarget,
+  normalizeFeedbackTarget,
+  resolveFeedbackTarget,
+  subscribeFeedbackTarget,
+} from "./feedbackTarget.js";
 
 function formatBytes(value) {
   const size = Number(value || 0);
@@ -13,19 +20,49 @@ function formatBytes(value) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const DECISION_OPTIONS = Object.freeze([
+  ["ACCEPTED", "可以直接使用"],
+  ["NEEDS_ADJUSTMENT", "需要继续调整"],
+  ["UNUSABLE", "不能使用"],
+]);
+
+const REASON_OPTIONS = Object.freeze([
+  ["EFFECT_TOO_WEAK", "效果不明显"],
+  ["OVER_PROCESSED", "处理过度"],
+  ["COLOR_ABNORMAL", "颜色异常"],
+  ["QUALITY_DEGRADED", "画质下降"],
+  ["LOCAL_DAMAGE", "局部损坏"],
+  ["TEXT_OR_LOGO_DAMAGE", "文字 / Logo 损坏"],
+  ["EDGE_ARTIFACT", "边缘异常"],
+  ["RESULT_NOT_AS_EXPECTED", "结果与预期不符"],
+  ["WORKFLOW_PROBLEM", "操作流程有问题"],
+  ["OTHER", "其他"],
+]);
+
 export default function UnifiedFeedback({
   taskId = "",
   sourceFeature = "runtime_failure",
   stage = "",
+  route = "",
   triggerLabel = "反馈问题",
   triggerClassName = "",
   testId = "unified-feedback-trigger",
   disabled = false,
+  feedbackTarget = null,
 }) {
+  const currentFeedbackTarget = useSyncExternalStore(
+    subscribeFeedbackTarget,
+    getCurrentFeedbackTarget,
+    getCurrentFeedbackTarget,
+  );
   const [open, setOpen] = useState(false);
   const [captureState, setCaptureState] = useState("idle");
   const [snapshot, setSnapshot] = useState(null);
   const [description, setDescription] = useState("");
+  const [decision, setDecision] = useState("");
+  const [reason, setReason] = useState("");
+  const [includeSourceImage, setIncludeSourceImage] = useState(false);
+  const [includeResultImage, setIncludeResultImage] = useState(false);
   const [files, setFiles] = useState([]);
   const [result, setResult] = useState(null);
   const [download, setDownload] = useState(null);
@@ -43,7 +80,17 @@ export default function UnifiedFeedback({
     setResult(null);
     setGenerationState("idle");
     setGenerationFailure(null);
-    const frozen = await captureFeedbackContext({ taskId, sourceFeature, stage });
+    const explicitTarget = normalizeFeedbackTarget(
+      feedbackTarget || (taskId ? { feature_key: sourceFeature, task_id: taskId, route, stage } : null),
+    );
+    const resolvedTarget = resolveFeedbackTarget(explicitTarget, currentFeedbackTarget, sourceFeature);
+    const frozen = await captureFeedbackContext({
+      taskId: resolvedTarget?.task_id || taskId,
+      sourceFeature: resolvedTarget?.feature_key || sourceFeature,
+      stage: resolvedTarget?.stage || stage,
+      route: resolvedTarget?.route || route,
+      feedbackTarget: resolvedTarget,
+    });
     setSnapshot(frozen);
     setCaptureState("ready");
   };
@@ -53,6 +100,10 @@ export default function UnifiedFeedback({
     setCaptureState("idle");
     setSnapshot(null);
     setDescription("");
+    setDecision("");
+    setReason("");
+    setIncludeSourceImage(false);
+    setIncludeResultImage(false);
     setFiles([]);
     setResult(null);
     setGenerationState("idle");
@@ -63,8 +114,23 @@ export default function UnifiedFeedback({
     });
   };
 
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") closeFeedback();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
   const generate = async () => {
-    if (!snapshot || !description.trim() || generationState === "generating") return;
+    if (
+      !snapshot
+      || !description.trim()
+      || !decision
+      || (decision !== "ACCEPTED" && !reason)
+      || generationState === "generating"
+    ) return;
     setGenerationState("generating");
     setGenerationFailure(null);
     setResult(null);
@@ -73,9 +139,18 @@ export default function UnifiedFeedback({
       return null;
     });
     try {
-      const generated = await generateUnifiedFeedbackBundle({ snapshot, description, files });
-      const nextDownload = feedbackBundleDownload(generated);
-      if (!generated?.payload?.feedback_bundle_id || !nextDownload?.url || !nextDownload?.sizeBytes) {
+      const generated = await generateUnifiedFeedbackBundle({
+        snapshot,
+        description,
+        files,
+        evaluation: { decision, reasons: reason ? [reason] : [] },
+        evidenceConsent: {
+          include_source_image: includeSourceImage,
+          include_result_image: includeResultImage,
+        },
+      });
+      const nextDownload = await feedbackBundleDownload(generated);
+      if (!generated?.payload?.feedback_identity?.feedback_bundle_id || !nextDownload?.url || !nextDownload?.sizeBytes) {
         if (nextDownload?.url) URL.revokeObjectURL(nextDownload.url);
         throw new Error("反馈包数据不完整，未生成可下载文件。");
       }
@@ -97,7 +172,7 @@ export default function UnifiedFeedback({
 
   const preview = snapshot?.preview || {};
   const payload = result?.payload || null;
-  const errorId = payload?.context?.error?.error_id || preview.error_id || "";
+  const errorId = payload?.common_context?.error_id || preview.error_id || "";
 
   return (
     <>
@@ -113,7 +188,7 @@ export default function UnifiedFeedback({
                 <h2 id="hdde-feedback-title">告诉我们发生了什么</h2>
                 <p>版本、运行与任务诊断事实由系统自动整理；无需填写技术编号。</p>
               </div>
-              <button type="button" className="hdde-feedback-close" aria-label="关闭问题反馈" onClick={closeFeedback}>×</button>
+              <button type="button" className="hdde-feedback-close" aria-label="关闭问题反馈" onClick={closeFeedback}><HddeIcon name="close" size={18} /></button>
             </header>
 
             {captureState === "loading" ? <p role="status">正在冻结当前反馈上下文…</p> : null}
@@ -131,6 +206,66 @@ export default function UnifiedFeedback({
               />
               <small>请勿填写客户名称、完整路径或其他隐私信息。</small>
             </label>
+
+            <fieldset className="hdde-feedback-field hdde-feedback-evaluation" data-testid="unified-feedback-evaluation">
+              <legend>这次处理结果可以直接使用吗？</legend>
+              <div className="hdde-feedback-choice-grid">
+                {DECISION_OPTIONS.map(([value, label]) => (
+                  <label key={value} className="hdde-feedback-choice">
+                    <input
+                      type="radio"
+                      name={`${testId}-decision`}
+                      value={value}
+                      checked={decision === value}
+                      onChange={() => {
+                        setDecision(value);
+                        if (value === "ACCEPTED") setReason("");
+                      }}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            {decision && decision !== "ACCEPTED" ? (
+              <label className="hdde-feedback-field" htmlFor={`${testId}-reason`}>
+                <span>主要问题原因</span>
+                <select
+                  id={`${testId}-reason`}
+                  data-testid="unified-feedback-reason"
+                  required
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                >
+                  <option value="">请选择一个最主要的原因</option>
+                  {REASON_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </label>
+            ) : null}
+
+            <fieldset className="hdde-feedback-field hdde-feedback-evidence" data-testid="unified-feedback-evidence">
+              <legend>图片证据（可选）</legend>
+              <p>默认不包含图片。仅在你主动勾选后，系统才会尝试把当前任务对应图片复制进反馈包。</p>
+              <label className="hdde-feedback-checkbox">
+                <input
+                  type="checkbox"
+                  checked={includeResultImage}
+                  onChange={(event) => setIncludeResultImage(event.target.checked)}
+                  data-testid="unified-feedback-include-result"
+                />
+                <span>附加当前结果图</span>
+              </label>
+              <label className="hdde-feedback-checkbox">
+                <input
+                  type="checkbox"
+                  checked={includeSourceImage}
+                  onChange={(event) => setIncludeSourceImage(event.target.checked)}
+                  data-testid="unified-feedback-include-source"
+                />
+                <span>附加当前原图</span>
+              </label>
+            </fieldset>
 
             <label className="hdde-feedback-field hdde-feedback-attachment-field" htmlFor={`${testId}-attachments`}>
               <span>附件（可选）</span>
@@ -167,10 +302,11 @@ export default function UnifiedFeedback({
 
             {payload ? (
               <dl className="hdde-feedback-bundle-preview" data-testid="unified-feedback-preview" aria-label="标准反馈包预览">
-                <div><dt>反馈包编号</dt><dd>{payload.feedback_bundle_id}</dd></div>
-                <div><dt>合同版本</dt><dd>{payload.feedback_schema_version}</dd></div>
+                <div><dt>反馈包编号</dt><dd>{payload.feedback_identity?.feedback_bundle_id}</dd></div>
+                <div><dt>合同版本</dt><dd>{payload.feedback_identity?.schema_version}</dd></div>
                 <div><dt>诊断内容</dt><dd>版本与运行身份、冻结上下文、有限相关事件、异常摘要、安全输入元数据</dd></div>
-                <div><dt>隐私保护</dt><dd>不含原图、结果文件、Settings、完整日志或未经脱敏绝对路径</dd></div>
+                <div><dt>隐私保护</dt><dd>图片仅按本次明确勾选授权加入；不含 Settings、完整日志或未经脱敏绝对路径</dd></div>
+                <div><dt>图片证据</dt><dd>{payload.image_evidence?.status || "未请求"}</dd></div>
               </dl>
             ) : null}
 
@@ -216,7 +352,13 @@ export default function UnifiedFeedback({
                 type="button"
                 className={download ? "hdde-secondary-action" : "hdde-primary-action"}
                 data-testid="unified-feedback-generate"
-                disabled={!snapshot || !description.trim() || generationState === "generating"}
+                disabled={
+                  !snapshot
+                  || !description.trim()
+                  || !decision
+                  || (decision !== "ACCEPTED" && !reason)
+                  || generationState === "generating"
+                }
                 aria-busy={generationState === "generating"}
                 onClick={generate}
               >

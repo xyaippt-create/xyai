@@ -1,0 +1,17 @@
+{
+  "schema_version": "hdde.stage5.side-effect-comparison.v1",
+  "captured_at": "2026-07-18T07:26:16.937403+00:00",
+  "output_manifest_unchanged": true,
+  "before_file_count": 3,
+  "after_file_count": 3,
+  "before_image_file_count": 2,
+  "after_image_file_count": 2,
+  "before_feedback_package_count": 1,
+  "after_feedback_package_count": 1,
+  "top_level_directories_unchanged": true,
+  "top_level_directories": [
+    "PNG无损压缩",
+    "上传适配",
+    "尺寸缩小"
+  ]
+}

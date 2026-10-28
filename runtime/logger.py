@@ -4,10 +4,14 @@ from datetime import datetime
 from pathlib import Path
 
 from .dependency_check import format_dependency_report
-from .system_info import app_root, collect_system_info
+from .system_info import app_root, collect_system_info, is_pyinstaller, runtime_settings_path
 
 
 def logs_dir() -> Path:
+    if is_pyinstaller():
+        path = runtime_settings_path().parent / "logs"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
     candidates = [
         app_root() / "logs",
         Path.home() / "Documents" / "VisualMasterPro" / "logs",

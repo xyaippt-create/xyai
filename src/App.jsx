@@ -1,28 +1,36 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import AppShell from "./AppShell.jsx";
-import DashboardPage from "./DashboardPage.jsx";
 import ImageSliderComparePage from "./ImageSliderComparePage.jsx";
-import QualityReportPage from "./QualityReportPage.jsx";
-import TaskDetailPage from "./TaskDetailPage.jsx";
-import Safe1080pBetaPage from "./Safe1080pBetaPage.jsx";
-import CompressionPage from "./CompressionPage.jsx";
-import ColorCorrectionPage from "./ColorCorrectionPage.jsx";
-import SystemSettingsPage from "./SystemSettingsPage.jsx";
 import FeaturePlaceholderPage, { UnknownRoutePage } from "./FeaturePlaceholderPage.jsx";
-import FourKEnhancementPage from "./FourKEnhancementPage.jsx";
 import OutputCenterPage from "./OutputCenterPage.jsx";
-import SmartDeliveryPage from "./SmartDeliveryPage.jsx";
-import LocalRetouchPage from "./LocalRetouchPage.jsx";
-import ImageDiagnosisPage from "./ImageDiagnosisPage.jsx";
 import { DEFAULT_APP_PATH, findAppRoute, normalizeAppPath } from "./appRoutes.js";
 import { validateComparisonAssets, validateQualityReport } from "./platformStatus.js";
 
-const API_BASE = "http://localhost:8787";
+// Other routes must not block Output Center's initial module graph.
+const DashboardPage = React.lazy(() => import("./DashboardPage.jsx"));
+const QualityReportPage = React.lazy(() => import("./QualityReportPage.jsx"));
+const TaskDetailPage = React.lazy(() => import("./TaskDetailPage.jsx"));
+const Safe1080pBetaPage = React.lazy(() => import("./Safe1080pBetaPage.jsx"));
+const CompressionPage = React.lazy(() => import("./CompressionPage.jsx"));
+const ColorCorrectionPage = React.lazy(() => import("./ColorCorrectionPage.jsx"));
+const SystemSettingsPage = React.lazy(() => import("./SystemSettingsPage.jsx"));
+const FourKEnhancementPage = React.lazy(() => import("./FourKEnhancementPage.jsx"));
+const SmartDeliveryPage = React.lazy(() => import("./SmartDeliveryPage.jsx"));
+const LocalRetouchPage = React.lazy(() => import("./LocalRetouchPage.jsx"));
+const BatchWatermarkPage = React.lazy(() => import("./BatchWatermarkPage.jsx"));
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const TASK_ROUTES = new Set(["task-detail", "task-compare", "task-report"]);
+const FEEDBACK_TASK_ROUTES = new Set([...TASK_ROUTES, "compression", "color-correction"]);
 const LEGACY_TASK_ROUTES = Object.freeze({
   compare: "/task-detail/compare",
   "quality-report": "/task-detail/report",
+  "color-correction-review": "/task-detail",
+  "task-compare": "/task-detail",
+  "task-report": "/task-detail",
 });
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 function browserPath() {
   return `${window.location.pathname}${window.location.search}`;
@@ -57,16 +65,23 @@ function taskToContext(task) {
   const taskReport = task?.task_report || {};
   const originalUrl = normalizeApiUrl(task?.originalUrl || task?.original_url || taskResult?.originalUrl);
   const resultUrl = normalizeApiUrl(
-    taskResult?.preview_output_url
-      || task?.preview_output_url
+    task?.final_output_url
       || taskResult?.final_output_url
-      || task?.final_output_url
+      || task?.preview_output_url
+      || taskResult?.preview_output_url
       || task?.enhancedUrl,
   );
   if (!taskId) return null;
   return {
     taskId,
-    mode: task?.mode || taskResult?.mode || "",
+    mode: task?.mode
+      || task?.operation_mode
+      || task?.processing_type
+      || task?.feature_key
+      || taskResult?.mode
+      || taskResult?.operation_mode
+      || taskResult?.feature_key
+      || "",
     taskConfig: task,
     taskResult,
     taskReport,
@@ -82,6 +97,16 @@ async function fetchTask(taskId) {
     throw new Error(payload?.detail || payload?.message || "任务不存在");
   }
   return taskToContext(payload?.data || payload?.task || payload);
+}
+
+async function fetchRetouchResumeAuthority(taskId, resultId) {
+  const query = new URLSearchParams({ task_id: taskId, result_id: resultId });
+  const response = await fetch(`${API_BASE}/api/local-retouch/resume-authority?${query.toString()}`);
+  const payload = await response.json();
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.detail || payload?.message || "恢复资格不可用");
+  }
+  return payload?.data || {};
 }
 
 function ExistingPageEmptyState({ title, description, onBackToProcessing }) {
@@ -101,59 +126,99 @@ function ExistingPageEmptyState({ title, description, onBackToProcessing }) {
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState(initialPathFromBrowser);
+  const currentRoutePathRef = useRef(normalizeAppPath(currentPath));
+  const activeRouteTransitionRef = useRef(null);
   const [taskContext, setTaskContext] = useState(null);
   const [taskLoadState, setTaskLoadState] = useState("idle");
-  const [sourceHandoff, setSourceHandoff] = useState(null);
   const [taskRegistryRevision, setTaskRegistryRevision] = useState(0);
+  const [retouchWorkspaceMounted, setRetouchWorkspaceMounted] = useState(false);
+  const [, setRetouchResumeContext] = useState(null);
+  const [retouchResumeAuthority, setRetouchResumeAuthority] = useState({
+    available: false,
+    status: "UNAVAILABLE",
+    taskId: "",
+    resultId: "",
+    sessionId: "",
+  });
+
+  const commitPathChange = useCallback((targetPath, updateHistory) => {
+    const nextRoutePath = normalizeAppPath(targetPath);
+    const shouldAnimate = currentRoutePathRef.current !== nextRoutePath;
+    let committed = false;
+    const commit = () => {
+      if (committed) return;
+      committed = true;
+      updateHistory?.();
+      currentRoutePathRef.current = nextRoutePath;
+      setCurrentPath(targetPath);
+    };
+    const reducedMotion = typeof window.matchMedia === "function"
+      && window.matchMedia(REDUCED_MOTION_QUERY).matches;
+
+    if (!shouldAnimate || reducedMotion || typeof document.startViewTransition !== "function") {
+      commit();
+      return;
+    }
+
+    activeRouteTransitionRef.current?.skipTransition();
+    try {
+      const transition = document.startViewTransition(() => flushSync(commit));
+      activeRouteTransitionRef.current = transition;
+      transition.ready.catch(() => {});
+      transition.updateCallbackDone.catch(() => {});
+      transition.finished
+        .catch(() => {})
+        .finally(() => {
+          if (activeRouteTransitionRef.current === transition) activeRouteTransitionRef.current = null;
+        });
+    } catch {
+      commit();
+    }
+  }, []);
 
   const navigateTo = useCallback((nextPath, options = {}) => {
     const [pathPart, queryPart = ""] = String(nextPath || DEFAULT_APP_PATH).split("?", 2);
     const normalized = normalizeAppPath(pathPart);
     const pathname = normalized === "/" ? DEFAULT_APP_PATH : normalized;
     const targetPath = `${pathname}${queryPart ? `?${queryPart}` : ""}`;
-    if (browserPath() !== targetPath) {
-      const method = options.replace ? "replaceState" : "pushState";
-      window.history[method]({}, "", targetPath);
-    }
-    setCurrentPath(targetPath);
-  }, []);
-
-  const consumeSourceHandoff = useCallback((requestId) => {
-    setSourceHandoff((current) => current?.requestId === requestId ? null : current);
-  }, []);
-
-  const handleDiagnosisRecommendation = useCallback(({ action, sourceFile, taskId }) => {
-    const targets = {
-      "4K高清增强": { path: "/processing?mode=4k_v1", routeKey: "processing" },
-      "1080P安全增强": { path: "/processing?mode=safe_1080p_beta", routeKey: "processing" },
-      "1080P标准增强": { path: "/processing?mode=standard", routeKey: "processing" },
-      "颜色校正": { path: "/color-correction", routeKey: "color-correction" },
-      "图片压缩": { path: "/compression", routeKey: "compression" },
-    };
-    const target = targets[action];
-    if (!target || !sourceFile) return;
-    const requestId = `${taskId || "diagnosis"}-${Date.now()}`;
-    setSourceHandoff({ requestId, sourceFile, routeKey: target.routeKey });
-    navigateTo(`${target.path}${target.path.includes("?") ? "&" : "?"}from=image-diagnosis`);
-  }, [navigateTo]);
+    commitPathChange(targetPath, () => {
+      if (browserPath() !== targetPath) {
+        const method = options.replace ? "replaceState" : "pushState";
+        window.history[method]({}, "", targetPath);
+      }
+    });
+  }, [commitPathChange]);
 
   useEffect(() => {
     const handlePopState = () => {
       if (normalizeAppPath(window.location.pathname) === "/") {
-        window.history.replaceState({}, "", DEFAULT_APP_PATH);
-        setCurrentPath(DEFAULT_APP_PATH);
+        commitPathChange(DEFAULT_APP_PATH, () => window.history.replaceState({}, "", DEFAULT_APP_PATH));
         return;
       }
-      setCurrentPath(browserPath());
+      commitPathChange(browserPath());
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, []);
+  }, [commitPathChange]);
 
   const routePath = normalizeAppPath(currentPath);
   const route = useMemo(() => findAppRoute(routePath), [routePath]);
+  const retouchResumeResultId = route?.key === "retouch"
+    ? new URLSearchParams(window.location.search).get("resume_result") || ""
+    : "";
+  const continueResultId = ["compression", "color-correction", "retouch", "processing", "batch-watermark"].includes(route?.key)
+    ? new URLSearchParams(window.location.search).get("continue_result") || ""
+    : "";
+
+  useEffect(() => {
+    if (route?.key === "retouch") setRetouchWorkspaceMounted(true);
+  }, [route?.key]);
 
   const rememberTaskContext = useCallback((nextContext) => {
+    if (nextContext === null) {
+      setTaskContext(null);
+      return;
+    }
     if (!nextContext?.taskId) return;
     setTaskContext((previous) => {
       const isNewTask = previous?.taskId !== nextContext.taskId;
@@ -190,12 +255,9 @@ export default function App() {
       navigateTo(DEFAULT_APP_PATH, { replace: true });
       return;
     }
-    if (taskContext?.taskId === taskId) {
-      setTaskLoadState("ready");
-      return;
-    }
+    const hasExistingTaskContext = taskContext?.taskId === taskId;
     let active = true;
-    setTaskLoadState("loading");
+    setTaskLoadState(hasExistingTaskContext ? "ready" : "loading");
     fetchTask(taskId)
       .then((context) => {
         if (!active || !context) return;
@@ -204,6 +266,10 @@ export default function App() {
       })
       .catch(() => {
         if (!active) return;
+        if (hasExistingTaskContext) {
+          setTaskLoadState("ready");
+          return;
+        }
         setTaskLoadState("missing");
         navigateTo(DEFAULT_APP_PATH, { replace: true });
       });
@@ -240,7 +306,157 @@ export default function App() {
     task_result: taskContext.taskResult || {},
     task_report: taskContext.taskReport || {},
     debug_quality: taskContext.debugQuality || {},
+    compareAssets: taskContext.comparisonAssets || null,
   } : null;
+  const activeResultId = taskConfig?.result_id || taskConfig?.task_result?.result_id || "";
+  const handleTaskDeliveryCompleted = useCallback((deliveryRun) => {
+    const deliveryId = String(deliveryRun?.delivery_id || "");
+    if (!deliveryId) return;
+    setTaskContext((previous) => {
+      if (!previous?.taskId) return previous;
+      return {
+        ...previous,
+        taskConfig: { ...(previous.taskConfig || {}), delivery_id: deliveryId },
+        taskResult: { ...(previous.taskResult || {}), delivery_id: deliveryId },
+      };
+    });
+  }, []);
+  const currentResultFeedbackTarget = useMemo(() => {
+    if (!FEEDBACK_TASK_ROUTES.has(route?.key) || !taskConfig?.task_id) return null;
+    if (route?.key === "color-correction" && taskConfig.feature_key !== "color_correction") return null;
+    const result = taskConfig.task_result || {};
+    return {
+      feature_key: taskConfig.feature_key || result.feature_key || taskConfig.mode || "runtime_failure",
+      module_id: taskConfig.module_id || result.module_id || "",
+      operation_id: taskConfig.operation_id || result.operation_id || "",
+      trace_id: taskConfig.trace_id || result.trace_id || "",
+      task_id: taskConfig.task_id,
+      result_id: taskConfig.result_id || result.result_id || "",
+      delivery_id: taskConfig.delivery_id || result.delivery_id || "",
+      stage: "user_feedback_entry",
+      route: routePath,
+    };
+  }, [route?.key, routePath, taskConfig]);
+  const isLocalRetouchResult = ["LOCAL_RETOUCH", "local_retouch"].includes(taskContext?.mode);
+  const canResumeCurrentRetouch = Boolean(
+    isLocalRetouchResult
+      && activeResultId
+      && retouchResumeAuthority.available
+      && retouchResumeAuthority.status === "AVAILABLE"
+      && retouchResumeAuthority.taskId === taskContext?.taskId
+      && retouchResumeAuthority.resultId === activeResultId
+      && retouchResumeAuthority.sessionId,
+  );
+
+  useEffect(() => {
+    if (route?.key !== "task-detail") return undefined;
+    if (!isLocalRetouchResult || !taskContext?.taskId || !activeResultId) {
+      setRetouchResumeAuthority({
+        available: false,
+        status: "UNAVAILABLE",
+        taskId: taskContext?.taskId || "",
+        resultId: activeResultId,
+        sessionId: "",
+      });
+      return undefined;
+    }
+    let active = true;
+    const checkAuthority = () => {
+      setRetouchResumeAuthority({
+        available: false,
+        status: "CHECKING",
+        taskId: taskContext.taskId,
+        resultId: activeResultId,
+        sessionId: "",
+      });
+      fetchRetouchResumeAuthority(taskContext.taskId, activeResultId)
+        .then((authority) => {
+          if (!active) return;
+          setRetouchResumeAuthority({
+            available: authority.available === true && authority.status === "AVAILABLE",
+            status: authority.status || "UNAVAILABLE",
+            taskId: taskContext.taskId,
+            resultId: activeResultId,
+            sessionId: authority.session_id || "",
+          });
+        })
+        .catch(() => {
+          if (!active) return;
+          setRetouchResumeAuthority({
+            available: false,
+            status: "UNAVAILABLE",
+            taskId: taskContext.taskId,
+            resultId: activeResultId,
+            sessionId: "",
+          });
+        });
+    };
+    checkAuthority();
+    window.addEventListener("focus", checkAuthority);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", checkAuthority);
+    };
+  }, [activeResultId, isLocalRetouchResult, route?.key, taskContext?.taskId, taskRegistryRevision]);
+
+  const handleRetouchResultReady = useCallback(({ taskId, resultId, sessionId }) => {
+    if (!taskId || !resultId || !sessionId) return;
+    setRetouchResumeContext({ taskId, resultId, sessionId });
+    setTaskRegistryRevision((value) => value + 1);
+    navigateTo(`/task-detail?task_id=${encodeURIComponent(taskId)}`);
+  }, [navigateTo]);
+
+  const handleRetouchResumeAvailability = useCallback((nextContext) => {
+    if (!nextContext?.taskId || !nextContext?.resultId || !nextContext?.sessionId) {
+      setRetouchResumeContext(null);
+      return;
+    }
+    setRetouchResumeContext(nextContext);
+  }, []);
+
+  const handleRetouchResumeReady = useCallback(() => {
+    setRetouchResumeAuthority({ available: false, status: "UNAVAILABLE", taskId: "", resultId: "", sessionId: "" });
+    setRetouchResumeContext(null);
+  }, []);
+
+  const handleTaskReprocess = useCallback(async () => {
+    if (!isLocalRetouchResult) {
+      navigateTo(["AUTO_COLOR_CORRECTION", "REFERENCE_COLOR_CORRECTION", "LEVEL_PICK_COLOR_CORRECTION", "color_correction"].includes(taskContext?.mode)
+        ? "/color-correction"
+        : `${DEFAULT_APP_PATH}?mode=${encodeURIComponent(taskContext?.mode || "standard")}`);
+      return;
+    }
+    if (!taskContext?.taskId || !activeResultId) {
+      setRetouchResumeAuthority({ available: false, status: "UNAVAILABLE", taskId: "", resultId: "", sessionId: "" });
+      navigateTo("/retouch");
+      return;
+    }
+    try {
+      const authority = await fetchRetouchResumeAuthority(taskContext.taskId, activeResultId);
+      if (authority.available === true && authority.status === "AVAILABLE" && authority.session_id) {
+        setRetouchResumeAuthority({
+          available: true,
+          status: "AVAILABLE",
+          taskId: taskContext.taskId,
+          resultId: activeResultId,
+          sessionId: authority.session_id,
+        });
+        navigateTo(`/retouch?resume_result=${encodeURIComponent(activeResultId)}`);
+        return;
+      }
+    } catch {
+      // Authority is fail-closed. The safe action is a clean reprocess workspace.
+    }
+    setRetouchResumeAuthority({
+      available: false,
+      status: "UNAVAILABLE",
+      taskId: taskContext.taskId,
+      resultId: activeResultId,
+      sessionId: "",
+    });
+    setRetouchResumeContext(null);
+    navigateTo("/retouch");
+  }, [activeResultId, isLocalRetouchResult, navigateTo, taskContext?.mode, taskContext?.taskId]);
 
   let content = null;
   if (!route) {
@@ -251,10 +467,14 @@ export default function App() {
     content = taskConfig && taskLoadState !== "loading" ? (
       <TaskDetailPage
         taskConfig={taskConfig}
-        onBackToDashboard={() => navigateTo(DEFAULT_APP_PATH)}
-        onViewCompare={() => navigateTo(taskUrl("/compare"))}
-        onViewReport={() => navigateTo(taskUrl("/report"))}
-        onReprocess={() => navigateTo(`${DEFAULT_APP_PATH}?mode=${encodeURIComponent(taskContext.mode || "standard")}`)}
+        disableAutoStream={taskConfig?.feature_key === "image_compression"}
+        reprocessLabel={isLocalRetouchResult
+          ? canResumeCurrentRetouch ? "返回调整" : "重新处理"
+          : undefined}
+        onReprocess={handleTaskReprocess}
+        onContinueProcessing={() => navigateTo(DEFAULT_APP_PATH)}
+        onViewOutputs={() => navigateTo("/outputs")}
+        onDeliveryCompleted={handleTaskDeliveryCompleted}
       />
     ) : (
       <ExistingPageEmptyState
@@ -309,7 +529,7 @@ export default function App() {
       );
     }
   } else if (route.key === "safe-1080p-beta") {
-    content = <Safe1080pBetaPage onBackToDashboard={() => navigateTo(DEFAULT_APP_PATH)} />;
+    content = <Safe1080pBetaPage onBackToDashboard={() => navigateTo("/processing?mode=standard", { replace: true })} />;
   } else if (route.key === "four-k-enhancement") {
     content = (
       <FourKEnhancementPage
@@ -317,38 +537,21 @@ export default function App() {
       />
     );
   } else if (route.key === "compression") {
-    content = (
-      <CompressionPage
-        initialSourceFile={sourceHandoff?.routeKey === "compression" ? sourceHandoff.sourceFile : null}
-        initialSourceRequestId={sourceHandoff?.routeKey === "compression" ? sourceHandoff.requestId : ""}
-        onInitialSourceConsumed={consumeSourceHandoff}
-      />
-    );
+    content = <CompressionPage continueResultId={continueResultId} onNavigate={navigateTo} onTaskContextChange={rememberTaskContext} />;
   } else if (route.key === "color-correction") {
     content = (
       <ColorCorrectionPage
+        continueResultId={continueResultId}
+        onTaskContextChange={rememberTaskContext}
         onOpenProcessing={(batchId) => navigateTo(`/processing?batch=${encodeURIComponent(batchId)}`)}
-        initialSourceFile={sourceHandoff?.routeKey === "color-correction" ? sourceHandoff.sourceFile : null}
-        initialSourceRequestId={sourceHandoff?.routeKey === "color-correction" ? sourceHandoff.requestId : ""}
-        onInitialSourceConsumed={consumeSourceHandoff}
+        onResultReady={(taskId) => navigateTo(`/task-detail?task_id=${encodeURIComponent(taskId)}`)}
       />
     );
   } else if (route.key === "color-correction-review") {
-    const query = new URLSearchParams(window.location.search);
-    const reviewTaskId = query.get("task_id") || "";
-    const reviewBatchId = query.get("batch") || "";
-    const returnToOutputs = query.get("from") === "outputs";
-    content = reviewTaskId ? (
-      <ColorCorrectionPage
-        reviewTaskId={reviewTaskId}
-        reviewBatchId={reviewBatchId}
-        reviewReturnLabel={returnToOutputs ? "返回输出中心" : "返回批次"}
-        onBackToProcessing={(batchId) => navigateTo(returnToOutputs ? "/outputs" : (batchId ? `/processing?batch=${encodeURIComponent(batchId)}` : "/processing"))}
-      />
-    ) : (
+    content = (
       <ExistingPageEmptyState
-        title="缺少可复核结果"
-        description="请从处理中心选择一张已完成的颜色校正结果。"
+        title="正在进入处理结果"
+        description="颜色校正旧结果入口正在转到统一处理结果。"
         onBackToProcessing={() => navigateTo(DEFAULT_APP_PATH)}
       />
     );
@@ -381,46 +584,71 @@ export default function App() {
       />
     );
   } else if (route.key === "retouch") {
-    content = <LocalRetouchPage onOpenOutputCenter={() => navigateTo("/outputs")} />;
-  } else if (route.key === "image-diagnosis") {
-    content = (
-      <ImageDiagnosisPage
-        onRecommendationAction={handleDiagnosisRecommendation}
-        onTaskCompleted={() => setTaskRegistryRevision((value) => value + 1)}
-      />
-    );
+    content = null;
+  } else if (route.key === "batch-watermark") {
+    content = <BatchWatermarkPage continueResultId={continueResultId} onNavigate={navigateTo} />;
   } else if (route.key === "settings") {
     content = <SystemSettingsPage />;
   } else {
     content = <FeaturePlaceholderPage route={route} />;
   }
 
-  const requestedMode = route.key === "processing"
+  const requestedMode = route?.key === "processing"
     ? new URLSearchParams(window.location.search).get("mode") || ""
     : "";
   const showsProcessingCenter = ["processing", "history"].includes(route?.key);
+  const shellRoute = route?.key === "processing" && requestedMode === "4k_v1"
+    ? findAppRoute("/4k-enhancement")
+    : route;
 
   return (
-    <AppShell route={route} currentPath={routePath} onNavigate={navigateTo}>
-      {["compression", "color-correction", "color-correction-review", "outputs", "output-compare", "smart-delivery", "retouch"].includes(route?.key) ? null : (
+    <AppShell
+      route={shellRoute}
+      currentPath={routePath}
+      onNavigate={navigateTo}
+      workspaceMode={route?.key === "retouch"}
+      feedbackTarget={currentResultFeedbackTarget}
+      feedbackDisabled={TASK_ROUTES.has(route?.key) && !currentResultFeedbackTarget}
+    >
+      {["compression", "color-correction", "color-correction-review", "outputs", "output-compare", "smart-delivery", "retouch", "batch-watermark"].includes(route?.key) ? null : (
         <div
           hidden={!showsProcessingCenter}
           aria-hidden={!showsProcessingCenter}
           inert={!showsProcessingCenter ? "" : undefined}
         >
-          <DashboardPage
-            key={`processing-center-${taskRegistryRevision}`}
-            initialProcessingMode={requestedMode}
-            initialTaskView={route?.key === "history" ? "history" : "current"}
-            onTaskContextChange={rememberTaskContext}
-            onNavigate={navigateTo}
-            initialSourceFile={sourceHandoff?.routeKey === "processing" ? sourceHandoff.sourceFile : null}
-            initialSourceRequestId={sourceHandoff?.routeKey === "processing" ? sourceHandoff.requestId : ""}
-            onInitialSourceConsumed={consumeSourceHandoff}
-          />
+          <React.Suspense fallback={null}>
+            <DashboardPage
+              key={`processing-center-${taskRegistryRevision}`}
+              initialProcessingMode={requestedMode}
+              initialTaskView={route?.key === "history" ? "history" : "current"}
+              onTaskContextChange={rememberTaskContext}
+              onNavigate={navigateTo}
+              continueResultId={continueResultId}
+            />
+          </React.Suspense>
         </div>
       )}
-      {showsProcessingCenter ? null : content}
+      {showsProcessingCenter ? null : <React.Suspense fallback={null}>{content}</React.Suspense>}
+      {retouchWorkspaceMounted || route?.key === "retouch" ? (
+        <div
+          hidden={route?.key !== "retouch"}
+          aria-hidden={route?.key !== "retouch"}
+          inert={route?.key !== "retouch" ? "" : undefined}
+        >
+          <React.Suspense fallback={null}>
+            <LocalRetouchPage
+              onBack={() => navigateTo(DEFAULT_APP_PATH)}
+              onOpenOutputCenter={() => navigateTo("/outputs")}
+              onResultReady={handleRetouchResultReady}
+              onResumeReady={handleRetouchResumeReady}
+              onResumeAvailabilityChange={handleRetouchResumeAvailability}
+              continueResultId={continueResultId}
+              resumeResultId={retouchResumeResultId}
+              resumeSessionId={canResumeCurrentRetouch ? retouchResumeAuthority.sessionId : ""}
+            />
+          </React.Suspense>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

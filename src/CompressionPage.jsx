@@ -1,11 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import CompressionPreview from "./CompressionPreview.jsx";
-import { HddePageHeader, HddeStatusPill } from "./HddeUI.jsx";
-import UnifiedFeedback from "./UnifiedFeedback.jsx";
+import BatchCompressionPanel from "./BatchCompressionPanel.jsx";
+import { compressionBatch } from "./batchCompression.js";
+import HddeIcon from "./HddeIcon.jsx";
+import { HddePageHeader, HddeResultHero, HddeStatusPill, HddeTechnicalDetails } from "./HddeUI.jsx";
 import {
+  TARGET_FORMAT_OPTIONS,
   buildCompressionRequestPlan,
   convertUploadSizeUnit,
   linkUploadLimitsToSourceRatio,
+  targetFormatHelper,
 } from "./compressionParams.js";
 import {
   FILE_SELECTION_STATES,
@@ -25,6 +29,7 @@ import {
   serverSessionChanged,
 } from "./compressionSession.js";
 import { apiErrorMessage, codeLabel, statusLabel } from "./compressionStatus.js";
+import { buildCompressionAdvice } from "./compressionAdvice.js";
 import {
   PREVIEW_MODES,
   comparisonMode,
@@ -38,6 +43,7 @@ import {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const MODES = [
+  { value: "DELIVERY_OPTIMIZATION", label: "交付方案", help: "按目标格式策略选择质量达标且体积更小的单一交付结果。" },
   { value: "LOSSLESS_COMPRESSION", label: "PNG 无损压缩", help: "仅在严格无损且体积变小时生成候选。" },
   { value: "RESIZE_REDUCTION", label: "尺寸缩小", help: "默认固定短边，长边按原比例自动计算，不裁切、不拉伸、不放大。" },
   { value: "UPLOAD_ADAPTATION", label: "上传适配", help: "按尺寸或体积上限生成安全候选，不执行在线上传。" },
@@ -53,6 +59,10 @@ function formatBytes(value) {
 
 function formatDimensions(value) {
   return value?.width && value?.height ? `${value.width} × ${value.height}` : "—";
+}
+
+function formatImageFormat(value) {
+  return String(value || "").toUpperCase() === "JPEG" ? "JPG" : String(value || "—").toUpperCase();
 }
 
 function apiUrl(path) {
@@ -97,13 +107,18 @@ function CodeList({ title, values }) {
   );
 }
 
-export default function CompressionPage({ initialSourceFile = null, initialSourceRequestId = "", onInitialSourceConsumed }) {
+export default function CompressionPage({ initialSourceFile = null, initialSourceRequestId = "", continueResultId = "", onInitialSourceConsumed, onNavigate, onTaskContextChange }) {
+  const [batchMode, setBatchMode] = useState(() => !continueResultId && !initialSourceFile && Boolean(compressionBatch.getSnapshot().batchId || compressionBatch.getSnapshot().items.length));
   const inputRef = useRef(null);
   const controlPanelRef = useRef(null);
+  const targetFormatRef = useRef(null);
   const serverSessionRef = useRef(null);
   const consumedSourceRequestRef = useRef("");
+  const handledContinueResultRef = useRef("");
+  const continueIntakeRef = useRef({ resultId: "", promise: null });
   const [capabilities, setCapabilities] = useState(null);
   const [mode, setMode] = useState(MODES[0].value);
+  const [targetFormat, setTargetFormat] = useState("SMART_COMPRESSION");
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileInfo, setFileInfo] = useState(null);
   const [resultData, setResultData] = useState(null);
@@ -142,6 +157,10 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
   }, []);
 
   useEffect(() => {
+    onTaskContextChange?.(null);
+  }, [onTaskContextChange]);
+
+  useEffect(() => {
     setUploadLimits(defaultUploadLimits(fileInfo));
     setUploadAspectLocked(false);
     setPreviewMode(defaultPreviewMode(fileInfo));
@@ -159,6 +178,9 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   const result = resultData?.result || null;
   const ui = resultData?.ui || null;
+  const deliveryWinner = result?.winner || null;
+  const hasDeliveryWinner = Boolean(deliveryWinner);
+  const hasDeliveryOptions = Boolean(deliveryWinner && !deliveryWinner.source_selected);
   const selectedMode = MODES.find((item) => item.value === mode) || MODES[0];
   const sourcePreview = apiUrl(ui?.source_preview_url || fileInfo?.safe_preview_url);
   const outputPreview = apiUrl(ui?.output_preview_url);
@@ -167,9 +189,24 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
   const longImage = isLongImage(fileInfo?.width, fileInfo?.height);
   const compareMode = comparisonMode(fileInfo);
   const candidateState = noCandidateUiState(result);
+  const compressionDeliveryReady = candidateState.candidateDeliveryReady;
+  const compressionDeliveryBlocked = Boolean(result?.failure_code) || result?.delivery_gate_status === "CANNOT_MEET_SAFELY";
   const resultHeadline = result?.failure_code === "JPEG_COEFFICIENT_LOSSLESS_NOT_IMPLEMENTED"
     ? "当前模式不支持此图片"
-    : statusLabel("delivery", result?.delivery_gate_status);
+    : candidateState.sourceNoProcessing
+      ? "原图已满足要求"
+      : statusLabel("delivery", result?.delivery_gate_status);
+  const compressionConclusion = !result
+    ? { label: "待确认", tone: "neutral", next: "等待处理完成" }
+    : compressionDeliveryBlocked
+      ? { label: "不可使用", tone: "danger", next: "查看失败原因并调整设置" }
+      : result.visual_review_status === "PENDING" || result.delivery_gate_status === "REVIEW_REQUIRED"
+        ? { label: "建议复核", tone: "warning", next: "比较原图与候选结果，再提交人工结论" }
+        : candidateState.sourceNoProcessing
+          ? { label: "无需处理", tone: "neutral", next: "继续使用原图，或调整参数后重新处理" }
+          : compressionDeliveryReady
+            ? { label: "已确认", tone: "positive", next: "打开输出目录使用已确认结果" }
+            : { label: "正常", tone: "positive", next: "无需生成候选，原图保持不变" };
   const outputFacts = result?.output_created ? {
     dimensions: result.output_dimensions,
     size: result.output_size_bytes,
@@ -177,10 +214,21 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
     dimensions: result?.source_dimensions,
     size: result?.source_size_bytes,
   };
+  const resultReduction = Number(result?.size_reduction_ratio);
+  const resultChangeSummary = result
+    ? `${formatImageFormat(result.source_format)} → ${formatImageFormat(result.output_format)} · ${formatBytes(result.source_size_bytes)} → ${formatBytes(outputFacts.size)}${Number.isFinite(resultReduction) ? ` · ${resultReduction >= 0 ? "减少" : "增加"} ${Math.abs(resultReduction * 100).toFixed(1)}%` : ""}`
+    : "";
+  const resultAdvice = useMemo(() => buildCompressionAdvice({
+    result,
+    winner: deliveryWinner,
+    operationMode: mode,
+    targetFormat,
+  }), [deliveryWinner, mode, result, targetFormat]);
 
   const requestPlan = useMemo(() => buildCompressionRequestPlan({
     fileInfo,
     mode,
+    targetFormat,
     resizeStrategy,
     shortSidePreset,
     customShortSide,
@@ -189,7 +237,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
     customDimension,
     uploadLimits,
     longImageRiskConfirmed,
-  }), [customDimension, customRatio, customShortSide, fileInfo, longImageRiskConfirmed, mode, ratioPreset, resizeStrategy, shortSidePreset, uploadLimits]);
+  }), [customDimension, customRatio, customShortSide, fileInfo, longImageRiskConfirmed, mode, targetFormat, ratioPreset, resizeStrategy, shortSidePreset, uploadLimits]);
   const longFeedback = longImageFeedbackFields(fileInfo, requestPlan);
   const updateUploadDimension = (changedField, rawValue) => {
     setUploadLimits((current) => (
@@ -213,6 +261,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
   };
 
   const runButtonLabel = {
+    DELIVERY_OPTIMIZATION: "生成交付方案",
     LOSSLESS_COMPRESSION: "开始无损压缩",
     RESIZE_REDUCTION: "开始缩小",
     UPLOAD_ADAPTATION: "开始上传适配",
@@ -230,6 +279,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   const resetResult = () => {
     setResultData(null);
+    onTaskContextChange?.(null);
     setReviewNote("");
     setShowReviewNote(false);
     setLongPreviewTarget("source");
@@ -241,6 +291,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   const resetImageSession = (message = "") => {
     applySessionPatch(resetImageSessionPatch(message));
+    onTaskContextChange?.(null);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -267,6 +318,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   const intakeFile = async (file) => {
     if (!file) return;
+    onTaskContextChange?.(null);
     setBusy(true);
     try {
       await performFileIntake(file, {
@@ -292,11 +344,50 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   useEffect(() => {
     if (!initialSourceFile || !initialSourceRequestId || consumedSourceRequestRef.current === initialSourceRequestId) return;
+    setBatchMode(false);
     consumedSourceRequestRef.current = initialSourceRequestId;
     void intakeFile(initialSourceFile).finally(() => {
       if (typeof onInitialSourceConsumed === "function") onInitialSourceConsumed(initialSourceRequestId);
     });
   }, [initialSourceFile, initialSourceRequestId, onInitialSourceConsumed]);
+
+  useEffect(() => {
+    if (!continueResultId || handledContinueResultRef.current === continueResultId) return undefined;
+    setBatchMode(false);
+    let active = true;
+    setBusy(true);
+    setError("");
+    setState(FILE_SELECTION_STATES.INTAKE_PENDING);
+    if (continueIntakeRef.current.resultId !== continueResultId || !continueIntakeRef.current.promise) {
+      continueIntakeRef.current = {
+        resultId: continueResultId,
+        promise: requestJson("/api/image-compression/intake-result", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ result_id: continueResultId }),
+        }),
+      };
+    }
+    continueIntakeRef.current.promise
+      .then((payload) => {
+        if (!active) return;
+        const data = payload.data;
+        handledContinueResultRef.current = continueResultId;
+        applySessionPatch(intakeSuccessPatch(data, {
+          name: data.display_name,
+          size: data.size_bytes,
+          type: data.format === "PNG" ? "image/png" : data.format === "WEBP" ? "image/webp" : "image/jpeg",
+          lastModified: 0,
+        }));
+      })
+      .catch((reason) => {
+        if (!active) return;
+        applySessionPatch(resetImageSessionPatch(reason.message));
+        setError(reason.message);
+      })
+      .finally(() => active && setBusy(false));
+    return () => { active = false; };
+  }, [continueResultId]);
 
   const handleFileChange = (event) => {
     const file = captureFileFromChangeEvent(event);
@@ -305,7 +396,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
 
   const runCompression = async () => {
     if (!fileInfo?.source_token) {
-      setError("请先选择 PNG、JPG 或 JPEG 图片。");
+      setError("请先选择 PNG、JPG、JPEG 或 WebP 图片。");
       return;
     }
     if (!requestPlan.valid) return;
@@ -327,6 +418,25 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
         })),
       });
       setResultData(payload.data);
+      const task = payload.data?.task || {};
+      const completedResult = payload.data?.result || {};
+      const taskId = task.task_id || completedResult.task_id || "";
+      if (taskId) {
+        onTaskContextChange?.({
+          taskId,
+          mode: "image_compression",
+          taskConfig: { ...task, feature_key: "image_compression" },
+          taskResult: {
+            feature_key: "image_compression",
+            module_id: task.module_id || "hdde.image.compression",
+            operation_id: task.operation_id || "",
+            trace_id: task.trace_id || "",
+            task_id: taskId,
+            result_id: task.result_id || "",
+            output_path: task.output_path || "",
+          },
+        });
+      }
       setState(payload.data?.result?.visual_review_status === "PENDING" ? "REVIEW" : "DONE");
     } catch (reason) {
       if (isTokenSessionError(reason)) {
@@ -406,6 +516,25 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
         body: JSON.stringify({ task_id: result.task_id, decision, note: decision === "PASS_WITH_NOTES" ? reviewNote.trim() : "" }),
       });
       setResultData(payload.data);
+      const task = payload.data?.task || {};
+      const reviewedResult = payload.data?.result || {};
+      const taskId = task.task_id || reviewedResult.task_id || "";
+      if (taskId) {
+        onTaskContextChange?.({
+          taskId,
+          mode: "image_compression",
+          taskConfig: { ...task, feature_key: "image_compression" },
+          taskResult: {
+            feature_key: "image_compression",
+            module_id: task.module_id || "hdde.image.compression",
+            operation_id: task.operation_id || "",
+            trace_id: task.trace_id || "",
+            task_id: taskId,
+            result_id: task.result_id || "",
+            output_path: task.output_path || "",
+          },
+        });
+      }
       setState("DONE");
       setShowReviewNote(false);
     } catch (reason) {
@@ -413,6 +542,21 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
     } finally {
       setBusy(false);
     }
+  };
+
+  const continueToDelivery = () => {
+    if (!resultData?.task?.result_id || !result?.delivery_eligible) return;
+    onNavigate?.(`/smart-delivery?results=${encodeURIComponent(resultData.task.result_id)}`);
+  };
+
+  const prepareSuggestedFormat = (nextTargetFormat) => {
+    setMode("DELIVERY_OPTIMIZATION");
+    setTargetFormat(nextTargetFormat);
+    resetResult();
+    window.requestAnimationFrame(() => {
+      controlPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      targetFormatRef.current?.focus({ preventScroll: true });
+    });
   };
 
   const openOutputFolder = async () => {
@@ -450,15 +594,20 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
   ].filter(([, limit]) => limit) : [];
 
   return (
-    <section className="hdde-compression-page hdde-page-frame hdde-page-stack" aria-label="图片压缩工作台">
+    <section className="hdde-compression-page hdde-page-frame hdde-page-stack" aria-label="图片交付优化工作台">
       <HddePageHeader
         eyebrow="本地图片处理"
-        title="图片压缩"
-        description="在不覆盖原图的前提下控制文件体积、尺寸和格式，处理结果另存到正式目录。"
-        meta={<HddeStatusPill tone={state === "failed" ? "danger" : capabilities ? "positive" : "neutral"}>{statusLabel("state", state)}</HddeStatusPill>}
-        actions={<a className="hdde-secondary-action hdde-compression-diagnosis-link" href="/image-diagnosis">不确定如何处理？先进行图片诊断</a>}
+        title={batchMode ? "批量图片压缩" : "图片交付优化"}
+        description={batchMode ? "每张图片独立使用智能压缩策略，生成唯一成品或保留原图。" : "从同一原图生成推荐与备选交付方案；保留原有压缩、缩小和上传适配能力。"}
+        meta={batchMode ? null : <HddeStatusPill tone={state === "failed" ? "danger" : capabilities ? "positive" : "neutral"}>{statusLabel("state", state)}</HddeStatusPill>}
+        actions={<div className="hdde-compression-mode-tabs" aria-label="图片处理数量">
+          <button type="button" aria-pressed={!batchMode} disabled={busy} onClick={() => setBatchMode(false)}>单图处理</button>
+          <button type="button" data-testid="compression-batch-mode" aria-pressed={batchMode} disabled={busy} onClick={() => setBatchMode(true)}>批量压缩</button>
+        </div>}
       />
 
+      {batchMode ? <BatchCompressionPanel onNavigate={onNavigate} /> : null}
+      <div className="hdde-page-stack" style={batchMode ? { display: "none" } : undefined}>
       <div className="hdde-compression-workbench">
         <section className="hdde-compression-source-panel" aria-label="图片选择与预览">
           <div
@@ -466,31 +615,27 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
             onDrop={(event) => { event.preventDefault(); intakeFile(event.dataTransfer.files?.[0]); }}
           >
-            <input ref={inputRef} id="compression-file-input" data-testid="compression-file-input" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={handleFileChange} disabled={busy} />
+            <input ref={inputRef} id="compression-file-input" data-testid="compression-file-input" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" onChange={handleFileChange} disabled={busy} />
             {fileInfo ? (
-              <>
-                <CompressionPreview
-                  title="原图预览"
-                  src={sourcePreview}
-                  mode={previewMode}
-                  onModeChange={setPreviewMode}
-                  isLong={longImage}
-                  scrollRatio={sourcePreviewScrollRatio}
-                  onScrollRatioChange={setSourcePreviewScrollRatio}
-                  testId="compression-source-preview"
-                />
-                <div className="hdde-compression-file-meta">
-                  <strong title={fileInfo.display_name}>{fileInfo.display_name}</strong>
-                  <span>{fileInfo.format} · {fileInfo.width} × {fileInfo.height} · {formatBytes(fileInfo.size_bytes)}</span>
-                  <span>透明通道：{fileInfo.has_alpha ? "有" : "无"}</span>
-                  {longImage ? <span className="hdde-long-image-badge">已识别为长图 · 尺寸缩小默认按短边</span> : null}
-                  <code title={fileInfo.source_sha256}>SHA256 {fileInfo.source_sha256.slice(0, 16)}…</code>
-                  <div className="hdde-compression-source-actions">
+              <CompressionPreview
+                title={fileInfo.source_origin === "EXISTING_RESULT" ? "已有成品预览" : "原图预览"}
+                src={sourcePreview}
+                mode={previewMode}
+                onModeChange={setPreviewMode}
+                isLong={longImage}
+                scrollRatio={sourcePreviewScrollRatio}
+                onScrollRatioChange={setSourcePreviewScrollRatio}
+                dimensions={{ width: fileInfo.width, height: fileInfo.height }}
+                sizeBytes={fileInfo.size_bytes}
+                fileName={fileInfo.display_name}
+                actions={(
+                  <>
                     <button type="button" className="hdde-secondary-action" onClick={replaceImage} disabled={busy}>更换图片</button>
                     <button type="button" className="hdde-link-action" onClick={clearAll} disabled={busy}>清空</button>
-                  </div>
-                </div>
-              </>
+                  </>
+                )}
+                testId="compression-source-preview"
+              />
             ) : selectedFile ? (
               <div className="hdde-compression-pending-source" role="status">
                 <strong>{selectedFile.name}</strong>
@@ -501,13 +646,13 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
                 <strong>拖入图片到这里</strong>
                 <span>或</span>
                 <b>选择本地图片</b>
-                <span>支持 PNG、JPG、JPEG；最大 50 MB</span>
+                <span>支持 PNG、JPG、JPEG、WebP；最大 50 MB</span>
               </label>
             )}
           </div>
         </section>
 
-        <aside ref={controlPanelRef} className="hdde-compression-control-panel" aria-label="压缩设置">
+        <aside ref={controlPanelRef} className="hdde-compression-control-panel" aria-label="交付优化设置">
           <div><span className="hdde-compression-section-label">处理方式</span><div className="hdde-compression-mode-tabs" role="tablist">
             {MODES.map((item) => {
               const unsupportedLossless = Boolean(fileInfo && fileInfo.format !== "PNG" && item.value === "LOSSLESS_COMPRESSION");
@@ -530,6 +675,14 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
             })}
           </div></div>
           <p className="hdde-compression-mode-help">{selectedMode.help}</p>
+          {mode === "DELIVERY_OPTIMIZATION" ? <div className="hdde-compression-settings">
+            <label className="hdde-compression-target-field" data-testid="compression-target-format-field"><span>目标格式</span>
+              <select ref={targetFormatRef} aria-describedby="compression-target-format-help" data-testid="compression-target-format" value={targetFormat} onChange={(event) => { setTargetFormat(event.target.value); resetResult(); }} disabled={busy}>
+                {TARGET_FORMAT_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+              <small id="compression-target-format-help" className="hdde-compression-field-helper" data-testid="compression-target-format-helper">{targetFormatHelper(targetFormat)}</small>
+            </label>
+          </div> : null}
 
           {mode === "RESIZE_REDUCTION" ? <div className="hdde-compression-settings" data-testid="compression-resize-settings">
             <label>缩小方式
@@ -596,7 +749,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
                 onClick={toggleUploadAspectLock}
                 disabled={!fileInfo || busy}
               >
-                <span aria-hidden="true">{uploadAspectLocked ? "🔒" : "🔓"}</span>
+                <HddeIcon name={uploadAspectLocked ? "lock" : "unlock"} size={16} />
                 {uploadAspectLocked ? "比例已锁定" : "锁定长宽比"}
               </button>
               <label>最大高度（px）<input data-testid="compression-max-height" type="number" min="1" step="1" value={uploadLimits.maxHeight} placeholder={longImage ? "长图默认不限制" : ""} onChange={(event) => updateUploadDimension("maxHeight", event.target.value)} /></label>
@@ -637,7 +790,7 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
               </select>
               <button type="button" className="hdde-secondary-action" data-testid="compression-select-output" onClick={selectOutputFolder} disabled={busy || !outputSettings}>选择文件夹</button>
               <button type="button" className="hdde-link-action" data-testid="compression-restore-output" onClick={restoreDefaultOutputRoot} disabled={busy || !outputSettings}>恢复默认</button>
-              <button type="button" className="hdde-link-action" data-testid="compression-open-folder" onClick={openOutputFolder} disabled={busy || !activeFunctionDirectory || Boolean(result && !candidateState.hasCandidate)}>打开输出目录</button>
+              <button type="button" className="hdde-link-action" data-testid="compression-open-folder" onClick={openOutputFolder} disabled={busy || !activeFunctionDirectory || Boolean(result && (!candidateState.hasCandidate || !compressionDeliveryReady))}>打开输出目录</button>
             </div>
           </div>
 
@@ -654,45 +807,108 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
             <div><span className="hdde-compression-section-label">处理结果</span><strong>{resultHeadline}</strong></div>
             <div className="hdde-compression-result-actions">
               <button type="button" className="hdde-secondary-action" data-testid="compression-reprocess" onClick={runCompression} disabled={!fileInfo || !requestPlan.valid || busy}>重新处理</button>
-              <UnifiedFeedback
-                taskId={result.task_id || ""}
-                sourceFeature="image_compression"
-                stage={result.current_stage || result.status || "result_review"}
-                triggerLabel="反馈问题"
-                triggerClassName="hdde-secondary-action"
-                testId="compression-feedback-package"
-                disabled={busy}
-              />
               <button type="button" className="hdde-secondary-action" onClick={replaceImage} disabled={busy}>更换图片</button>
               <button type="button" className="hdde-link-action" onClick={clearAll} disabled={busy}>清空</button>
             </div>
           </div>
-          <div className="hdde-compression-metrics">
-            <Metric label="技术状态" value={statusLabel("technical", result.technical_status)} />
-            <Metric label="视觉复核" value={statusLabel("visual", result.visual_review_status)} />
-            <Metric label="交付结论" value={statusLabel("delivery", result.delivery_gate_status)} />
-            <Metric label="原图" value={`${formatDimensions(result.source_dimensions)} · ${formatBytes(result.source_size_bytes)}`} />
-            <Metric label="候选" value={result.output_created ? `${formatDimensions(result.output_dimensions)} · ${formatBytes(result.output_size_bytes)}` : "未生成候选"} />
-            <Metric label="体积变化" value={result.size_reduction_ratio == null ? "—" : `${(result.size_reduction_ratio * 100).toFixed(1)}%`} />
-            <Metric label="节省字节" value={result.size_reduction_bytes == null ? "—" : formatBytes(result.size_reduction_bytes)} />
-            <Metric label="是否有损" value={result.lossy == null ? "—" : result.lossy ? "是" : "否"} />
-            <Metric label="是否重编码" value={result.reencoded == null ? "—" : result.reencoded ? "是" : "否"} />
-            <Metric label="是否缩小" value={result.resized == null ? "—" : result.resized ? "是" : "否"} />
-            <Metric label="处理耗时" value={`${Number(result.processing_seconds || 0).toFixed(3)} 秒`} />
-            <Metric label="输出位置" value={ui?.output_directory || "无输出"} />
-          </div>
+          <HddeResultHero
+            conclusion={compressionConclusion.label}
+            tone={compressionConclusion.tone}
+            title={resultHeadline}
+            summary={result.output_created
+              ? compressionDeliveryReady
+                ? "结果已确认，可从正式输出目录使用；原图保持不变。"
+                : "候选结果已生成，确认前不会开放交付入口；原图保持不变。"
+              : candidateState.sourceNoProcessing
+                ? "原图已经满足当前要求，未生成重复文件；可以继续使用原图。"
+                : "本次没有用原图冒充处理结果。"}
+            changes={[resultChangeSummary]}
+            protections={["原图未覆盖", ui?.aspect_ratio_preserved === false ? "比例需要复核" : "原图比例已保持"]}
+            nextAction={compressionConclusion.next}
+          />
 
-          {constraintRows.length ? <div className="hdde-compression-constraints">{constraintRows.map(([label, limit, actual, unit]) => <span key={label} className={actual <= limit ? "is-met" : "is-unmet"}>{label}：{actual} / {limit} {unit} · {actual <= limit ? "满足" : "未满足"}</span>)}</div> : null}
-          {mode === "RESIZE_REDUCTION" && ui?.resize_strategy ? <div className="hdde-resize-result-audit" data-testid="compression-resize-result-audit">
-            <strong>尺寸缩小验证</strong>
-            <span>策略：{ui.resize_strategy}</span>
-            <span>原图短边：{ui.source_short_side || "—"}</span>
-            <span>目标短边：{ui.target_short_side || "—"}</span>
-            <span>预计尺寸：{ui.estimated_target_width || "—"} × {ui.estimated_target_height || "—"}</span>
-            <span>实际尺寸：{ui.actual_target_width || "—"} × {ui.actual_target_height || "—"}</span>
-            <span>保持比例：{ui.aspect_ratio_preserved ? "是" : "待确认"} · 裁切：否 · 补边：否 · 放大：否</span>
-          </div> : null}
-          {longImage ? <div className="hdde-long-image-result-audit"><strong>长图输出核对</strong><span>默认预览：适合宽度</span><span>预计输出：{ui?.estimated_output_width || longFeedback.estimated_output_width || "—"} × {ui?.estimated_output_height || longFeedback.estimated_output_height || "—"}</span><span>风险级别：{ui?.long_image_risk_level || longFeedback.long_image_risk_level || "—"}</span><span>规则：{ui?.long_image_width_risk_policy_version || longFeedback.long_image_width_risk_policy_version}</span></div> : null}
+          {ui?.smart_compression_summary ? (
+            <p className="hdde-compression-smart-note" data-testid="compression-smart-summary">
+              {ui.smart_compression_summary}
+            </p>
+          ) : null}
+
+          {hasDeliveryWinner ? (
+            <section className="hdde-delivery-options hdde-single-winner" aria-label="智能择优结果" data-testid="delivery-winner">
+              <div className="hdde-delivery-options-heading">
+                <div>
+                  <span className="hdde-compression-section-label">智能择优结果</span>
+                  <strong>{deliveryWinner.source_selected ? "已接近最优" : Number(deliveryWinner.saved_percent) > 0 ? "压缩完成" : "转换完成 · 文件未变小"}</strong>
+                </div>
+                <span>{deliveryWinner.source_selected ? "未生成新文件 · 保留原图" : "仅登记 1 个正式结果"} · {deliveryWinner.display_name}</span>
+              </div>
+              <div className="hdde-delivery-option-grid">
+                <article className="hdde-delivery-option is-recommended is-selected" data-testid={`delivery-winner-${deliveryWinner.scheme_id}`}>
+                  <div className="hdde-delivery-option-title">
+                    <div><span>最终结果</span><strong>{deliveryWinner.display_name}</strong></div>
+                    <em>{deliveryWinner.source_selected ? "保留原图" : "已择优"}</em>
+                  </div>
+                  <dl>
+                    <div><dt>最终格式</dt><dd>{deliveryWinner.format}</dd></div>
+                    <div><dt>最终体积</dt><dd>{formatBytes(deliveryWinner.file_size)}</dd></div>
+                    <div><dt>分辨率</dt><dd>{deliveryWinner.width && deliveryWinner.height ? `${deliveryWinner.width} × ${deliveryWinner.height}` : "—"}</dd></div>
+                    <div><dt>节省比例</dt><dd>{Number(deliveryWinner.saved_percent || 0).toFixed(2)}%</dd></div>
+                  </dl>
+                  <div className="hdde-lossless-proof" data-testid="delivery-quality-proof">
+                    <strong>质量检查通过</strong>
+                    <span>{deliveryWinner.source_selected ? "未发现兼具质量与体积收益的新文件，原图保持不变。" : "胜出文件已通过对应质量门并完成正式文件验证。"}</span>
+                  </div>
+                  <p><span>选择原因</span>{deliveryWinner.reason}</p>
+                  <small>原图 {formatBytes(result.source_size_bytes)} → 最终 {formatBytes(deliveryWinner.file_size)}</small>
+                </article>
+              </div>
+            </section>
+          ) : null}
+
+          {resultAdvice ? (
+            <aside className="hdde-compression-advice" data-testid="compression-result-advice" aria-label="压缩结果建议">
+              <div>
+                <span className="hdde-compression-section-label">可选下一步</span>
+                <strong>{resultAdvice.title}</strong>
+                <p>{resultAdvice.detail}</p>
+              </div>
+              {resultAdvice.actions.length ? (
+                <div className="hdde-compression-advice-actions" role="group" aria-label="选择其他目标格式">
+                  {resultAdvice.actions.map((action) => (
+                    <button
+                      key={action.targetFormat}
+                      type="button"
+                      className="hdde-link-action"
+                      data-testid={`compression-advice-${action.targetFormat.toLowerCase()}`}
+                      onClick={() => prepareSuggestedFormat(action.targetFormat)}
+                      disabled={busy}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <small>选择只会更新目标格式，仍需由你点击“生成交付方案”后才会处理。</small>
+            </aside>
+          ) : null}
+
+          <HddeTechnicalDetails summary="查看压缩与编码详情">
+            <div className="hdde-compression-metrics">
+              <Metric label="技术状态" value={statusLabel("technical", result.technical_status)} />
+              <Metric label="视觉复核" value={statusLabel("visual", result.visual_review_status)} />
+              <Metric label="交付结论" value={statusLabel("delivery", result.delivery_gate_status)} />
+              <Metric label="体积变化" value={result.size_reduction_ratio == null ? "—" : `${(result.size_reduction_ratio * 100).toFixed(1)}%`} />
+              <Metric label="节省字节" value={result.size_reduction_bytes == null ? "—" : formatBytes(result.size_reduction_bytes)} />
+              <Metric label="是否有损" value={result.lossy == null ? "—" : result.lossy ? "是" : "否"} />
+              <Metric label="是否重编码" value={result.reencoded == null ? "—" : result.reencoded ? "是" : "否"} />
+              <Metric label="是否缩小" value={result.resized == null ? "—" : result.resized ? "是" : "否"} />
+              <Metric label="处理耗时" value={`${Number(result.processing_seconds || 0).toFixed(3)} 秒`} />
+              <Metric label="输出位置" value={ui?.output_directory || "无输出"} />
+            </div>
+            {constraintRows.length ? <div className="hdde-compression-constraints">{constraintRows.map(([label, limit, actual, unit]) => <span key={label} className={actual <= limit ? "is-met" : "is-unmet"}>{label}：{actual} / {limit} {unit} · {actual <= limit ? "满足" : "未满足"}</span>)}</div> : null}
+            {mode === "RESIZE_REDUCTION" && ui?.resize_strategy ? <div className="hdde-resize-result-audit" data-testid="compression-resize-result-audit"><strong>尺寸缩小验证</strong><span>策略：{ui.resize_strategy}</span><span>原图短边：{ui.source_short_side || "—"}</span><span>目标短边：{ui.target_short_side || "—"}</span><span>实际尺寸：{ui.actual_target_width || "—"} × {ui.actual_target_height || "—"}</span><span>保持比例：{ui.aspect_ratio_preserved ? "是" : "待确认"} · 裁切：否 · 补边：否 · 放大：否</span></div> : null}
+            {longImage ? <div className="hdde-long-image-result-audit"><strong>长图输出核对</strong><span>预计输出：{ui?.estimated_output_width || longFeedback.estimated_output_width || "—"} × {ui?.estimated_output_height || longFeedback.estimated_output_height || "—"}</span><span>风险级别：{ui?.long_image_risk_level || longFeedback.long_image_risk_level || "—"}</span><span>规则：{ui?.long_image_width_risk_policy_version || longFeedback.long_image_width_risk_policy_version}</span></div> : null}
+          </HddeTechnicalDetails>
 
           {candidateState.hasCandidate && compareMode === "single-toggle" ? (
             <div className="hdde-long-image-compare" data-testid="compression-long-image-compare">
@@ -708,13 +924,18 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
                 isLong
                 scrollRatio={longScrollRatio}
                 onScrollRatioChange={setLongScrollRatio}
+                dimensions={longPreviewTarget === "source" ? result.source_dimensions : result.output_dimensions}
+                sizeBytes={longPreviewTarget === "source" ? result.source_size_bytes : result.output_size_bytes}
+                sourceSizeBytes={longPreviewTarget === "output" ? result.source_size_bytes : undefined}
+                reductionRatio={longPreviewTarget === "output" ? result.size_reduction_ratio : undefined}
+                fileName={longPreviewTarget === "source" ? ui?.source_display_name : ui?.output_display_name}
                 testId="compression-long-image-active-preview"
               />
             </div>
           ) : candidateState.hasCandidate ? (
             <div className="hdde-compression-previews">
-              <CompressionPreview title="原图" src={sourcePreview} mode={previewMode} onModeChange={setPreviewMode} testId="compression-result-source-preview" />
-              <CompressionPreview title="候选结果" src={outputPreview} mode={previewMode} onModeChange={setPreviewMode} testId="compression-output-preview" />
+              <CompressionPreview title="原图" src={sourcePreview} mode={previewMode} onModeChange={setPreviewMode} dimensions={result.source_dimensions} sizeBytes={result.source_size_bytes} fileName={ui?.source_display_name} testId="compression-result-source-preview" />
+              <CompressionPreview title="压缩后" src={outputPreview} mode={previewMode} onModeChange={setPreviewMode} dimensions={result.output_dimensions} sizeBytes={result.output_size_bytes} sourceSizeBytes={result.source_size_bytes} reductionRatio={result.size_reduction_ratio} fileName={ui?.output_display_name} testId="compression-output-preview" />
             </div>
           ) : (
             <div className="hdde-no-candidate-state" data-testid="compression-no-candidate-state">
@@ -726,9 +947,15 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
                 isLong={longImage}
                 scrollRatio={longScrollRatio}
                 onScrollRatioChange={setLongScrollRatio}
+                dimensions={result.source_dimensions}
+                sizeBytes={result.source_size_bytes}
+                fileName={ui?.source_display_name}
                 testId="compression-no-candidate-source"
               />
-              <div><strong>未生成处理结果</strong><span>当前任务没有候选图片，不会复制原图冒充处理结果。</span></div>
+              <div>
+                <strong>{candidateState.sourceNoProcessing ? "原图已满足要求" : "未生成处理结果"}</strong>
+                <span>{candidateState.sourceNoProcessing ? "没有生成新成品；可继续使用原图，或调整参数后重新处理。" : "当前任务没有候选图片，不会复制原图冒充处理结果。"}</span>
+              </div>
             </div>
           )}
 
@@ -747,9 +974,27 @@ export default function CompressionPage({ initialSourceFile = null, initialSourc
             {showReviewNote ? <div className="hdde-compression-review-note"><label htmlFor="compression-review-note">复核说明</label><textarea id="compression-review-note" data-testid="compression-review-note" maxLength="500" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="说明可接受的轻微变化或交付注意事项" /><button type="button" className="hdde-primary-action" data-testid="compression-review-notes-confirm" onClick={() => review("PASS_WITH_NOTES")} disabled={busy || !reviewNote.trim()}>确认通过并备注</button></div> : null}
           </div> : null}
 
+          {candidateState.hasCandidate && !candidateState.showReview ? (
+            <div
+              className="hdde-compression-delivery-state"
+              data-testid="compression-delivery-state"
+              data-status={compressionDeliveryReady ? "ready" : "blocked"}
+            >
+              <div>
+                <strong>{compressionDeliveryReady ? "确认完成，可以交付" : "当前结果不可交付"}</strong>
+                <span>{compressionDeliveryReady ? "当前选择已写入原有单结果登记，可继续交付或打开正式输出目录。" : "人工复核未通过，请调整设置后重新处理。"}</span>
+              </div>
+              {compressionDeliveryReady ? <div className="hdde-compression-delivery-actions">
+                {hasDeliveryOptions ? <button type="button" className="hdde-primary-action" data-testid="delivery-continue" onClick={continueToDelivery} disabled={busy || typeof onNavigate !== "function"}>继续交付</button> : null}
+                <button type="button" className={hasDeliveryOptions ? "hdde-secondary-action" : "hdde-primary-action"} onClick={openOutputFolder} disabled={busy}>{busy ? "正在打开…" : "打开输出目录"}</button>
+              </div> : null}
+            </div>
+          ) : null}
+
           <details className="hdde-compression-sha"><summary>查看完整SHA与技术标识</summary><div><span>原图 SHA256</span><code>{result.source_sha256 || "—"}</code>{candidateState.hasCandidate ? <><span>候选 SHA256</span><code>{result.output_sha256 || "—"}</code></> : null}</div></details>
         </> : <div className="hdde-compression-empty-result">处理完成后将在这里显示体积、尺寸、预览与交付状态。</div>}
       </section>
+      </div>
     </section>
   );
 }

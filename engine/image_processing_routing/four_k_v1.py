@@ -2,24 +2,50 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import math
+import os
+import re
+import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import cv2
+import numpy as np
 from PIL import Image, ImageOps
 
+from engine.output.filename_policy import FEATURE_4K, build_output_path
+from engine.output.publish_safety import OutputMetadataStageError, publish_image_file_with_metadata
+from runtime.system_info import resource_root
 
-FOUR_K_V1_CONTRACT_VERSION = "4k_v1_contract_1.0"
-FOUR_K_V1_ROUTE = "PILLOW_LANCZOS_SAFE_RESIZE"
+
+FOUR_K_V1_CONTRACT_VERSION = "4k_v1_contract_2.0"
+FOUR_K_V1_ROUTE = "REALESRGAN_X4PLUS_FIDELITY_FUSION"
 FOUR_K_V1_MODE = "4k_v1"
 FOUR_K_V1_OUTPUT_PROFILE = "delivery_4k_v1"
 FOUR_K_V1_TARGET_RESOLUTION = "4K"
 FOUR_K_V1_TARGET_LONG_EDGE = 3840
 FOUR_K_V1_OUTPUT_FORMAT = "PNG"
-FOUR_K_V1_OUTPUT_DIRECTORY = "输出/4K高清增强"
-FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY = "HIGH_QUALITY_SIZE_ADAPTATION_ONLY"
+FOUR_K_V1_OUTPUT_DIRECTORY = "输出/4K画质增强"
+FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY = "SR_DETAIL_ENHANCEMENT_WITH_SOURCE_FIDELITY_GUARD"
+FOUR_K_V1_COMPLETED_CONCLUSION = "DETAIL_ENHANCEMENT_COMPLETED"
+FOUR_K_V1_SR_MODEL = "realesrgan-x4plus"
+FOUR_K_V1_SR_SCALE = 4
+FOUR_K_V1_SR_TIMEOUT_SECONDS = 1500
+# Fidelity fusion: low frequencies come from the LANCZOS upscale of the original
+# (no color / tone drift), high frequencies from the SR result, plus a share of
+# the original texture the SR flattened, then a halo-clamped fine-detail lift.
+FOUR_K_V1_FUSION_SIGMA = 2.0
+FOUR_K_V1_TEXTURE_RESTORE = 0.35
+FOUR_K_V1_FINE_DETAIL_GAIN = 0.6
+FOUR_K_V1_HALO_CLAMP = 0.01
+# Back-projection: the fused result is iteratively corrected so that, scaled back
+# to the source grid, it matches the original. This pulls SR-distorted small-text
+# strokes back to the source glyph structure and removes residual tone drift.
+FOUR_K_V1_BACK_PROJECTION_ITERATIONS = 4
 
 
 _FOUR_K_V1_CONTRACT: dict[str, Any] = {
@@ -79,11 +105,26 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
     "output": {
         "directory_relative_to_formal_root": FOUR_K_V1_OUTPUT_DIRECTORY,
         "directory_failure_policy": "BLOCK_NO_FALLBACK",
-        "file_name_pattern": "{source_stem}_影界4K适配_{yyyyMMdd_HHmmss}_{short_id}.png",
+        "file_name_pattern": "{original_stem}_影界4K_{YYMMDD}.png",
         "collision_policy": "CREATE_UNIQUE_NO_OVERWRITE",
         "format": FOUR_K_V1_OUTPUT_FORMAT,
         "extension": ".png",
         "lossless_encoding": True,
+        "super_resolution": {
+            "engine": "realesrgan-ncnn-vulkan",
+            "model": FOUR_K_V1_SR_MODEL,
+            "native_scale": FOUR_K_V1_SR_SCALE,
+            "to_target": "OpenCV.INTER_AREA",
+            "failure_policy": "FAIL_TASK_NO_LANCZOS_FALLBACK",
+        },
+        "fidelity_fusion": {
+            "low_frequency_source": "Pillow.Image.Resampling.LANCZOS(original)",
+            "gaussian_sigma": FOUR_K_V1_FUSION_SIGMA,
+            "texture_restore": FOUR_K_V1_TEXTURE_RESTORE,
+            "fine_detail_gain": FOUR_K_V1_FINE_DETAIL_GAIN,
+            "halo_clamp": FOUR_K_V1_HALO_CLAMP,
+            "back_projection_iterations": FOUR_K_V1_BACK_PROJECTION_ITERATIONS,
+        },
         "resample": "Pillow.Image.Resampling.LANCZOS",
         "preserve_icc_profile_when_present": True,
         "preserve_alpha_with_premultiplied_resize": True,
@@ -112,6 +153,8 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
         ],
         "failed_after_execution_started": [
             "SOURCE_READ_FAILED",
+            "SR_ENGINE_UNAVAILABLE",
+            "SR_ENGINE_FAILED",
             "RESIZE_FAILED",
             "OUTPUT_WRITE_FAILED",
             "OUTPUT_VERIFY_FAILED",
@@ -126,18 +169,15 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
     "quality_semantics": {
         "allowed_conclusions": [
             "NOT_ASSESSED",
-            "SIZE_ADAPTATION_COMPLETED",
+            FOUR_K_V1_COMPLETED_CONCLUSION,
             "NO_PROCESSING_NEEDED",
             "BLOCKED",
             "FAILED",
         ],
-        "completed_conclusion": "SIZE_ADAPTATION_COMPLETED",
+        "completed_conclusion": FOUR_K_V1_COMPLETED_CONCLUSION,
         "already_4k_conclusion": "NO_PROCESSING_NEEDED",
         "prohibited_claims": [
-            "DETAIL_RECONSTRUCTION_PROVEN",
-            "SUPER_RESOLUTION_PROVEN",
             "QUALITY_GAIN_PROVEN",
-            "AI_ENHANCEMENT_PROVEN",
         ],
     },
     "single_image_loop_fields": {
@@ -217,7 +257,7 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
         "stage1_standard": "artifacts/4k_stage1_baseline/4k_standard_v1.json",
         "stage1_baseline_selection": "artifacts/4k_stage1_baseline/results/baseline_selection.json",
         "stage2_negative_closure": "artifacts/4k_stage2_ai_poc/4K_STAGE_2_POC_VALUE_NOT_PROVEN_CLOSURE_REPORT.md",
-        "route_b_product_adoption": "NO",
+        "route_b_product_adoption": "YES_PRODUCT_OWNER_DECISION_20261028",
     },
 }
 
@@ -287,15 +327,149 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _valid_dpi(value: object) -> tuple[float, float] | None:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    try:
+        dpi = (float(value[0]), float(value[1]))
+    except (TypeError, ValueError):
+        return None
+    return dpi if all(math.isfinite(item) and item > 0 for item in dpi) else None
+
+
 def _emit_stage(callback, stage: str, progress: int, message: str) -> None:
     if callback is not None:
         callback(stage, progress, message)
 
 
-def _safe_source_stem(source_path: Path) -> str:
-    stem = source_path.stem.strip() or "图片"
-    sanitized = "".join(character if character not in '<>:"/\\|?*' else "_" for character in stem)
-    return sanitized[:80].rstrip(" .") or "图片"
+def _sr_tool_dir() -> Path:
+    return resource_root() / "external_tools" / "realesrgan-ncnn-vulkan"
+
+
+def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None) -> np.ndarray:
+    """Run Real-ESRGAN x4plus on an RGB image and return the native x4 result as uint8 RGB."""
+
+    tool_dir = _sr_tool_dir()
+    exe = tool_dir / "realesrgan-ncnn-vulkan.exe"
+    model_files = [tool_dir / "models" / f"{FOUR_K_V1_SR_MODEL}{suffix}" for suffix in (".param", ".bin")]
+    missing = [str(path) for path in (exe, *model_files) if not path.is_file()]
+    if missing:
+        raise FourKV1ProcessingError(
+            "SR_ENGINE_UNAVAILABLE",
+            "image_processing",
+            f"4K超分引擎缺失，无法执行画质增强：{', '.join(missing)}",
+        )
+
+    token = uuid.uuid4().hex
+    sr_input = work_dir / f".sr_in.{token}.png"
+    sr_output = work_dir / f".sr_out.{token}.png"
+    try:
+        rgb.save(sr_input, format="PNG", compress_level=1)
+        command = [
+            str(exe), "-i", str(sr_input), "-o", str(sr_output),
+            "-n", FOUR_K_V1_SR_MODEL, "-s", str(FOUR_K_V1_SR_SCALE), "-f", "png",
+        ]
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+        tail: list[str] = []
+        last_reported = -1
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(tool_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise FourKV1ProcessingError("SR_ENGINE_UNAVAILABLE", "image_processing", f"4K超分引擎无法启动：{exc}") from exc
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                tail = (tail + [line])[-8:]
+                match = re.fullmatch(r"(\d+(?:\.\d+)?)%", line)
+                if match:
+                    # Map SR progress onto the 45–75 band of the task progress.
+                    progress = 45 + int(float(match.group(1)) * 0.30)
+                    if progress >= last_reported + 3:
+                        last_reported = progress
+                        _emit_stage(stage_callback, "image_processing", progress, f"正在进行4K超分细节重建（{match.group(1)}%）")
+            returncode = process.wait(timeout=FOUR_K_V1_SR_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            raise FourKV1ProcessingError(
+                "SR_ENGINE_FAILED",
+                "image_processing",
+                f"4K超分引擎超时（{FOUR_K_V1_SR_TIMEOUT_SECONDS}s），已停止。",
+            ) from exc
+        if returncode != 0 or not sr_output.is_file():
+            raise FourKV1ProcessingError(
+                "SR_ENGINE_FAILED",
+                "image_processing",
+                f"4K超分引擎执行失败（exit={returncode}）：{' | '.join(tail) or '无输出'}",
+            )
+        with Image.open(sr_output) as produced:
+            result = np.asarray(produced.convert("RGB"))
+        expected = (rgb.height * FOUR_K_V1_SR_SCALE, rgb.width * FOUR_K_V1_SR_SCALE)
+        if result.shape[:2] != expected:
+            raise FourKV1ProcessingError(
+                "SR_ENGINE_FAILED",
+                "image_processing",
+                f"4K超分结果尺寸异常：{result.shape[1]}x{result.shape[0]}，预期{expected[1]}x{expected[0]}。",
+            )
+        return result
+    finally:
+        sr_input.unlink(missing_ok=True)
+        sr_output.unlink(missing_ok=True)
+
+
+def _fuse_detail(sr_x4: np.ndarray, rgb: Image.Image, target_size: tuple[int, int]) -> np.ndarray:
+    """Fuse SR detail onto the LANCZOS base of the original; returns uint8 RGB at target size."""
+
+    base = np.asarray(rgb.resize(target_size, Image.Resampling.LANCZOS), dtype=np.float32) / 255.0
+    sr = cv2.resize(sr_x4, target_size, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    sigma = FOUR_K_V1_FUSION_SIGMA
+    base_low = cv2.GaussianBlur(base, (0, 0), sigma)
+    sr_high = sr - cv2.GaussianBlur(sr, (0, 0), sigma)
+    del sr
+    base_high = base - base_low
+    del base
+    # Original texture the SR flattened (fabric, food, skin) is partially restored.
+    lost = np.clip(np.abs(base_high) - np.abs(sr_high), 0.0, None) * np.sign(base_high)
+    fused = np.clip(base_low + sr_high + FOUR_K_V1_TEXTURE_RESTORE * lost, 0.0, 1.0)
+    del base_low, sr_high, base_high, lost
+
+    # Fine-scale luminance lift for small text and thin lines, clamped to the local
+    # 3x3 range so it cannot create halos or ringing.
+    ycc = cv2.cvtColor(fused, cv2.COLOR_RGB2YCrCb)
+    luma = ycc[..., 0]
+    lifted = luma + FOUR_K_V1_FINE_DETAIL_GAIN * (luma - cv2.GaussianBlur(luma, (0, 0), 0.9))
+    kernel = np.ones((3, 3), np.uint8)
+    ycc[..., 0] = np.clip(
+        lifted,
+        cv2.erode(luma, kernel) - FOUR_K_V1_HALO_CLAMP,
+        cv2.dilate(luma, kernel) + FOUR_K_V1_HALO_CLAMP,
+    )
+    out = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB)
+    return (np.clip(out, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def _back_project(fused: np.ndarray, rgb: Image.Image) -> np.ndarray:
+    """Make the fused result consistent with the original when scaled back to it."""
+
+    source = np.asarray(rgb, dtype=np.float32) / 255.0
+    out = fused.astype(np.float32) / 255.0
+    source_size = (source.shape[1], source.shape[0])
+    target_size = (out.shape[1], out.shape[0])
+    for _ in range(FOUR_K_V1_BACK_PROJECTION_ITERATIONS):
+        residual = source - cv2.resize(out, source_size, interpolation=cv2.INTER_AREA)
+        out = np.clip(out + cv2.resize(residual, target_size, interpolation=cv2.INTER_LINEAR), 0.0, 1.0)
+    return (out * 255.0 + 0.5).astype(np.uint8)
 
 
 def build_4k_v1_output_path(
@@ -304,6 +478,7 @@ def build_4k_v1_output_path(
     *,
     timestamp: datetime | None = None,
     short_id: str | None = None,
+    trusted_original_filename: str | Path | None = None,
 ) -> Path:
     """Build a unique formal output path from the frozen output contract."""
 
@@ -313,15 +488,15 @@ def build_4k_v1_output_path(
     if output_dir != root and root not in output_dir.parents:
         raise FourKV1ProcessingError("FORMAL_DIRECTORY_NOT_READY", "contract_validation", "4K输出目录超出正式目录。")
 
-    moment = timestamp or datetime.now()
-    token = (short_id or uuid.uuid4().hex[:8]).strip()[:12]
-    base = f"{_safe_source_stem(source)}_影界4K适配_{moment:%Y%m%d_%H%M%S}_{token}"
-    candidate = output_dir / f"{base}.png"
-    counter = 2
-    while candidate.exists():
-        candidate = output_dir / f"{base}_{counter}.png"
-        counter += 1
-    return candidate
+    del short_id  # Compatibility-only input; internal IDs are forbidden in final names.
+    return build_output_path(
+        output_dir,
+        source.name,
+        FEATURE_4K,
+        ".png",
+        trusted_original_filename=trusted_original_filename,
+        moment=timestamp,
+    )
 
 
 def inspect_4k_v1_source(source_path: str | Path) -> dict[str, Any]:
@@ -332,12 +507,13 @@ def inspect_4k_v1_source(source_path: str | Path) -> dict[str, Any]:
         raise FourKV1ProcessingError("SOURCE_UNAVAILABLE", "contract_validation", "找不到待处理的原始图片。")
     try:
         source_hash = _sha256_file(source)
-        with Image.open(source) as image:
-            image.load()
-            width, height = image.size
-            source_format = str(image.format or source.suffix.lstrip(".") or "UNKNOWN").upper()
-            has_alpha = "A" in image.getbands() or "transparency" in image.info
-            icc_profile = image.info.get("icc_profile")
+        with Image.open(source) as opened:
+            source_format = str(opened.format or source.suffix.lstrip(".") or "UNKNOWN").upper()
+            has_alpha = "A" in opened.getbands() or "transparency" in opened.info
+            icc_profile = opened.info.get("icc_profile")
+            display_image = ImageOps.exif_transpose(opened)
+            display_image.load()
+            width, height = display_image.size
     except FourKV1ProcessingError:
         raise
     except Exception as exc:
@@ -364,7 +540,7 @@ def process_4k_v1_image(
     output_path: str | Path | None = None,
     stage_callback=None,
 ) -> dict[str, Any]:
-    """Execute the frozen Pillow LANCZOS 4K V1 route against one source image."""
+    """Execute the 4K route: Real-ESRGAN x4 detail reconstruction with source-fidelity fusion."""
 
     source = Path(source_path)
     root = Path(formal_root).expanduser().resolve()
@@ -421,50 +597,90 @@ def process_4k_v1_image(
 
     temp_path: Path | None = None
     try:
-        _emit_stage(stage_callback, "image_processing", 45, "正在进行4K高清画质增强")
+        _emit_stage(stage_callback, "image_processing", 45, "正在进行4K超分细节重建")
         with Image.open(source) as opened:
             icc_profile = opened.info.get("icc_profile")
+            source_dpi = _valid_dpi(opened.info.get("dpi"))
             image = ImageOps.exif_transpose(opened)
             image.load()
-            target_size = (source_meta["target_width"], source_meta["target_height"])
-            if source_meta["has_alpha"]:
-                resized = image.convert("RGBA").convert("RGBa").resize(target_size, Image.Resampling.LANCZOS).convert("RGBA")
-            else:
-                resized = image.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
-
-        _emit_stage(stage_callback, "output_file_write", 72, "正在写入正式4K成品")
+        target_size = (source_meta["target_width"], source_meta["target_height"])
+        rgb = image.convert("RGB")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        sr_x4 = _run_super_resolution(rgb, destination.parent, stage_callback)
+        _emit_stage(stage_callback, "image_processing", 78, "正在进行原图保真融合与细节校准")
+        resized = Image.fromarray(_back_project(_fuse_detail(sr_x4, rgb, target_size), rgb), "RGB")
+        del sr_x4
+        if source_meta["has_alpha"]:
+            # Alpha is never generated by SR; it is upscaled with LANCZOS from the original.
+            alpha = image.convert("RGBA").getchannel("A").resize(target_size, Image.Resampling.LANCZOS)
+            resized.putalpha(alpha)
+
+        _emit_stage(stage_callback, "output_file_write", 84, "正在写入正式4K成品")
         temp_path = destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.tmp.png")
         save_options: dict[str, Any] = {"format": "PNG", "compress_level": 6}
         if isinstance(icc_profile, bytes) and icc_profile:
             save_options["icc_profile"] = icc_profile
+        if source_dpi is not None:
+            save_options["dpi"] = source_dpi
         resized.save(temp_path, **save_options)
-        temp_path.replace(destination)
     except FourKV1ProcessingError:
         raise
     except OSError as exc:
         raise FourKV1ProcessingError("OUTPUT_WRITE_FAILED", "output_file_write", f"4K成品写入失败：{exc}") from exc
     except Exception as exc:
-        raise FourKV1ProcessingError("RESIZE_FAILED", "image_processing", f"4K尺寸适配失败：{exc}") from exc
+        raise FourKV1ProcessingError("RESIZE_FAILED", "image_processing", f"4K画质增强失败：{exc}") from exc
+    collision_base = destination
+    collision_match = re.fullmatch(r"(.+_影界4K_\d{6})(?:_\d{2})?(\.png)", destination.name)
+    if collision_match:
+        collision_base = destination.with_name(f"{collision_match.group(1)}{collision_match.group(2)}")
+    source_hash_unchanged = _sha256_file(source) == source_meta["input_hash"]
+    if not source_hash_unchanged:
+        temp_path.unlink(missing_ok=True)
+        raise FourKV1ProcessingError("SOURCE_HASH_CHANGED", "output_verify", "原图完整性校验失败，已停止发布4K成品。")
+
+    def verify_private_output(data: bytes) -> tuple[int, int]:
+        with Image.open(io.BytesIO(data)) as output_image:
+            output_image.load()
+            dimensions = output_image.size
+        if dimensions != (source_meta["target_width"], source_meta["target_height"]):
+            raise ValueError("OUTPUT_DIMENSIONS_MISMATCH")
+        return dimensions
+
+    try:
+        destination, metadata_report, verified_dimensions = publish_image_file_with_metadata(
+            temp_path,
+            destination,
+            source_path=source,
+            normalize_orientation=True,
+            collision_base_path=collision_base,
+            verify_private=verify_private_output,
+        )
+    except OutputMetadataStageError as exc:
+        raise FourKV1ProcessingError(
+            "OUTPUT_METADATA_FAILED",
+            "output_metadata_write",
+            f"4K成品元数据写入失败：{exc}",
+        ) from exc
+    except Exception as exc:
+        raise FourKV1ProcessingError(
+            "OUTPUT_WRITE_FAILED",
+            "output_file_write",
+            f"4K成品排他发布失败：{exc}",
+        ) from exc
     finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+        temp_path.unlink(missing_ok=True)
 
     _emit_stage(stage_callback, "output_verify", 90, "正在核对成品文件与像素尺寸")
-    try:
-        with Image.open(destination) as output_image:
-            output_image.load()
-            output_width, output_height = output_image.size
-        if (output_width, output_height) != (source_meta["target_width"], source_meta["target_height"]):
-            raise ValueError("OUTPUT_DIMENSIONS_MISMATCH")
-        source_hash_unchanged = _sha256_file(source) == source_meta["input_hash"]
-        if not source_hash_unchanged:
-            raise ValueError("SOURCE_HASH_CHANGED")
-    except Exception as exc:
-        destination.unlink(missing_ok=True)
-        raise FourKV1ProcessingError("OUTPUT_VERIFY_FAILED", "output_verify", f"4K成品验证失败：{exc}") from exc
+    output_width, output_height = verified_dimensions
+    output_sha256 = str((metadata_report.get("publish_integrity") or {}).get("committed_sha256") or "")
+    if not output_sha256:
+        raise FourKV1ProcessingError(
+            "OUTPUT_IDENTITY_MISSING",
+            "output_verify",
+            "4K成品缺少正式发布身份，已停止登记结果。",
+        )
 
-    _emit_stage(stage_callback, "completed", 100, "4K高清画质增强完成")
+    _emit_stage(stage_callback, "completed", 100, "4K画质增强完成")
     task_result = {
         **common,
         "output_filename": destination.name,
@@ -473,25 +689,27 @@ def process_4k_v1_image(
         "output_width": output_width,
         "output_height": output_height,
         "output_size": destination.stat().st_size,
+        "output_sha256": output_sha256,
         "final_output_exists": True,
-        "quality_conclusion": "SIZE_ADAPTATION_COMPLETED",
+        "quality_conclusion": FOUR_K_V1_COMPLETED_CONCLUSION,
         "source_hash_unchanged": source_hash_unchanged,
+        "output_metadata": metadata_report,
     }
     task_report = {
         **common,
         "output_width": output_width,
         "output_height": output_height,
-        "quality_conclusion": "SIZE_ADAPTATION_COMPLETED",
+        "quality_conclusion": FOUR_K_V1_COMPLETED_CONCLUSION,
         "source_hash_unchanged": source_hash_unchanged,
         "warnings": [
-            "本结果仅代表高质量4K尺寸增强适配，不代表真实细节重建、AI超分辨率或已证明的画质增益。"
+            "保持原图比例与构图，长边提升至3840像素：Real-ESRGAN x4超分重建细节后，以原图低频保真融合，防止色偏、重绘与过锐光晕。"
         ],
     }
     return {
         **common,
         "task_result": task_result,
         "task_report": task_report,
-        "quality_conclusion": "SIZE_ADAPTATION_COMPLETED",
+        "quality_conclusion": FOUR_K_V1_COMPLETED_CONCLUSION,
         "source_hash_unchanged": source_hash_unchanged,
         "final_output_path": str(destination),
         "final_output_exists": True,
@@ -502,6 +720,7 @@ def process_4k_v1_image(
 
 
 __all__ = [
+    "FOUR_K_V1_COMPLETED_CONCLUSION",
     "FOUR_K_V1_CONTRACT_VERSION",
     "FOUR_K_V1_MODE",
     "FOUR_K_V1_OUTPUT_DIRECTORY",

@@ -14,7 +14,7 @@ const checkGroups = [
     key: "paths",
     label: "Paths",
     title: "路径与目录",
-    items: ["1080P标准增强输出", "1080P安全增强输出", "图片压缩输出", "诊断日志"],
+    items: ["1080P画质输出", "4K画质增强输出", "图片压缩输出", "诊断日志"],
   },
   {
     key: "dependencies",
@@ -163,7 +163,7 @@ export default function LaunchPage({ onEnter, onOpenSafeBeta }) {
           className="mt-6 w-full max-w-7xl rounded-lg border border-[#8fb0ff]/45 bg-[#111827] px-6 py-5 text-left transition hover:border-[#9ab7ff]/70 hover:bg-[#17233a]"
         >
           <span className="font-mono text-xs uppercase tracking-[0.22em] text-[#9ab7ff]">安全增强</span>
-          <span className="mt-2 block text-xl font-semibold text-white">1080P安全增强</span>
+          <span className="mt-2 block text-xl font-semibold text-white">1080P画质</span>
           <span className="mt-2 block text-sm leading-6 text-white/58">适用于当前已验证范围内的中文商业非人像图</span>
         </button>
       </div>

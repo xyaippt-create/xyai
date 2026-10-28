@@ -17,8 +17,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from .color_core_v2 import (
+    COLOR_CORE_V2_VERSION,
+    GLOBAL_ROUTE_NAME,
+    LOCAL_ROUTE_NAME,
+    run_global_recovery,
+    run_local_recovery,
+)
+from .executors import apply_safe_white_balance
 
-COLOR_CORRECTION_ENGINE_VERSION = "hdde.auto-color-correction.v5"
+COLOR_CORRECTION_ENGINE_VERSION = "hdde.auto-color-correction.v7-color-core-v2"
 MAX_PIXELS = 80_000_000
 
 
@@ -145,6 +153,299 @@ def _detect_faces(rgb: np.ndarray) -> list[tuple[int, int, int, int]]:
     ]
 
 
+def _box_iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    x1 = max(lx, rx)
+    y1 = max(ly, ry)
+    x2 = min(lx + lw, rx + rw)
+    y2 = min(ly + lh, ry + rh)
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    union = lw * lh + rw * rh - intersection
+    return float(intersection / max(union, 1))
+
+
+def _detect_local_faces(
+    rgb: np.ndarray,
+    fallback_faces: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Find reliable local-executor anchors without changing D-01 perception."""
+    height, width = rgb.shape[:2]
+    scale = min(1.0, 960.0 / max(width, height))
+    preview = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
+    gray = cv2.cvtColor(preview, cv2.COLOR_RGB2GRAY)
+    enhanced = cv2.createCLAHE(clipLimit=2.8, tileGridSize=(8, 8)).apply(gray)
+
+    def detect(cascade_name: str, include_mirror: bool = False) -> list[tuple[int, int, int, int]]:
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + cascade_name)
+        if cascade.empty():
+            return []
+        found: list[tuple[int, int, int, int]] = []
+        variants = [(enhanced, False)]
+        if include_mirror:
+            variants.append((cv2.flip(enhanced, 1), True))
+        for variant, mirrored in variants:
+            detected = cascade.detectMultiScale(
+                variant,
+                scaleFactor=1.06,
+                minNeighbors=4,
+                minSize=(36, 36),
+            )
+            for x, y, w, h in detected:
+                if mirrored:
+                    x = variant.shape[1] - x - w
+                found.append(
+                    (
+                        int(round(x / scale)),
+                        int(round(y / scale)),
+                        int(round(w / scale)),
+                        int(round(h / scale)),
+                    )
+                )
+        return found
+
+    frontal = detect("haarcascade_frontalface_alt2.xml")
+    profiles = detect("haarcascade_profileface.xml", include_mirror=True)
+    candidates = frontal + profiles + list(fallback_faces)
+    minimum_area = float(height * width) * 0.007
+    reliable: list[tuple[int, int, int, int]] = []
+    for candidate in candidates:
+        _, _, w, h = candidate
+        if w * h < minimum_area:
+            continue
+        peer_groups = (frontal, profiles, fallback_faces)
+        agreements = sum(
+            1
+            for group in peer_groups
+            if any(peer != candidate and _box_iou(candidate, peer) >= 0.22 for peer in group)
+        )
+        if agreements >= 1:
+            reliable.append(candidate)
+
+    reliable.sort(key=lambda box: box[2] * box[3], reverse=True)
+    selected: list[tuple[int, int, int, int]] = []
+    for candidate in reliable:
+        if any(_box_iou(candidate, existing) >= 0.35 for existing in selected):
+            continue
+        selected.append(candidate)
+    return selected[:6]
+
+
+def _local_person_masks(
+    shape: tuple[int, int],
+    faces: list[tuple[int, int, int, int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    height, width = shape
+    face_binary = np.zeros((height, width), dtype=np.float32)
+    person_binary = np.zeros((height, width), dtype=np.float32)
+    for x, y, w, h in faces:
+        cv2.ellipse(
+            face_binary,
+            (int(x + w * 0.5), int(y + h * 0.53)),
+            (max(1, int(w * 0.58)), max(1, int(h * 0.68))),
+            0,
+            0,
+            360,
+            1.0,
+            -1,
+        )
+        cv2.ellipse(
+            person_binary,
+            (int(x + w * 0.5), int(min(height - 1, y + h * 1.58))),
+            (max(1, int(w * 1.02)), max(1, int(h * 1.76))),
+            0,
+            0,
+            360,
+            1.0,
+            -1,
+        )
+    radius = max(5, int(min(width, height) * 0.018))
+    face = _soft_mask(face_binary, max(3, radius // 2))
+    person = _soft_mask(np.maximum(person_binary, face_binary), radius)
+    return np.clip(face, 0.0, 1.0), np.clip(person, 0.0, 1.0)
+
+
+def _apply_local_person_correction(
+    pre_local_rgb: np.ndarray,
+    faces: list[tuple[int, int, int, int]],
+    perception: dict[str, Any],
+    strong_screen_mask: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Apply the D-03 local layer, or return the pre-local pixels unchanged."""
+    decision = str(perception.get("processing_decision") or "")
+    if decision != "LOCAL_REQUIRED":
+        return pre_local_rgb.astype(np.uint8).copy(), {
+            "mode": "not_triggered",
+            "strength": 0.0,
+        }, {
+            "local_executor_applied": False,
+            "local_execution": "not_triggered",
+            "local_output_policy": str(perception.get("output_policy") or decision),
+            "local_rollback_applied": False,
+            "local_face_count": 0,
+        }
+    if not faces:
+        return pre_local_rgb.astype(np.uint8).copy(), {
+            "mode": "insufficient_person_evidence",
+            "strength": 0.0,
+        }, {
+            "local_executor_applied": False,
+            "local_execution": "blocked_insufficient_person_evidence",
+            "local_output_policy": str(perception.get("output_policy") or decision),
+            "local_rollback_applied": True,
+            "local_face_count": 0,
+        }
+
+    source = pre_local_rgb.astype(np.uint8)
+    lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lightness = lab[..., 0]
+    face_mask, person_mask = _local_person_masks(source.shape[:2], faces)
+    face_core = face_mask >= 0.55
+    if int(face_core.sum()) < 64:
+        return source.copy(), {"mode": "insufficient_face_area", "strength": 0.0}, {
+            "local_executor_applied": False,
+            "local_execution": "blocked_insufficient_person_evidence",
+            "local_output_policy": str(perception.get("output_policy") or decision),
+            "local_rollback_applied": True,
+            "local_face_count": len(faces),
+        }
+
+    local_contamination = bool((perception.get("person") or {}).get("local_light_contamination"))
+    before_face_l = float(np.median(lightness[face_core]))
+    source_float = source.astype(np.float32)
+
+    if local_contamination:
+        b_axis = lab[..., 2] - 128.0
+        blue_excess = np.clip((-b_axis - 4.0) / 34.0, 0.0, 1.0)
+        luminance_gate = np.clip((lightness - 18.0) / 42.0, 0.20, 1.0)
+        screen_protection = np.clip(strong_screen_mask * (1.0 - face_mask), 0.0, 1.0)
+        target_mask = person_mask * blue_excess * luminance_gate
+        target_mask *= np.clip(1.0 - screen_protection * 0.995, 0.0, 1.0)
+        target_mask = cv2.GaussianBlur(
+            target_mask,
+            (0, 0),
+            sigmaX=max(1.5, min(source.shape[:2]) * 0.004),
+        )
+        target_mask = np.clip(target_mask * person_mask, 0.0, 1.0)
+        target_core = target_mask >= 0.18
+        if int(target_core.sum()) < 64:
+            return source.copy(), {"mode": "led_local_contamination", "strength": 0.0}, {
+                "local_executor_applied": False,
+                "local_execution": "blocked_insufficient_contamination_evidence",
+                "local_output_policy": str(perception.get("output_policy") or decision),
+                "local_rollback_applied": True,
+                "local_face_count": len(faces),
+            }
+        pollution_before = float(np.median(b_axis[target_core]))
+        correction = np.clip((-8.0 - b_axis) * 0.86, 0.0, 24.0)
+        corrected_lab = lab.copy()
+        corrected_lab[..., 2] = np.clip(corrected_lab[..., 2] + correction, 0.0, 255.0)
+        a_axis = lab[..., 1] - 128.0
+        reference_skin = face_core & (b_axis >= 2.0) & (b_axis <= 24.0)
+        if int(reference_skin.sum()) >= 64:
+            reference_a = float(np.median(a_axis[reference_skin]))
+            a_correction = np.clip((reference_a - a_axis) * 0.25, -5.0, 3.0) * face_mask
+            corrected_lab[..., 1] = np.clip(corrected_lab[..., 1] + a_correction, 0.0, 255.0)
+        else:
+            reference_a = None
+        converted = cv2.cvtColor(corrected_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+        candidate = np.clip(
+            source_float * (1.0 - target_mask[..., None]) + converted * target_mask[..., None],
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+        candidate_lab = cv2.cvtColor(candidate, cv2.COLOR_RGB2LAB).astype(np.float32)
+        pollution_after = float(np.median(candidate_lab[..., 2][target_core] - 128.0))
+        mode = "led_local_contamination"
+        strength = float(np.clip(np.mean((correction * target_mask)[target_core]) / 22.0, 0.0, 1.0))
+        target_gain = pollution_after - pollution_before
+        safe_gain_ceiling = float(np.clip((-pollution_before - 8.0) * 0.90, 9.0, 24.0))
+        local_quality_ok = bool(3.0 <= target_gain <= safe_gain_ceiling and pollution_after <= -2.0)
+        target_before = pollution_before
+        target_after = pollution_after
+    else:
+        face_need = float(np.clip((102.0 - before_face_l) / 32.0, 0.0, 1.0))
+        exposure_gain = float(np.clip(10.0 + 13.0 * face_need, 10.0, 23.0))
+        body_only = np.clip(person_mask - face_mask * 0.55, 0.0, 1.0)
+        target_mask = np.clip(face_mask * 0.94 + body_only * 0.52, 0.0, 1.0)
+        target_mask *= np.clip(1.0 - strong_screen_mask * 0.985, 0.0, 1.0)
+        black_gate = np.clip((lightness - 13.0) / 42.0, 0.0, 1.0)
+        highlight_gate = np.clip((218.0 - lightness) / 72.0, 0.0, 1.0)
+        midtone_weight = np.clip((170.0 - lightness) / 105.0, 0.20, 1.0)
+        lift = exposure_gain * black_gate * highlight_gate * midtone_weight
+        corrected_lab = lab.copy()
+        corrected_lab[..., 0] = np.clip(corrected_lab[..., 0] + lift, 0.0, 255.0)
+        converted = cv2.cvtColor(corrected_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+        candidate = np.clip(
+            source_float * (1.0 - target_mask[..., None]) + converted * target_mask[..., None],
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+        candidate_lab = cv2.cvtColor(candidate, cv2.COLOR_RGB2LAB).astype(np.float32)
+        after_face_l = float(np.median(candidate_lab[..., 0][face_core]))
+        mode = "local_person_exposure"
+        strength = float(np.clip(exposure_gain / 23.0, 0.0, 1.0))
+        target_gain = after_face_l - before_face_l
+        local_quality_ok = bool(6.0 <= target_gain <= 22.0)
+        target_before = before_face_l
+        target_after = after_face_l
+
+    candidate[target_mask <= 0.01] = source[target_mask <= 0.01]
+    delta = np.abs(candidate.astype(np.float32) - source_float).mean(axis=2)
+    non_target = target_mask <= 0.01
+    non_target_mae = float(delta[non_target].mean()) if non_target.any() else 0.0
+    non_target_p99 = float(np.percentile(delta[non_target], 99)) if non_target.any() else 0.0
+    transition = (person_mask > 0.02) & (person_mask < 0.35)
+    transition_p99 = float(np.percentile(delta[transition], 99)) if transition.any() else 0.0
+    delta_gradient = np.maximum(
+        np.abs(cv2.Sobel(delta, cv2.CV_32F, 1, 0, ksize=3)) / 4.0,
+        np.abs(cv2.Sobel(delta, cv2.CV_32F, 0, 1, ksize=3)) / 4.0,
+    )
+    transition_gradient_p99 = (
+        float(np.percentile(delta_gradient[transition], 99)) if transition.any() else 0.0
+    )
+    screen_region = (strong_screen_mask >= 0.35) & (person_mask <= 0.08)
+    screen_mae = float(delta[screen_region].mean()) if screen_region.any() else 0.0
+    highlight_before = float((_luminance(source) > 242.0).mean())
+    highlight_after = float((_luminance(candidate) > 242.0).mean())
+    drift_ok = bool(
+        non_target_mae <= 0.08
+        and non_target_p99 <= 0.75
+        and screen_mae <= 0.10
+        and highlight_after <= highlight_before + 0.002
+    )
+    blend_ok = bool(transition_gradient_p99 <= 4.0)
+    accepted = bool(local_quality_ok and drift_ok and blend_ok)
+    final = candidate if accepted else source.copy()
+    return final, {
+        "mode": mode,
+        "strength": round(strength, 4),
+        "target_before": round(target_before, 3),
+        "target_after": round(target_after, 3),
+        "target_gain": round(target_gain, 3),
+        "reference_skin_lab_a": round(reference_a, 3) if local_contamination and reference_a is not None else None,
+        "non_target_mae": round(non_target_mae, 4),
+        "non_target_p99": round(non_target_p99, 4),
+        "transition_delta_p99": round(transition_p99, 4),
+        "transition_gradient_p99": round(transition_gradient_p99, 4),
+        "screen_mae": round(screen_mae, 4),
+        "highlight_ratio_before": round(highlight_before, 5),
+        "highlight_ratio_after": round(highlight_after, 5),
+        "quality_gate": local_quality_ok,
+        "non_target_drift_gate": drift_ok,
+        "blend_gate": blend_ok,
+    }, {
+        "local_executor_applied": accepted,
+        "local_execution": mode if accepted else f"blocked_{mode}",
+        "local_output_policy": "LOCAL_CORRECTED" if accepted else str(perception.get("output_policy") or decision),
+        "local_rollback_applied": not accepted,
+        "local_face_count": len(faces),
+        "local_target_quality_pass": local_quality_ok,
+        "local_non_target_drift_pass": drift_ok,
+        "local_blend_quality_pass": blend_ok,
+    }
+
+
 def _scene_masks(
     rgb: np.ndarray,
     faces: list[tuple[int, int, int, int]],
@@ -220,65 +521,6 @@ def _scene_masks(
     }
 
 
-def _neutral_white_balance(rgb: np.ndarray) -> tuple[np.ndarray, list[float], dict[str, Any]]:
-    array = rgb.astype(np.float32)
-    maximum = array.max(axis=2)
-    minimum = array.min(axis=2)
-    saturation = np.divide(maximum - minimum, np.maximum(maximum, 1.0))
-    luminance = 0.2126 * array[..., 0] + 0.7152 * array[..., 1] + 0.0722 * array[..., 2]
-    neutral = (saturation < 0.18) & (luminance > 38) & (luminance < 238)
-    neutral_ratio = float(neutral.mean())
-    if int(neutral.sum()) < max(64, int(neutral.size * 0.003)):
-        return array, [1.0, 1.0, 1.0], {
-            "white_balance_confidence": 0.0,
-            "neutral_pixel_ratio": round(neutral_ratio, 4),
-            "color_cast": "中性色证据不足",
-            "color_cast_magnitude": 0.0,
-            "white_balance_applied": False,
-        }
-    channel_means = np.array([array[..., index][neutral].mean() for index in range(3)], dtype=np.float32)
-    target = float(channel_means.mean())
-    raw_gains = np.clip(target / np.maximum(channel_means, 1.0), 0.90, 1.10)
-    lab = cv2.cvtColor(array.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-    cast_a = float(np.median(lab[..., 1][neutral]) - 128.0)
-    cast_b = float(np.median(lab[..., 2][neutral]) - 128.0)
-    cast_magnitude = float(np.hypot(cast_a, cast_b))
-    confidence = float(np.clip(neutral_ratio / 0.08, 0.0, 1.0))
-    correction_strength = float(np.clip((cast_magnitude - 0.8) / 9.0, 0.0, 0.82) * confidence)
-    gains = 1.0 + (raw_gains - 1.0) * correction_strength
-    corrected = np.clip(array * gains.reshape(1, 1, 3), 0, 255)
-
-    corrected_lab = cv2.cvtColor(corrected.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
-    chroma_protection = np.clip(1.0 - saturation * 1.35, 0.18, 1.0)
-    corrected_lab[..., 1] = np.clip(corrected_lab[..., 1] - cast_a * correction_strength * 0.42 * chroma_protection, 0, 255)
-    corrected_lab[..., 2] = np.clip(corrected_lab[..., 2] - cast_b * correction_strength * 0.42 * chroma_protection, 0, 255)
-    corrected = cv2.cvtColor(corrected_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
-
-    if cast_magnitude < 1.5:
-        cast_label = "未检测到明显偏色"
-    else:
-        labels: list[str] = []
-        if cast_a >= 1.5:
-            labels.append("偏红")
-        elif cast_a <= -1.5:
-            labels.append("偏绿")
-        if cast_b >= 1.5:
-            labels.append("偏黄")
-        elif cast_b <= -1.5:
-            labels.append("偏蓝/青")
-        cast_label = "、".join(labels) or "轻微混合偏色"
-    info = {
-        "white_balance_confidence": round(confidence, 3),
-        "neutral_pixel_ratio": round(neutral_ratio, 4),
-        "color_cast": cast_label,
-        "color_cast_magnitude": round(cast_magnitude, 3),
-        "white_balance_applied": bool(correction_strength >= 0.08),
-        "lab_neutral_cast_a": round(cast_a, 3),
-        "lab_neutral_cast_b": round(cast_b, 3),
-    }
-    return corrected, [round(float(value), 4) for value in gains], info
-
-
 def _color_region_features(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     hsv = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
     saturation = hsv[..., 1] / 255.0
@@ -300,10 +542,378 @@ def _color_region_features(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, dic
         max(3, int(radius * 1.4)),
     )
     strong_saturation = float(saturation[strong_binary].mean()) if strong_binary.any() else 0.0
+    hue = hsv[..., 0]
+    blue_binary = strong_binary & (hue >= 90.0) & (hue <= 135.0)
+    warm_binary = strong_binary & ((hue <= 30.0) | (hue >= 170.0))
+    red_binary = strong_binary & ((hue <= 12.0) | (hue >= 170.0))
     return np.clip(strong_mask, 0.0, 1.0), np.clip(screen_mask, 0.0, 1.0), {
         "strong_color_coverage": round(float(strong_binary.mean()), 4),
         "upper_strong_color_coverage": round(float((strong_binary & upper_scene).mean()), 4),
         "strong_color_saturation": round(strong_saturation, 4),
+        "blue_color_coverage": round(float(blue_binary.mean()), 4),
+        "upper_blue_color_coverage": round(float((blue_binary & upper_scene).mean()), 4),
+        "warm_color_coverage": round(float(warm_binary.mean()), 4),
+        "red_color_coverage": round(float(red_binary.mean()), 4),
+    }
+
+
+def _perceptual_decision(
+    rgb: np.ndarray,
+    faces: list[tuple[int, int, int, int]],
+    face_mask: np.ndarray,
+    before_metrics: dict[str, float],
+    scene_analysis: dict[str, Any],
+    color_features: dict[str, float],
+    low_key_design: bool,
+) -> dict[str, Any]:
+    """Describe error, scope, protection, and treatment value before editing pixels.
+
+    The decision is based on independent spatial evidence rather than a single
+    whole-image channel average.  It intentionally stops at a compact set of
+    facts needed by the existing correction strategies.
+    """
+
+    array = rgb.astype(np.uint8)
+    hsv = cv2.cvtColor(array, cv2.COLOR_RGB2HSV).astype(np.float32)
+    lab = cv2.cvtColor(array, cv2.COLOR_RGB2LAB).astype(np.float32)
+    luminance = _luminance(array)
+    saturation = hsv[..., 1] / 255.0
+    value = hsv[..., 2] / 255.0
+    neutral = (saturation < 0.18) & (luminance > 38.0) & (luminance < 238.0)
+    neutral_ratio = float(neutral.mean())
+    neutral_a = float(np.median(lab[..., 1][neutral]) - 128.0) if neutral.any() else 0.0
+    neutral_b = float(np.median(lab[..., 2][neutral]) - 128.0) if neutral.any() else 0.0
+
+    height, width = neutral.shape
+    neutral_cells: list[dict[str, float]] = []
+    for row in range(3):
+        for column in range(3):
+            y0, y1 = row * height // 3, (row + 1) * height // 3
+            x0, x1 = column * width // 3, (column + 1) * width // 3
+            cell_mask = neutral[y0:y1, x0:x1]
+            if int(cell_mask.sum()) < max(20, int(cell_mask.size * 0.002)):
+                continue
+            cell_lab = lab[y0:y1, x0:x1]
+            neutral_cells.append(
+                {
+                    "row": row,
+                    "column": column,
+                    "a": round(float(np.median(cell_lab[..., 1][cell_mask]) - 128.0), 3),
+                    "b": round(float(np.median(cell_lab[..., 2][cell_mask]) - 128.0), 3),
+                }
+            )
+
+    warm_cells = sum(float(cell["b"]) >= 3.0 for cell in neutral_cells)
+    cool_cells = sum(float(cell["b"]) <= -2.5 for cell in neutral_cells)
+    cell_b_values = [float(cell["b"]) for cell in neutral_cells]
+    mixed_light = bool(
+        len(neutral_cells) >= 5
+        and warm_cells >= 2
+        and cool_cells >= 2
+        and max(cell_b_values) - min(cell_b_values) >= 6.0
+    )
+
+    strong_coverage = float(color_features["strong_color_coverage"])
+    upper_strong = float(color_features["upper_strong_color_coverage"])
+    blue_coverage = float(color_features["blue_color_coverage"])
+    upper_blue = float(color_features["upper_blue_color_coverage"])
+    warm_coverage = float(color_features["warm_color_coverage"])
+    red_coverage = float(color_features["red_color_coverage"])
+    mixed_light = bool(
+        mixed_light
+        or (
+            strong_coverage >= 0.30
+            and blue_coverage >= 0.08
+            and warm_coverage >= 0.08
+            and blue_coverage / max(strong_coverage, 0.001) >= 0.18
+            and warm_coverage / max(strong_coverage, 0.001) >= 0.18
+        )
+    )
+    strong_binary = (saturation >= 0.38) & (value >= 0.18) & (value <= 0.98)
+    face_region = face_mask > 0.2
+    face_coverage = float(face_region.mean())
+    face_skin_fraction = 0.0
+    face_strong_overlap = 0.0
+    face_luminance = 0.0
+    face_a = 0.0
+    face_b = 0.0
+    if face_region.any():
+        lab_a = lab[..., 1] - 128.0
+        lab_b = lab[..., 2] - 128.0
+        skin_candidate = (
+            (lab_a > 4.0)
+            & (lab_a < 30.0)
+            & (lab_b > 2.0)
+            & (lab_b < 35.0)
+            & (luminance > 18.0)
+            & (luminance < 235.0)
+        )
+        face_skin_fraction = float(skin_candidate[face_region].mean())
+        face_strong_overlap = float(strong_binary[face_region].mean())
+        face_luminance = float(luminance[face_region].mean())
+        face_a = float(np.median(lab_a[face_region]))
+        face_b = float(np.median(lab_b[face_region]))
+    person_present = bool(
+        faces
+        and face_coverage >= 0.0005
+        and (face_skin_fraction >= 0.10 or (strong_coverage < 0.08 and face_strong_overlap < 0.08))
+    )
+
+    auditorium_depth = bool(
+        not person_present
+        and strong_coverage >= 0.14
+        and upper_strong >= 0.08
+        and float(before_metrics["shadow_ratio"]) >= 0.18
+        and float(before_metrics["mean_luminance"]) < 100.0
+    )
+    probable_screen = bool(
+        auditorium_depth
+        or (person_present and blue_coverage >= 0.10 and upper_blue >= 0.08)
+    )
+    strong_local_light = bool(probable_screen and person_present and not mixed_light)
+    dominant_product_color = max(red_coverage, blue_coverage) / max(strong_coverage, 0.001)
+    probable_product = bool(
+        not person_present
+        and not auditorium_depth
+        and 0.10 <= strong_coverage <= 0.38
+        and dominant_product_color >= 0.65
+    )
+    legitimate_warm = bool(
+        strong_coverage >= 0.50
+        and warm_coverage / max(strong_coverage, 0.001) >= 0.72
+        and neutral_b >= 4.0
+        and not mixed_light
+    )
+    legitimate_dark = bool(
+        float(before_metrics["mean_luminance"]) < 35.0
+        and float(before_metrics["shadow_ratio"]) >= 0.75
+        and float(before_metrics["highlight_ratio"]) < 0.015
+        and float(before_metrics["white_point"]) < 115.0
+    )
+    dark_material = bool(
+        not person_present
+        and 90.0 <= float(before_metrics["mean_luminance"]) <= 145.0
+        and float(before_metrics["shadow_ratio"]) >= 0.20
+        and float(before_metrics["dynamic_range"]) >= 200.0
+        and float(before_metrics["mean_saturation"]) < 0.12
+    )
+    if low_key_design:
+        legitimate_dark = True
+
+    highlight_ratio = float(before_metrics["highlight_ratio"])
+    if highlight_ratio >= 0.08 or (
+        float(before_metrics["mean_luminance"]) >= 190.0
+        and float(before_metrics["white_point"]) >= 250.0
+    ):
+        highlight_risk = "high"
+    elif highlight_ratio >= 0.04:
+        highlight_risk = "medium"
+    else:
+        highlight_risk = "low"
+
+    local_subject_under = bool(
+        person_present
+        and not legitimate_dark
+        and float(before_metrics["mean_luminance"]) >= 90.0
+        and face_luminance <= min(95.0, float(before_metrics["mean_luminance"]) - 18.0)
+        and float(scene_analysis["background_luminance"]) - face_luminance >= 55.0
+    )
+    local_foreground_under = bool(
+        not person_present
+        and not probable_product
+        and bool(scene_analysis["meeting_backlight_detected"])
+        and float(before_metrics["mean_luminance"]) < 190.0
+        and float(before_metrics["foreground_luminance"]) < 110.0
+        and float(before_metrics["background_luminance"]) - float(before_metrics["foreground_luminance"]) >= 70.0
+    )
+    local_light_contamination = bool(strong_local_light and face_b <= 2.0)
+    global_under = bool(
+        not legitimate_dark
+        and not strong_local_light
+        and float(before_metrics["mean_luminance"]) < 78.0
+        and float(before_metrics["midtone_point"]) < 88.0
+        and float(before_metrics["shadow_ratio"]) >= 0.32
+        and float(before_metrics["white_point"]) < 210.0
+    )
+    global_over = bool(
+        float(before_metrics["mean_luminance"]) > 215.0
+        and float(before_metrics["highlight_ratio"]) > 0.30
+    )
+    low_contrast = bool(
+        float(before_metrics["dynamic_range"]) < 145.0
+        and float(before_metrics["local_contrast"]) < 4.2
+        and highlight_ratio < 0.03
+    )
+    floating_black = bool(
+        low_contrast
+        and float(before_metrics["black_point"]) >= 25.0
+        and float(before_metrics["shadow_ratio"]) < 0.10
+    )
+
+    candidate_direction = "none"
+    if neutral_ratio >= 0.025 and len(neutral_cells) >= 4:
+        if neutral_b >= 4.5:
+            candidate_direction = "warm"
+        elif neutral_b <= -2.5:
+            candidate_direction = "cool"
+        elif abs(neutral_a) >= 5.0:
+            candidate_direction = "other"
+    if candidate_direction == "warm":
+        consistency = warm_cells / max(len(neutral_cells), 1)
+        severity = float(np.clip((neutral_b - 3.0) / 6.0, 0.0, 1.0))
+    elif candidate_direction == "cool":
+        consistency = cool_cells / max(len(neutral_cells), 1)
+        severity = float(np.clip((-neutral_b - 1.8) / 4.5, 0.0, 1.0))
+    elif candidate_direction == "other":
+        aligned = sum(np.sign(float(cell["a"])) == np.sign(neutral_a) and abs(float(cell["a"])) >= 3.0 for cell in neutral_cells)
+        consistency = aligned / max(len(neutral_cells), 1)
+        severity = float(np.clip((abs(neutral_a) - 3.0) / 8.0, 0.0, 1.0))
+    else:
+        consistency = 0.0
+        severity = 0.0
+    candidate_confidence = float(
+        np.clip(
+            0.40 * min(1.0, neutral_ratio / 0.12)
+            + 0.40 * consistency
+            + 0.20 * severity,
+            0.0,
+            1.0,
+        )
+    ) if candidate_direction != "none" else 0.0
+
+    environment_reason: str | None = None
+    if mixed_light:
+        environment_reason = "mixed_light"
+    elif legitimate_warm:
+        environment_reason = "legitimate_warm"
+    elif strong_local_light or probable_screen:
+        environment_reason = "strong_local_light"
+    elif local_subject_under and highlight_risk == "high":
+        environment_reason = "backlight_environment"
+    elif highlight_risk == "high":
+        environment_reason = "highlight_limited_evidence"
+    elif candidate_confidence < 0.62:
+        environment_reason = "insufficient_global_evidence"
+
+    if environment_reason is None and candidate_direction != "none":
+        global_cast_direction = candidate_direction
+        global_cast_confidence = candidate_confidence
+        cast_interpretation = "global_error_cast"
+    else:
+        global_cast_direction = "none"
+        global_cast_confidence = 0.0
+        cast_interpretation = environment_reason or "no_clear_cast"
+
+    if legitimate_dark:
+        scene_intent = "legitimate_dark"
+    elif legitimate_warm:
+        scene_intent = "legitimate_warm"
+    else:
+        scene_intent = "normal"
+
+    if legitimate_dark or dark_material or probable_product:
+        exposure_scope = "normal"
+        decision = "ORIGINAL"
+    elif local_subject_under or local_foreground_under or local_light_contamination:
+        exposure_scope = "local_subject_under" if (local_subject_under or local_foreground_under) else "normal"
+        decision = "LOCAL_REQUIRED"
+    elif auditorium_depth:
+        exposure_scope = "normal"
+        decision = "NORMAL"
+    elif mixed_light or highlight_risk == "high":
+        exposure_scope = "normal"
+        decision = "LOW"
+    elif global_cast_direction != "none" or global_under or global_over or low_contrast:
+        exposure_scope = "global_under" if global_under else ("global_over" if global_over else "normal")
+        decision = "NORMAL"
+    else:
+        exposure_scope = "normal"
+        decision = "ORIGINAL"
+
+    if probable_screen:
+        key_color_kind = "screen"
+    elif probable_product:
+        key_color_kind = "product"
+    elif legitimate_warm and strong_coverage >= 0.08:
+        key_color_kind = "environment"
+    else:
+        key_color_kind = "none"
+    protect_strength = "high" if (
+        probable_screen or probable_product or legitimate_warm or legitimate_dark or dark_material or highlight_risk == "high"
+    ) else ("medium" if strong_coverage >= 0.08 else "low")
+    protection_needs: list[str] = []
+    if person_present:
+        protection_needs.append("person_and_skin")
+    if probable_screen:
+        protection_needs.append("screen_color")
+    if probable_product:
+        protection_needs.append("product_key_color")
+    if dark_material:
+        protection_needs.append("dark_material_and_black_point")
+    if highlight_risk in {"medium", "high"}:
+        protection_needs.append("highlight_detail")
+    if legitimate_warm:
+        protection_needs.append("legitimate_warm_ambience")
+    if legitimate_dark:
+        protection_needs.append("legitimate_dark_intent")
+
+    return {
+        "decision_version": "hdde.color-perception.d01.v1",
+        "global_cast_direction": global_cast_direction,
+        "global_cast_confidence": round(global_cast_confidence, 4),
+        "global_cast_candidate_direction": candidate_direction,
+        "global_cast_candidate_confidence": round(candidate_confidence, 4),
+        "cast_interpretation": cast_interpretation,
+        "neutral_evidence_ratio": round(neutral_ratio, 4),
+        "neutral_cast_a": round(neutral_a, 3),
+        "neutral_cast_b": round(neutral_b, 3),
+        "neutral_spatial_cells": neutral_cells,
+        "lighting": "mixed" if mixed_light else ("strong_local_light" if strong_local_light else "uniform"),
+        "mixed_light": mixed_light,
+        "strong_local_light": strong_local_light,
+        "exposure": exposure_scope,
+        "global_underexposure": global_under,
+        "global_overexposure": global_over,
+        "local_subject_underexposure": bool(local_subject_under or local_foreground_under),
+        "tonal_risk": {
+            "highlight_risk": highlight_risk,
+            "shadow_risk": "high" if float(before_metrics["shadow_ratio"]) >= 0.35 and not legitimate_dark else "low",
+            "low_contrast": low_contrast,
+            "floating_black": floating_black,
+        },
+        "person": {
+            "present": person_present,
+            "detector_count": len(faces),
+            "detector_reliable": person_present,
+            "exposure_risk": bool(local_subject_under or global_under),
+            "skin_color_risk": local_light_contamination,
+            "local_light_contamination": local_light_contamination,
+            "face_luminance": round(face_luminance, 3) if person_present else None,
+            "face_skin_fraction": round(face_skin_fraction, 4) if faces else 0.0,
+        },
+        "key_color": {
+            "strong_local_color": strong_coverage >= 0.08,
+            "probable_product_or_screen_color": key_color_kind,
+            "protect_strength": protect_strength,
+            "strong_color_coverage": round(strong_coverage, 4),
+            "blue_color_coverage": round(blue_coverage, 4),
+            "warm_color_coverage": round(warm_coverage, 4),
+        },
+        "scene_intent": scene_intent,
+        "legitimate_warm": legitimate_warm,
+        "legitimate_dark": legitimate_dark,
+        "dark_material_protection": dark_material,
+        "highlight_risk": highlight_risk,
+        "low_contrast": low_contrast,
+        "floating_black": floating_black,
+        "protection_needs": protection_needs,
+        "processing_decision": decision,
+        "processing_scope": "local" if decision == "LOCAL_REQUIRED" else ("global" if decision == "NORMAL" else "protective"),
+        "output_policy": "ORIGINAL_PROTECTED" if decision == "LOCAL_REQUIRED" and local_light_contamination else decision,
+        "risk_exceeds_gain": decision in {"ORIGINAL", "LOW"} and (
+            mixed_light or legitimate_warm or legitimate_dark or dark_material or highlight_risk == "high" or probable_product
+        ),
+        "auditorium_depth_recovery": auditorium_depth,
     }
 
 
@@ -313,31 +923,43 @@ def _select_strategy(
     white_balance: dict[str, Any],
     color_features: dict[str, float],
     low_key_design: bool,
+    perception: dict[str, Any],
 ) -> dict[str, Any]:
     faces = int(scene_analysis["face_count"])
     strong_coverage = float(color_features["strong_color_coverage"])
     upper_strong = float(color_features["upper_strong_color_coverage"])
-    if low_key_design:
+    decision = str(perception["processing_decision"])
+    if low_key_design or decision == "ORIGINAL":
         strategy_id = "NORMAL_DESIGN_PROTECTION"
         label = "正常设计保护"
-        primary = "原图属于低调设计或已建立明确光影意图"
+        primary = "处理风险高于潜在收益，保持原有设计、色彩与明暗意图"
         modules = ["设计意图保护", "黑白场保持", "原始色彩关系保持"]
-    elif faces == 0 and strong_coverage >= 0.14 and upper_strong >= 0.08 and before_metrics["shadow_ratio"] >= 0.18:
+    elif decision == "LOW":
+        strategy_id = "RISK_LIMITED_PROTECTION"
+        label = "高风险少处理保护"
+        primary = "混合光或高光风险使全局处理收益低于保护需求"
+        modules = ["环境光保护", "高光保护", "强色保护"]
+    elif decision == "LOCAL_REQUIRED" and perception["person"]["local_light_contamination"]:
+        strategy_id = "LOCAL_CORRECTION_REQUIRED"
+        label = "人物局部颜色校正待处理"
+        primary = "强色光源本身需要保护，人物局部颜色污染不能用全局白平衡解决"
+        modules = ["强色光源保护", "人物局部颜色风险标记", "全局白平衡阻断"]
+    elif bool(perception["auditorium_depth_recovery"]):
         strategy_id = "AUDITORIUM_STRONG_COLOR_DEPTH"
         label = "礼堂强色层次恢复"
         primary = "礼堂暗部层次不足，同时存在需要保留的强色大屏"
         modules = ["会场暗部局部恢复", "黑位锚定", "中间调层次", "强色大屏保护", "高光文字保护"]
-    elif faces > 0 and scene_analysis["meeting_backlight_detected"]:
+    elif decision == "LOCAL_REQUIRED" and faces > 0 and scene_analysis["meeting_backlight_detected"]:
         strategy_id = "MEETING_MIXED_LIGHT_PEOPLE"
         label = "会议人物混合光平衡"
         primary = "人物与高亮背景反差明显，需要主体和背景分开处理"
         modules = ["可信中性色判断", "人物局部提亮", "肤色保护", "桌面强色保护", "窗户与高亮背景保护", "主体背景分离"]
-    elif scene_analysis["meeting_backlight_detected"]:
+    elif decision == "LOCAL_REQUIRED" and scene_analysis["meeting_backlight_detected"]:
         strategy_id = "BACKLIGHT_DEPTH_RECOVERY"
         label = "逆光层次恢复"
         primary = "高亮背景与暗部前景反差明显"
         modules = ["前景局部提亮", "高亮背景保护", "黑位锚定", "局部层次恢复"]
-    elif (
+    elif decision == "ORIGINAL" or (
         before_metrics["dynamic_range"] >= 175.0
         and before_metrics["local_contrast"] >= 4.8
         and before_metrics["highlight_ratio"] <= 0.035
@@ -348,7 +970,7 @@ def _select_strategy(
         label = "正常图片保护"
         primary = "原图曝光、层次与色彩关系已基本成立"
         modules = ["正常图片保护", "黑白场保持", "品牌色与强色保持"]
-    elif white_balance["white_balance_applied"] and float(white_balance["color_cast_magnitude"]) >= 1.5:
+    elif perception["global_cast_direction"] != "none" and white_balance["white_balance_applied"]:
         strategy_id = "COLOR_CAST_AND_TONE_BALANCE"
         label = "偏色与层次平衡"
         primary = "可信中性色显示存在偏色，同时需要克制的层次整理"
@@ -384,11 +1006,12 @@ def _visual_severity(
 ) -> dict[str, Any]:
     """Map measured image problems to a continuous, content-driven gain level."""
     strategy_id = str(strategy["strategy_id"])
-    if strategy_id == "NORMAL_DESIGN_PROTECTION":
+    if strategy_id in {"NORMAL_DESIGN_PROTECTION", "RISK_LIMITED_PROTECTION", "LOCAL_CORRECTION_REQUIRED"}:
+        gain = 0.0 if strategy_id in {"NORMAL_DESIGN_PROTECTION", "LOCAL_CORRECTION_REQUIRED"} else 0.12
         return {
-            "visual_severity": "NORMAL",
-            "visual_severity_score": 0.0,
-            "visual_gain": 0.0,
+            "visual_severity": "NORMAL" if gain == 0.0 else "MILD",
+            "visual_severity_score": gain,
+            "visual_gain": gain,
             "visual_severity_components": {
                 "shadow": 0.0,
                 "midtone": 0.0,
@@ -485,7 +1108,18 @@ def _apply_adaptive_correction(
     local_contrast_before = float(before_metrics["local_contrast"])
     low_key_design = bool(before_metrics.get("low_key_design_detected", False))
     strategy_id = str(strategy["strategy_id"])
-    normal_image = strategy_id == "NORMAL_DESIGN_PROTECTION"
+    normal_image = strategy_id in {"NORMAL_DESIGN_PROTECTION", "RISK_LIMITED_PROTECTION", "LOCAL_CORRECTION_REQUIRED"}
+    global_underexposure = bool(scene_analysis.get("exposure") == "global_under")
+    transparency_layering = bool(
+        scene_analysis.get("low_contrast")
+        and scene_analysis.get("floating_black")
+        and not global_underexposure
+    )
+    pure_global_cast = bool(
+        strategy_id == "COLOR_CAST_AND_TONE_BALANCE"
+        and scene_analysis.get("exposure") == "normal"
+        and not scene_analysis.get("low_contrast")
+    )
     visual_severity = str(strategy.get("visual_severity") or ("NORMAL" if normal_image else "MILD"))
     severity_score = float(np.clip(strategy.get("visual_severity_score", 0.0), 0.0, 1.0))
     visual_gain = float(np.clip(strategy.get("visual_gain", 0.0 if normal_image else 0.35), 0.0, 1.0))
@@ -509,22 +1143,27 @@ def _apply_adaptive_correction(
             "black_reconstruction": 0.0,
             "subject_target_gain": 0.0,
             "skin_local_convergence_scale": 1.0,
+            "tonal_curve_mode": "identity",
+            "tonal_curve_source_points": [],
+            "tonal_curve_target_points": [],
+            "tonal_curve_strength": 0.0,
+            "spatial_layering_strength": 0.0,
         }
         analysis = {
             "exposure_state": "基本正常",
-            "normal_image_detected": True,
+            "normal_image_detected": strategy_id == "NORMAL_DESIGN_PROTECTION",
             "strategy_id": strategy_id,
             "strategy_label": strategy["strategy_label"],
             "primary_issue": strategy["primary_issue"],
             "secondary_issues": list(strategy["secondary_issues"]),
             "enabled_modules": list(strategy["enabled_modules"]),
             "module_order": list(strategy["enabled_modules"]),
-            "person_region_reliably_detected": bool(scene_analysis["face_count"] > 0 and float(face_mask.sum()) > 1.0),
+            "person_region_reliably_detected": bool(scene_analysis.get("person_present", scene_analysis["face_count"] > 0) and float(face_mask.sum()) > 1.0),
             "person_local_adjustment_enabled": False,
             "foreground_local_adjustment_enabled": False,
             "highlight_background_protection_enabled": False,
             "skin_tone_protection_enabled": bool(float(face_mask.sum()) > 1.0),
-            "strong_color_protection_enabled": False,
+            "strong_color_protection_enabled": bool(float(strong_color_mask.sum()) > 1.0 and strategy_id != "NORMAL_DESIGN_PROTECTION"),
             "local_contrast_enabled": False,
             "color_balance_enabled": False,
             "clarity_enabled": False,
@@ -574,33 +1213,113 @@ def _apply_adaptive_correction(
         local_strength = float(np.clip(9.0 + scene_analysis["backlight_contrast"] * 0.22 + 8.0 * visual_gain, 16.0, 38.0))
         subject_target_gain = 6.0 + 8.0 * visual_gain
     elif strategy_id == "COLOR_CAST_AND_TONE_BALANCE":
-        contrast_strength = float(np.clip(0.035 + 0.05 * max(range_need, haze_need), 0.035, 0.09))
-        if before_metrics["mean_luminance"] < 70.0:
-            gamma = min(gamma, 0.94)
-            contrast_strength = min(contrast_strength, 0.04)
-        local_contrast_strength = float(np.clip(0.04 + 0.06 * haze_need, 0.04, 0.10))
-        local_strength = 9.0 if scene_analysis["face_count"] else 0.0
+        if pure_global_cast:
+            gamma = 1.0
+            contrast_strength = 0.0
+            local_contrast_strength = 0.0
+            local_strength = 0.0
+            shadow_lift = 0.0
+            midtone_lift = 0.0
+            black_reconstruction = 0.0
+        else:
+            contrast_strength = float(np.clip(0.035 + 0.05 * max(range_need, haze_need), 0.035, 0.09))
+            if before_metrics["mean_luminance"] < 70.0:
+                gamma = min(gamma, 0.94)
+                contrast_strength = min(contrast_strength, 0.04)
+            local_contrast_strength = float(np.clip(0.04 + 0.06 * haze_need, 0.04, 0.10))
+            local_strength = 9.0 if scene_analysis["face_count"] else 0.0
     elif normal_image:
         gamma = 1.0
         contrast_strength = 0.0
         local_contrast_strength = 0.0
         local_strength = 0.0
     else:
-        contrast_strength = float(np.clip(0.055 + 0.08 * max(range_need, haze_need), 0.055, 0.135))
-        local_contrast_strength = float(np.clip(0.055 + 0.08 * haze_need, 0.055, 0.135))
-        local_strength = 10.0 if scene_analysis["face_count"] and before_metrics["foreground_luminance"] < 112.0 else 0.0
+        if global_underexposure:
+            gamma = 1.0
+            contrast_strength = 0.0
+            local_contrast_strength = 0.032
+            local_strength = 0.0
+            shadow_lift = 0.0
+            midtone_lift = 0.0
+            black_reconstruction = 0.0
+        elif transparency_layering:
+            gamma = 1.0
+            contrast_strength = 0.0
+            local_contrast_strength = float(np.clip(0.12 + 0.025 * haze_need, 0.12, 0.138))
+            local_strength = 0.0
+            shadow_lift = 0.0
+            midtone_lift = 0.0
+            black_reconstruction = 0.0
+        else:
+            contrast_strength = float(np.clip(0.055 + 0.08 * max(range_need, haze_need), 0.055, 0.135))
+            local_contrast_strength = float(np.clip(0.055 + 0.08 * haze_need, 0.055, 0.135))
+            local_strength = 10.0 if scene_analysis["face_count"] and before_metrics["foreground_luminance"] < 112.0 else 0.0
 
     gamma = 1.0 + (gamma - 1.0) * scales["tone"]
     contrast_strength *= scales["tone"]
     local_contrast_strength *= scales["detail"]
     local_strength *= scales["person"]
 
-    normalized = np.clip(lightness / 255.0, 0.0, 1.0)
-    gamma_curve = np.power(normalized, gamma)
-    centered = gamma_curve - 0.5
-    s_curve = gamma_curve + contrast_strength * centered * np.clip(1.0 - 4.0 * centered * centered, 0.0, 1.0)
-    global_lightness = 255.0 * np.clip(s_curve, 0.0, 1.0)
-    if strategy_id == "TONAL_DEPTH_RECOVERY":
+    tonal_curve_mode = "adaptive_gamma"
+    tonal_curve_source_points: list[float] = []
+    tonal_curve_target_points: list[float] = []
+    tonal_curve_strength = 0.0
+    spatial_layering_strength = 0.0
+    if global_underexposure and dynamic_range >= 20.0:
+        under_need = float(np.clip((100.0 - p50) / 50.0, 0.0, 1.0))
+        headroom_need = float(np.clip((220.0 - p99) / 80.0, 0.0, 1.0))
+        tonal_curve_strength = float(
+            np.clip((0.86 + 0.12 * max(under_need, headroom_need)) * scales["tone"] * (0.65 + 0.35 * scales["shadow"]), 0.0, 0.96)
+        )
+        source_points = np.array([0.0, p1, p10, p50, p90, p99, 255.0], dtype=np.float32)
+        for index in range(1, len(source_points)):
+            if source_points[index] <= source_points[index - 1]:
+                source_points[index] = min(255.0, source_points[index - 1] + 0.01)
+        target_anchors = np.array(
+            [p1, max(p10, 16.0), max(p50, 105.0), max(p90, 198.0), max(p99, 224.0)],
+            dtype=np.float32,
+        )
+        target_points = np.array(
+            [0.0, *(np.array([p1, p10, p50, p90, p99]) + (target_anchors - np.array([p1, p10, p50, p90, p99])) * tonal_curve_strength), 255.0],
+            dtype=np.float32,
+        )
+        target_points = np.maximum.accumulate(np.clip(target_points, 0.0, 255.0))
+        global_lightness = np.interp(lightness, source_points, target_points).astype(np.float32)
+        tonal_curve_mode = "coordinated_global_underexposure"
+        tonal_curve_source_points = [round(float(value), 3) for value in source_points]
+        tonal_curve_target_points = [round(float(value), 3) for value in target_points]
+    elif transparency_layering and dynamic_range >= 20.0:
+        tonal_curve_strength = float(np.clip((0.92 + 0.04 * haze_need) * scales["tone"], 0.0, 0.95))
+        source_points = np.array([0.0, p1, p10, p50, p90, p99, 255.0], dtype=np.float32)
+        for index in range(1, len(source_points)):
+            if source_points[index] <= source_points[index - 1]:
+                source_points[index] = min(255.0, source_points[index - 1] + 0.01)
+        target_anchors = np.array(
+            [
+                max(4.0, p1 - 22.0 - 3.0 * haze_need),
+                max(12.0, p10 - 13.0 - 2.5 * haze_need),
+                min(205.0, p50 + 7.0 + 2.0 * haze_need),
+                min(238.0, p90 + 27.0 + 4.0 * haze_need),
+                min(248.0, p99 + 38.0 + 4.0 * haze_need),
+            ],
+            dtype=np.float32,
+        )
+        target_points = np.array(
+            [0.0, *(np.array([p1, p10, p50, p90, p99]) + (target_anchors - np.array([p1, p10, p50, p90, p99])) * tonal_curve_strength), 255.0],
+            dtype=np.float32,
+        )
+        target_points = np.maximum.accumulate(np.clip(target_points, 0.0, 255.0))
+        global_lightness = np.interp(lightness, source_points, target_points).astype(np.float32)
+        tonal_curve_mode = "floating_black_transparency_layering"
+        tonal_curve_source_points = [round(float(value), 3) for value in source_points]
+        tonal_curve_target_points = [round(float(value), 3) for value in target_points]
+    else:
+        normalized = np.clip(lightness / 255.0, 0.0, 1.0)
+        gamma_curve = np.power(normalized, gamma)
+        centered = gamma_curve - 0.5
+        s_curve = gamma_curve + contrast_strength * centered * np.clip(1.0 - 4.0 * centered * centered, 0.0, 1.0)
+        global_lightness = 255.0 * np.clip(s_curve, 0.0, 1.0)
+    if strategy_id == "TONAL_DEPTH_RECOVERY" and not (global_underexposure or transparency_layering):
         measured_shadow_lift = float(np.clip((before_metrics["shadow_ratio"] - 0.12) * 28.0, 0.0, 5.0))
         shadow_lift = max(shadow_lift, measured_shadow_lift * scales["shadow"])
     shadow_weight = np.square(np.clip((142.0 - lightness) / 122.0, 0.0, 1.0))
@@ -647,11 +1366,28 @@ def _apply_adaptive_correction(
             separation_boost = float(np.clip((target_foreground_lift - current_foreground_lift) / max(response, 0.15), 0.0, 30.0))
             corrected_lightness = np.clip(corrected_lightness + safe_focus * separation_boost, 0.0, 255.0)
 
+    if transparency_layering:
+        spatial_layering_strength = float(
+            np.clip((0.095 + 0.075 * haze_need) * scales["detail"], 0.0, 0.15)
+        )
+        spatial_sigma = max(8.0, min(lightness.shape) * 0.025)
+        spatial_base = cv2.GaussianBlur(corrected_lightness, (0, 0), sigmaX=spatial_sigma)
+        spatial_detail = np.clip(corrected_lightness - spatial_base, -24.0, 24.0)
+        spatial_endpoint_gate = np.clip((corrected_lightness - 28.0) / 38.0, 0.0, 1.0)
+        spatial_endpoint_gate *= np.clip((232.0 - corrected_lightness) / 42.0, 0.0, 1.0)
+        spatial_face_hold = np.clip(1.0 - face_mask * 0.62, 0.38, 1.0)
+        corrected_lightness = np.clip(
+            corrected_lightness
+            + spatial_detail * spatial_layering_strength * spatial_endpoint_gate * spatial_face_hold,
+            0.0,
+            255.0,
+        )
+
     broad_detail = lightness - cv2.GaussianBlur(lightness, (0, 0), sigmaX=5.0)
     detail = lightness - cv2.GaussianBlur(lightness, (0, 0), sigmaX=1.15)
     dark_pixels = lightness < 72.0
     dark_noise_risk = float(np.mean(np.abs(detail[dark_pixels]))) if dark_pixels.any() else 0.0
-    clarity_strength = 0.0 if normal_image else float(np.clip(0.025 + 0.04 * visual_gain + 0.02 * haze_need, 0.025, 0.085))
+    clarity_strength = 0.0 if normal_image or pure_global_cast or transparency_layering else float(np.clip(0.025 + 0.04 * visual_gain + 0.02 * haze_need, 0.025, 0.085))
     clarity_strength *= scales["detail"]
     detail_weight = np.clip((corrected_lightness - 38.0) / 55.0, 0.0, 1.0)
     detail_weight *= np.clip((226.0 - corrected_lightness) / 65.0, 0.0, 1.0)
@@ -675,7 +1411,7 @@ def _apply_adaptive_correction(
     hsv = cv2.cvtColor(toned_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
     saturation = hsv[..., 1] / 255.0
     low_color_need = float(np.clip((0.28 - before_metrics["mean_saturation"]) / 0.22, 0.0, 1.0))
-    if normal_image:
+    if normal_image or pure_global_cast or transparency_layering:
         color_strength = 0.0
     elif strategy_id == "AUDITORIUM_STRONG_COLOR_DEPTH":
         color_strength = (0.012 + 0.035 * visual_gain) * (0.45 + 0.55 * low_color_need)
@@ -741,6 +1477,11 @@ def _apply_adaptive_correction(
         "black_reconstruction": round(black_reconstruction, 3),
         "subject_target_gain": round(subject_target_gain, 3),
         "skin_local_convergence_scale": round(skin_local_scale, 4),
+        "tonal_curve_mode": tonal_curve_mode,
+        "tonal_curve_source_points": tonal_curve_source_points,
+        "tonal_curve_target_points": tonal_curve_target_points,
+        "tonal_curve_strength": round(tonal_curve_strength, 4),
+        "spatial_layering_strength": round(spatial_layering_strength, 4),
     }
     analysis = {
         "exposure_state": "偏暗" if p50 < 108.0 else ("偏亮" if p50 > 174.0 else "基本正常"),
@@ -751,7 +1492,7 @@ def _apply_adaptive_correction(
         "secondary_issues": list(strategy["secondary_issues"]),
         "enabled_modules": list(strategy["enabled_modules"]),
         "module_order": list(strategy["enabled_modules"]),
-        "person_region_reliably_detected": bool(scene_analysis["face_count"] > 0 and float(face_mask.sum()) > 1.0),
+        "person_region_reliably_detected": bool(scene_analysis.get("person_present", scene_analysis["face_count"] > 0) and float(face_mask.sum()) > 1.0),
         "person_local_adjustment_enabled": bool(scene_analysis["face_count"] > 0 and local_strength > 0.0 and float(local_focus.sum()) > 1.0),
         "foreground_local_adjustment_enabled": bool(local_strength > 0.0 and float(local_focus.sum()) > 1.0),
         "highlight_background_protection_enabled": bool(scene_analysis["meeting_backlight_detected"] and float(background_mask.sum()) > 1.0),
@@ -771,6 +1512,10 @@ def _apply_adaptive_correction(
         "visual_severity_score": round(severity_score, 4),
         "visual_gain": round(visual_gain, 4),
         "visual_severity_components": dict(strategy.get("visual_severity_components") or {}),
+        "tonal_curve_mode": tonal_curve_mode,
+        "tonal_curve_source_points": list(tonal_curve_source_points),
+        "tonal_curve_target_points": list(tonal_curve_target_points),
+        "tonal_curve_strength": round(tonal_curve_strength, 4),
     }
     return colored_rgb, parameters, analysis
 
@@ -842,10 +1587,13 @@ def _review_white_balance(
     after_channels = np.array([candidate[..., channel][trusted].mean() for channel in range(3)])
     before_spread = float(np.ptp(before_channels))
     after_spread = float(np.ptp(after_channels))
+    # A small axis crossing inside the near-neutral zone is expected when a
+    # confirmed global cast is brought back toward neutral.  Treat it as a
+    # reversal only when the candidate leaves that natural tolerance again.
     reverse_overcorrection = bool(
         before_magnitude >= 1.0
         and (before_a * after_a + before_b * after_b) < 0.0
-        and after_magnitude > 1.5
+        and after_magnitude > 2.5
     )
     soft_deviation = bool(
         after_magnitude > before_magnitude + 1.35
@@ -1111,7 +1859,7 @@ def _post_process_review(
     candidate_factory: Callable[[dict[str, float]], tuple[np.ndarray, dict[str, Any], dict[str, Any]]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     strategy_id = str(analysis["strategy_id"])
-    normal_image = strategy_id == "NORMAL_DESIGN_PROTECTION"
+    normal_image = strategy_id in {"NORMAL_DESIGN_PROTECTION", "RISK_LIMITED_PROTECTION", "LOCAL_CORRECTION_REQUIRED"}
     strong_before = _region_saturation(source_rgb, strong_color_mask)
     attempts: list[dict[str, Any]] = []
     selected = candidate_rgb.astype(np.uint8)
@@ -1122,6 +1870,8 @@ def _post_process_review(
     detected_risks: list[str] = []
     soft_deviations: list[str] = []
     convergence_actions: list[str] = []
+    quality_flags: list[str] = []
+    reduction_reasons: dict[str, list[str]] = {}
     scales = {"tone": 1.0, "white_balance": 1.0, "shadow": 1.0, "person": 1.0, "skin": 1.0, "detail": 1.0, "color": 1.0}
     current = candidate_rgb.astype(np.uint8)
     final_candidate_level = "FULL"
@@ -1150,10 +1900,21 @@ def _post_process_review(
         background_gain = after["background_luminance"] - before_metrics["background_luminance"]
         violations: list[str] = []
         attempt_soft_deviations: list[str] = []
-        black_delta = abs(after["black_point"] - before_metrics["black_point"])
+        black_shift = after["black_point"] - before_metrics["black_point"]
+        black_delta = abs(black_shift)
         highlight_delta = after["highlight_ratio"] - before_metrics["highlight_ratio"]
         dynamic_range_loss = before_metrics["dynamic_range"] - after["dynamic_range"]
-        if normal_image and black_delta > 2.0:
+        transparency_curve = analysis.get("tonal_curve_mode") == "floating_black_transparency_layering"
+        if transparency_curve:
+            if black_shift > 5.0:
+                violations.append("通透层次整理反向抬高黑位")
+            elif black_shift < -22.0 or (after["black_point"] < 8.0 and black_shift < -8.0):
+                violations.append("通透层次整理造成黑位压死风险")
+            elif black_shift < -18.0:
+                attempt_soft_deviations.append("通透层次整理的黑位回落接近保护边界")
+            elif black_shift < -8.0:
+                attempt_soft_deviations.append("通透层次整理执行受控黑位回落")
+        elif normal_image and black_delta > 2.0:
             violations.append("正常图片黑位偏移超出保护范围")
         elif black_delta > 10.0:
             violations.append("黑位发生明显堵塞或漂移")
@@ -1198,6 +1959,21 @@ def _post_process_review(
             "noise_review": "暗部或彩色噪点放大风险",
             "sharpening_and_halo_review": "锐化过冲或光晕风险",
         }
+        quality_flag_by_violation = {
+            "通透层次整理反向抬高黑位": "BLACK_POINT_DRIFT",
+            "通透层次整理造成黑位压死风险": "BLACK_CRUSH",
+            "正常图片黑位偏移超出保护范围": "BLACK_POINT_DRIFT",
+            "黑位发生明显堵塞或漂移": "BLACK_POINT_DRIFT",
+            "高光出现明显损失": "HIGHLIGHT_LOSS",
+            "全局色彩强度发生明显损失": "SATURATION_LOSS",
+            "强色区域发生明显失真": "KEY_COLOR_DISTORTION",
+            "动态范围发生明显收缩": "DYNAMIC_RANGE_LOSS",
+            "正常图片亮度变化过大": "LUMINANCE_DRIFT",
+            "白平衡偏差风险": "WHITE_BALANCE_SHIFT",
+            "肤色偏差风险": "SKIN_TONE_SHIFT",
+            "暗部或彩色噪点放大风险": "NOISE_AMPLIFICATION",
+            "锐化过冲或光晕风险": "HALO_OR_OVERSHOOT",
+        }
         risk_keys = [key for key, value in checks.items() if value["status"] == "RISK"]
         violations.extend(risk_labels[key] for key in risk_keys)
         for key, value in checks.items():
@@ -1206,6 +1982,9 @@ def _post_process_review(
         for violation in violations:
             if violation not in detected_risks:
                 detected_risks.append(violation)
+            quality_flag = quality_flag_by_violation.get(violation)
+            if quality_flag and quality_flag not in quality_flags:
+                quality_flags.append(quality_flag)
         for deviation in attempt_soft_deviations:
             if deviation not in soft_deviations:
                 soft_deviations.append(deviation)
@@ -1227,29 +2006,57 @@ def _post_process_review(
             break
 
         previous_scales = dict(scales)
+
+        def reduce_responsible(parameter: str, multiplier: float, reason: str) -> None:
+            scales[parameter] *= multiplier
+            reasons = reduction_reasons.setdefault(parameter, [])
+            if reason not in reasons:
+                reasons.append(reason)
+
         if "white_balance_review" in risk_keys:
-            scales["white_balance"] *= 0.55
-            scales["color"] *= 0.75
+            reduce_responsible("white_balance", 0.55, "WHITE_BALANCE_SHIFT")
+            reduce_responsible("color", 0.75, "WHITE_BALANCE_SHIFT")
             convergence_actions.append("降低白平衡与通道修正后重新生成候选")
         if "skin_tone_review" in risk_keys:
-            scales["skin"] *= 0.45
+            reduce_responsible("skin", 0.45, "SKIN_TONE_SHIFT")
             convergence_actions.append("仅降低肤色区域处理强度后重新生成候选，保留全局明暗、层次与主体增益")
         if "noise_review" in risk_keys:
-            scales["shadow"] *= 0.55
-            scales["detail"] *= 0.45
+            reduce_responsible("shadow", 0.55, "NOISE_AMPLIFICATION")
+            reduce_responsible("detail", 0.45, "NOISE_AMPLIFICATION")
             convergence_actions.append("降低阴影提亮、清晰度与局部对比强度后重新生成候选")
         if "sharpening_and_halo_review" in risk_keys:
-            scales["detail"] *= 0.40
-            scales["tone"] *= 0.72
+            reduce_responsible("detail", 0.40, "HALO_OR_OVERSHOOT")
+            reduce_responsible("tone", 0.72, "HALO_OR_OVERSHOOT")
             convergence_actions.append("降低清晰度、锐化与局部对比强度后重新生成候选")
-        if any(item not in risk_labels.values() for item in violations):
-            scales["tone"] *= 0.72
-            scales["white_balance"] *= 0.70
-            scales["shadow"] *= 0.70
-            scales["person"] *= 0.75
-            scales["detail"] *= 0.68
-            scales["color"] *= 0.75
-            convergence_actions.append("降低整体处理强度后重新生成候选")
+        color_loss_responsibility = (
+            (("white_balance", 0.72),)
+            if analysis.get("white_balance_applied")
+            else (("color", 0.70),)
+        )
+        key_color_responsibility = (
+            (("white_balance", 0.72),)
+            if analysis.get("white_balance_applied")
+            else (("color", 0.60),)
+        )
+        direct_risk_actions = {
+            "通透层次整理反向抬高黑位": (("tone", 0.72), ("shadow", 0.70)),
+            "通透层次整理造成黑位压死风险": (("tone", 0.72), ("shadow", 0.70)),
+            "正常图片黑位偏移超出保护范围": (("tone", 0.72), ("shadow", 0.70)),
+            "黑位发生明显堵塞或漂移": (("tone", 0.72), ("shadow", 0.70)),
+            "高光出现明显损失": (("tone", 0.68),),
+            "全局色彩强度发生明显损失": color_loss_responsibility,
+            "强色区域发生明显失真": key_color_responsibility,
+            "动态范围发生明显收缩": (("tone", 0.72), ("shadow", 0.65)),
+            "正常图片亮度变化过大": (("tone", 0.70),),
+        }
+        for violation in violations:
+            responsible = direct_risk_actions.get(violation)
+            if not responsible:
+                continue
+            flag = quality_flag_by_violation[violation]
+            for parameter, multiplier in responsible:
+                reduce_responsible(parameter, multiplier, flag)
+            convergence_actions.append(f"仅降低{flag}责任参数后重新生成候选")
         if scales == previous_scales:
             break
 
@@ -1276,6 +2083,7 @@ def _post_process_review(
             "black_reconstruction": 0.0,
             "subject_target_gain": 0.0,
             "skin_local_convergence_scale": 0.0,
+            "spatial_layering_strength": 0.0,
         }
         selected_analysis = {
             "person_local_adjustment_enabled": False,
@@ -1308,6 +2116,23 @@ def _post_process_review(
         convergence_actions.append("候选未能安全收敛，采用接近原图的保护性结果")
 
     rollback_applied = final_candidate_level != "FULL"
+    evaluated_scales = next(
+        (
+            attempt["strength_scales"]
+            for attempt in reversed(attempts)
+            if attempt["candidate_level"] != "ORIGINAL"
+        ),
+        {key: 1.0 for key in scales},
+    )
+    strength_reduction_items = {
+        key: {
+            "initial": 1.0,
+            "final": round(float(evaluated_scales[key]), 4),
+            "responsible_quality_flags": reduction_reasons.get(key, []),
+        }
+        for key in scales
+        if float(evaluated_scales[key]) < 0.999
+    }
     selected_candidate_scope = "SKIN_LOCAL" if final_candidate_level.startswith("LOCAL_SKIN_") else ("FULL_IMAGE" if rollback_applied else "NONE")
     limited_checks = [
         key for key, value in selected_checks.items() if value["status"] in {"LOW_CONFIDENCE", "NOT_APPLICABLE"}
@@ -1321,11 +2146,14 @@ def _post_process_review(
         "attempts": attempts,
         "remaining_violations": selected_violations,
         "detected_risks": detected_risks,
+        "quality_flags": quality_flags,
         "hard_risks": detected_risks,
         "soft_deviations": soft_deviations,
         "convergence_actions": convergence_actions,
         "rollback_reason": "；".join(detected_risks) if rollback_applied else None,
         "final_candidate_level": final_candidate_level,
+        "strength_reduced": bool(strength_reduction_items),
+        "strength_reduction_items": strength_reduction_items,
         "limited_evidence_checks": limited_checks,
         **selected_checks,
         "_selected_parameters": selected_parameters,
@@ -1417,28 +2245,57 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
         and before["highlight_ratio"] <= 0.04
     )
     before["low_key_design_detected"] = low_key_design
-    if low_key_design:
+    perception = _perceptual_decision(
+        rgb,
+        faces,
+        face_mask,
+        before,
+        analysis,
+        color_features,
+        low_key_design,
+    )
+    analysis.update(perception)
+    analysis["person_present"] = bool(perception["person"]["present"])
+    suppress_global_white_balance = bool(
+        perception["global_cast_direction"] == "none"
+        or perception["processing_decision"] in {"ORIGINAL", "LOW", "LOCAL_REQUIRED"}
+    )
+    if low_key_design or suppress_global_white_balance:
         balanced = rgb.astype(np.float32)
         gains = [1.0, 1.0, 1.0]
+        reason = {
+            "mixed_light": "冷暖混合光环境保护",
+            "legitimate_warm": "合理暖光环境保护",
+            "strong_local_light": "局部强色光源保护",
+            "backlight_environment": "逆光环境局部处理，阻断全局白平衡",
+            "highlight_limited_evidence": "高光风险保护，中性色证据不用于全局校正",
+            "insufficient_global_evidence": "全局色偏证据不足",
+        }.get(str(perception["cast_interpretation"]), "低调设计色彩意图保护" if low_key_design else "环境与保护对象优先")
         white_balance = {
             "white_balance_confidence": 0.0,
-            "neutral_pixel_ratio": 0.0,
-            "color_cast": "低调设计色彩意图保护",
+            "neutral_pixel_ratio": perception["neutral_evidence_ratio"],
+            "color_cast": reason,
             "color_cast_magnitude": 0.0,
             "white_balance_applied": False,
-            "lab_neutral_cast_a": 0.0,
-            "lab_neutral_cast_b": 0.0,
+            "lab_neutral_cast_a": perception["neutral_cast_a"],
+            "lab_neutral_cast_b": perception["neutral_cast_b"],
         }
     else:
-        balanced, gains, white_balance = _neutral_white_balance(rgb)
-    strategy = _select_strategy(before, analysis, white_balance, color_features, low_key_design)
+        balanced, gains, white_balance = apply_safe_white_balance(rgb, perception)
+    strategy = _select_strategy(before, analysis, white_balance, color_features, low_key_design, perception)
     strategy.update(_visual_severity(before, analysis, strategy, white_balance))
-    if strategy["strategy_id"] == "NORMAL_DESIGN_PROTECTION":
+    if strategy["strategy_id"] in {"NORMAL_DESIGN_PROTECTION", "RISK_LIMITED_PROTECTION", "LOCAL_CORRECTION_REQUIRED"}:
         balanced = rgb.astype(np.float32)
         gains = [1.0, 1.0, 1.0]
         white_balance = {
             **white_balance,
-            "color_cast": "低调设计色彩意图保护" if low_key_design else "正常图片色彩关系保护",
+            "color_cast": (
+                "低调设计色彩意图保护"
+                if low_key_design
+                else "正常图片色彩关系保护"
+                if strategy["strategy_id"] == "NORMAL_DESIGN_PROTECTION"
+                else str(white_balance["color_cast"])
+            ),
             "white_balance_applied": False,
         }
     def build_candidate(strength_scales: dict[str, float]) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
@@ -1492,6 +2349,9 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
     analysis["convergence_actions"] = list(post_review["convergence_actions"])
     analysis["rollback_reason"] = post_review["rollback_reason"]
     analysis["final_candidate_level"] = post_review["final_candidate_level"]
+    analysis["quality_flags"] = list(post_review["quality_flags"])
+    analysis["strength_reduced"] = bool(post_review["strength_reduced"])
+    analysis["strength_reduction_items"] = dict(post_review["strength_reduction_items"])
     analysis["white_balance_review"] = dict(post_review["white_balance_review"])
     analysis["skin_tone_review"] = dict(post_review["skin_tone_review"])
     analysis["noise_review"] = dict(post_review["noise_review"])
@@ -1509,11 +2369,254 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
     analysis["strong_color_saturation_before"] = post_review["strong_color_saturation_before"]
     analysis["strong_color_saturation_after"] = post_review["strong_color_saturation_after"]
     analysis["parameter_rollback_applied"] = post_review["rollback_applied"]
-    analysis["result_conclusion"] = (
-        "当前图片无需明显校正，已按原有设计关系保护输出"
-        if analysis["normal_image_detected"]
-        else "图片已完成逐图策略校正，建议结合原图进行最终视觉确认"
+    d04_corrected = corrected.astype(np.uint8).copy()
+    v2_faces = _detect_local_faces(rgb, faces)
+    corrected, v2_global_gate = run_global_recovery(
+        rgb,
+        d04_corrected,
+        analysis,
+        v2_faces,
+        strong_color_mask,
+        before,
+        focus_mask,
+        background_mask,
+        person_masks=_local_person_masks,
+        metrics_fn=_metrics,
+        noise_fn=_review_noise,
+        halo_fn=_review_sharpening_and_halo,
     )
+    global_v2_applied = bool(
+        v2_global_gate["status"] == "PASS" and not np.array_equal(d04_corrected, corrected)
+    )
+    if global_v2_applied:
+        analysis["final_candidate_level"] = (
+            "COLOR_CORE_V2_FULL"
+            if v2_global_gate.get("selected_strength") == 1.0
+            else "COLOR_CORE_V2_REDUCED"
+        )
+    pre_local_corrected = corrected.astype(np.uint8).copy()
+    global_fallback = analysis["final_candidate_level"] == "ORIGINAL" and not global_v2_applied
+    local_eligible = bool(
+        analysis["processing_decision"] == "LOCAL_REQUIRED" and not global_fallback
+    )
+    if local_eligible:
+        local_faces = v2_faces
+        corrected, local_parameters, local_analysis = _apply_local_person_correction(
+            pre_local_corrected,
+            local_faces,
+            analysis,
+            strong_screen_mask,
+        )
+    elif analysis["processing_decision"] == "LOCAL_REQUIRED" and global_fallback:
+        corrected = pre_local_corrected.copy()
+        local_parameters = {"mode": "skipped_global_fallback", "strength": 0.0}
+        local_analysis = {
+            "local_executor_applied": False,
+            "local_execution": "skipped_global_fallback",
+            "local_output_policy": "ORIGINAL_FALLBACK",
+            "local_rollback_applied": False,
+            "local_face_count": 0,
+        }
+    else:
+        corrected, local_parameters, local_analysis = _apply_local_person_correction(
+            pre_local_corrected,
+            [],
+            analysis,
+            strong_screen_mask,
+        )
+    analysis.update(local_analysis)
+    d03_corrected = corrected.astype(np.uint8).copy()
+    v2_local_faces = (
+        _detect_local_faces(d03_corrected, _detect_faces(d03_corrected))
+        if local_eligible
+        else []
+    )
+    corrected, v2_local_gate = run_local_recovery(
+        d03_corrected,
+        analysis,
+        v2_local_faces,
+        person_masks=_local_person_masks,
+        color_features=_color_region_features,
+        noise_fn=_review_noise,
+        halo_fn=_review_sharpening_and_halo,
+    )
+    local_v2_applied = bool(
+        v2_local_gate["status"] == "PASS" and not np.array_equal(d03_corrected, corrected)
+    )
+    if local_v2_applied:
+        local_parameters = {**local_parameters, "color_core_v2": v2_local_gate.get("execution", {})}
+        analysis.update(
+            {
+                "local_executor_applied": True,
+                "local_execution": LOCAL_ROUTE_NAME,
+                "local_output_policy": "D03_BASELINE_PLUS_COLOR_CORE_V2",
+                "local_rollback_applied": False,
+            }
+        )
+    v2_strength_reduced = bool(
+        v2_global_gate.get("strength_reduced") or v2_local_gate.get("strength_reduced")
+    )
+    if v2_strength_reduced:
+        analysis["strength_reduced"] = True
+        reduction_items = dict(analysis["strength_reduction_items"])
+        if v2_global_gate.get("strength_reduced"):
+            reduction_items["color_core_v2_global"] = float(v2_global_gate.get("selected_strength", 0.0))
+        if v2_local_gate.get("strength_reduced"):
+            reduction_items["color_core_v2_local"] = float(v2_local_gate.get("selected_strength", 0.0))
+        analysis["strength_reduction_items"] = reduction_items
+    analysis["color_core_v2"] = {
+        "version": COLOR_CORE_V2_VERSION,
+        "global_route": GLOBAL_ROUTE_NAME,
+        "local_route": LOCAL_ROUTE_NAME,
+        "global_applied": global_v2_applied,
+        "local_applied": local_v2_applied,
+        "runtime_ground_truth_used": False,
+    }
+    analysis["safety_gate_v2"] = {
+        "version": COLOR_CORE_V2_VERSION,
+        "position": "FORMAL_FINAL_COLOR_OUTPUT_CHAIN",
+        "global": v2_global_gate,
+        "local": v2_local_gate,
+        "runtime_ground_truth_used": False,
+    }
+    analysis["runtime_ground_truth_used"] = False
+    analysis["pre_local_pixel_changed"] = bool(not np.array_equal(rgb, pre_local_corrected))
+    analysis["local_pixel_changed"] = bool(not np.array_equal(pre_local_corrected, corrected))
+    protective_strategies = {"NORMAL_DESIGN_PROTECTION", "RISK_LIMITED_PROTECTION", "LOCAL_CORRECTION_REQUIRED"}
+    global_algorithm_applied = bool(
+        global_v2_applied
+        or (
+            analysis["strategy_id"] not in protective_strategies
+            and analysis["final_candidate_level"] != "ORIGINAL"
+        )
+    )
+    algorithm_applied = bool(global_algorithm_applied or analysis["local_executor_applied"])
+    algorithm_pixel_changed = bool(not np.array_equal(rgb, corrected)) if algorithm_applied else False
+    analysis["global_algorithm_applied"] = global_algorithm_applied
+    analysis["algorithm_applied"] = algorithm_applied
+    analysis["algorithm_pixel_changed"] = algorithm_pixel_changed
+    if global_v2_applied:
+        global_execution = GLOBAL_ROUTE_NAME
+    elif not global_algorithm_applied:
+        global_execution = "none"
+    elif adaptive_parameters.get("tonal_curve_mode") == "coordinated_global_underexposure":
+        global_execution = "coordinated_global_tonal_recovery"
+    elif adaptive_parameters.get("tonal_curve_mode") == "floating_black_transparency_layering":
+        global_execution = "transparency_and_layering"
+    elif analysis["white_balance_applied"]:
+        global_execution = "global_white_balance"
+    else:
+        global_execution = "adaptive_existing_executor"
+    analysis["global_execution"] = global_execution
+    local_quality_flags: list[str] = []
+    if analysis.get("local_rollback_applied"):
+        if analysis.get("local_execution") in {
+            "blocked_insufficient_person_evidence",
+            "blocked_insufficient_contamination_evidence",
+        }:
+            local_quality_flags.append("LOCAL_EVIDENCE_INSUFFICIENT")
+        if analysis.get("local_target_quality_pass") is False:
+            local_quality_flags.append("LOCAL_TARGET_NEGATIVE_GAIN")
+        if analysis.get("local_non_target_drift_pass") is False:
+            local_quality_flags.append("LOCAL_NON_TARGET_DRIFT")
+        if analysis.get("local_blend_quality_pass") is False:
+            local_quality_flags.append("LOCAL_BLEND_OR_HALO_RISK")
+    analysis["quality_flags"].extend(
+        flag for flag in local_quality_flags if flag not in analysis["quality_flags"]
+    )
+    if global_fallback:
+        global_quality_gate = "FALLBACK_ORIGINAL"
+    elif analysis["strength_reduced"]:
+        global_quality_gate = "ACCEPTED_REDUCED"
+    elif global_algorithm_applied:
+        global_quality_gate = "ACCEPTED_FULL"
+    else:
+        global_quality_gate = "ACCEPTED_PROTECTED_ORIGINAL"
+    if local_v2_applied:
+        local_quality_gate = "ACCEPTED_SAFETY_GATE_V2"
+    elif analysis["processing_decision"] != "LOCAL_REQUIRED":
+        local_quality_gate = "NOT_REQUIRED"
+    elif global_fallback:
+        local_quality_gate = "SKIPPED_GLOBAL_FALLBACK"
+    elif analysis["local_executor_applied"]:
+        local_quality_gate = "ACCEPTED"
+    else:
+        local_quality_gate = "ROLLED_BACK_TO_GLOBAL"
+    if global_fallback:
+        rollback_level = "ORIGINAL_FALLBACK"
+        final_decision = "ORIGINAL_FALLBACK"
+    elif analysis.get("local_rollback_applied"):
+        rollback_level = "GLOBAL_ACCEPTED"
+        final_decision = "GLOBAL_ACCEPTED_AFTER_LOCAL_ROLLBACK"
+    elif analysis["strength_reduced"]:
+        rollback_level = "GLOBAL_STRENGTH_REDUCED"
+        final_decision = "FINAL_ACCEPTED"
+    elif analysis["processing_decision"] == "ORIGINAL" and not algorithm_applied:
+        rollback_level = "NONE"
+        final_decision = "ORIGINAL_PROTECTED"
+    else:
+        rollback_level = "NONE"
+        final_decision = "FINAL_ACCEPTED"
+    analysis.update(
+        {
+            "initial_decision": analysis["processing_decision"],
+            "global_applied": global_algorithm_applied,
+            "global_execution": global_execution,
+            "global_quality_gate": global_quality_gate,
+            "local_applied": bool(analysis["local_executor_applied"]),
+            "local_execution": analysis["local_execution"],
+            "local_quality_gate": local_quality_gate,
+            "rollback_level": rollback_level,
+            "final_decision": final_decision,
+            "processing_stages": [
+                {"stage": "ORIGINAL", "status": "AVAILABLE"},
+                {"stage": "GLOBAL_CANDIDATE", "status": "GENERATED"},
+                {"stage": "GLOBAL_ACCEPTED", "status": global_quality_gate},
+                {
+                    "stage": "LOCAL_CANDIDATE",
+                    "status": (
+                        "GENERATED_ACCEPTED"
+                        if analysis["local_executor_applied"]
+                        else "GENERATED_ROLLED_BACK"
+                        if analysis.get("local_rollback_applied")
+                        else "SKIPPED_GLOBAL_FALLBACK"
+                        if global_fallback and analysis["processing_decision"] == "LOCAL_REQUIRED"
+                        else "NOT_REQUIRED"
+                    ),
+                },
+                {"stage": "FINAL", "status": final_decision},
+            ],
+        }
+    )
+    if local_v2_applied:
+        analysis["algorithm_execution"] = LOCAL_ROUTE_NAME
+        analysis["result_conclusion"] = "已完成D-03人物局部处理与Color Core V2多光源颜色场恢复，并通过Safety Gate 2.0"
+    elif global_v2_applied:
+        analysis["algorithm_execution"] = GLOBAL_ROUTE_NAME
+        analysis["result_conclusion"] = "已完成Color Core V2跨通道全局颜色恢复，并通过Safety Gate 2.0"
+    elif analysis["local_executor_applied"]:
+        analysis["algorithm_execution"] = analysis["local_execution"]
+        analysis["result_conclusion"] = (
+            "已在D-02处理结果上完成受控人物局部校正，非目标区域通过漂移门禁"
+        )
+    elif not algorithm_applied and analysis["processing_decision"] == "LOCAL_REQUIRED":
+        analysis["algorithm_execution"] = "blocked_pending_local_executor"
+        analysis["result_conclusion"] = "局部证据或质量门禁不足，已回退到D-02处理结果"
+    elif not algorithm_applied:
+        analysis["algorithm_execution"] = "none"
+        analysis["result_conclusion"] = "未执行颜色或明暗算法变换，按原有设计关系保护输出"
+    elif adaptive_parameters.get("tonal_curve_mode") == "coordinated_global_underexposure":
+        analysis["algorithm_execution"] = "coordinated_global_tonal_recovery"
+        analysis["result_conclusion"] = "已完成全局欠曝的五级明暗协调恢复，建议结合原图复核"
+    elif adaptive_parameters.get("tonal_curve_mode") == "floating_black_transparency_layering":
+        analysis["algorithm_execution"] = "transparency_and_layering"
+        analysis["result_conclusion"] = "已完成黑位、中间调与白场的通透层次整理，建议结合原图复核"
+    elif analysis["white_balance_applied"]:
+        analysis["algorithm_execution"] = "global_white_balance"
+        analysis["result_conclusion"] = "已完成可信全局色偏恢复，建议结合原图复核"
+    else:
+        analysis["algorithm_execution"] = "adaptive_existing_executor"
+        analysis["result_conclusion"] = "图片已完成逐图策略校正，建议结合原图进行最终视觉确认"
     if alpha is not None:
         output_array = np.dstack([corrected, alpha])
         output_image = Image.fromarray(output_array, mode="RGBA")
@@ -1577,6 +2680,14 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
         applied_actions.append("人物肤色与身份特征保护")
     if analysis.get("skin_local_convergence_applied"):
         applied_actions.append("肤色风险已局部收敛，保留全局明暗与空间层次")
+    if analysis.get("local_execution") == "local_person_exposure" and analysis.get("local_executor_applied"):
+        applied_actions.append("人物脸部与上半身中间调局部恢复")
+    if analysis.get("local_execution") == "led_local_contamination" and analysis.get("local_executor_applied"):
+        applied_actions.append("人物局部LED蓝光污染受控降低")
+    if global_v2_applied:
+        applied_actions.append("Color Core V2跨通道综合色彩恢复")
+    if local_v2_applied:
+        applied_actions.append("Color Core V2多光源人物局部颜色场恢复")
     if analysis["clarity_enabled"]:
         applied_actions.append("受控清晰度与暗部噪声保护")
     detected_issues: list[str] = [analysis["primary_issue"]]
@@ -1608,6 +2719,8 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
         improvements.append("深色区域堵塞比例已降低")
     if analysis["meeting_backlight_detected"]:
         improvements.append(f"人物提亮相对背景多 {gain_advantage:.1f}，高亮背景受保护")
+    if analysis.get("local_executor_applied"):
+        improvements.append("局部执行器已通过非目标漂移与自然融合门禁")
     if analysis["normal_image_detected"]:
         improvements.append("正常图片采用低强度保护性处理，避免不必要改色")
     if analysis["strong_color_protection_enabled"]:
@@ -1632,6 +2745,8 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
         "strategy_id": analysis["strategy_id"],
         "enabled_modules": list(analysis["enabled_modules"]),
         "post_process_review": analysis["post_process_review"],
+        "color_core_v2": analysis["color_core_v2"],
+        "safety_gate_v2": analysis["safety_gate_v2"],
         "jpeg_quality": encoding.get("quality"),
         "jpeg_subsampling": encoding.get("subsampling"),
         "source_bytes_per_pixel": encoding.get("source_bytes_per_pixel"),
@@ -1639,6 +2754,25 @@ def process_single_image(source_path: str | Path, output_path: str | Path) -> Co
         "skin_tone_protection": analysis["skin_tone_protection_enabled"],
         "highlight_background_protection": analysis["highlight_background_protection_enabled"],
         "noise_protection": analysis["noise_protection_enabled"],
+        "algorithm_applied": algorithm_applied,
+        "algorithm_execution": analysis["algorithm_execution"],
+        "quality_control": {
+            "initial_decision": analysis["initial_decision"],
+            "global_applied": analysis["global_applied"],
+            "global_execution": analysis["global_execution"],
+            "global_quality_gate": analysis["global_quality_gate"],
+            "local_applied": analysis["local_applied"],
+            "local_execution": analysis["local_execution"],
+            "local_quality_gate": analysis["local_quality_gate"],
+            "strength_reduced": analysis["strength_reduced"],
+            "strength_reduction_items": analysis["strength_reduction_items"],
+            "rollback_level": analysis["rollback_level"],
+            "quality_flags": analysis["quality_flags"],
+            "final_decision": analysis["final_decision"],
+            "algorithm_applied": analysis["algorithm_applied"],
+            "processing_stages": analysis["processing_stages"],
+        },
+        "local_executor": local_parameters,
     }
 
     return ColorCorrectionResult(

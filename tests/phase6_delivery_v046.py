@@ -150,6 +150,9 @@ def run_golden() -> dict[str, Any]:
 def run_api_checks() -> dict[str, Any]:
     from fastapi.testclient import TestClient
     import engine.pipeline as engine_pipeline
+    from tests.support.app_runtime import activate_test_app_runtime
+
+    activate_test_app_runtime("phase6-delivery-v046-api")
     from main import build_web_app, default_output_dir
 
     calls: list[dict[str, Any]] = []

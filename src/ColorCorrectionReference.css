@@ -1,0 +1,229 @@
+.hdde-reference-tabs,
+.hdde-reference-input-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.hdde-reference-tabs {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.hdde-reference-tabs button {
+  flex: 0 0 112px;
+  width: 112px;
+  height: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 9px 15px;
+  border-radius: 8px;
+  line-height: 1.2;
+}
+
+.hdde-reference-tabs button,
+.hdde-reference-input-actions button {
+  min-height: 44px;
+}
+
+.hdde-reference-input {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.hdde-reference-input h3,
+.hdde-reference-input p {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.hdde-reference-input input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.hdde-reference-input-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.hdde-reference-input-preview img {
+  width: 100px;
+  height: 75px;
+  object-fit: contain;
+}
+
+.hdde-reference-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, .6fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.hdde-reference-comparison figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.hdde-reference-comparison figcaption {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.hdde-reference-comparison img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+}
+
+@media (max-width: 760px) {
+  .hdde-reference-comparison {
+    grid-template-columns: 1fr;
+  }
+  .hdde-reference-comparison-input {
+    max-width: 240px;
+  }
+}
+
+/* S64-B level pick: original / light / medium / strong, user chooses */
+.hdde-level-pick {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.hdde-level-measure {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--brand-primary-soft);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.hdde-level-measure p {
+  margin: 0;
+}
+
+.hdde-level-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.hdde-level-option {
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 2px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--card-background);
+}
+
+.hdde-level-option[data-selected="true"] {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 3px var(--brand-primary-soft);
+}
+
+.hdde-level-zoom-trigger {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.hdde-level-zoom-trigger img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+}
+
+.hdde-level-option figcaption {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.hdde-level-option label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.hdde-level-option em {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--brand-primary);
+  color: var(--brand-primary-contrast);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.hdde-level-option small {
+  color: var(--text-secondary);
+}
+
+.hdde-level-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.hdde-level-actions button {
+  min-height: 44px;
+}
+
+.hdde-level-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: rgba(10, 12, 16, 0.92);
+  cursor: zoom-out;
+}
+
+.hdde-level-zoom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  color: #fff;
+}
+
+.hdde-level-zoom-body {
+  overflow: auto;
+}
+
+.hdde-level-zoom-body img {
+  display: block;
+  max-width: none;
+  margin: 0 auto;
+}
+
+@media (max-width: 900px) {
+  .hdde-level-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

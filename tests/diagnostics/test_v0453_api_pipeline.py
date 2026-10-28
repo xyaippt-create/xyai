@@ -271,6 +271,9 @@ def run_failed_sse_check(app, client) -> dict:
 
 def main() -> int:
     from fastapi.testclient import TestClient
+    from tests.support.app_runtime import activate_test_app_runtime
+
+    activate_test_app_runtime("diagnostics-v0453-api-pipeline")
     from main import build_web_app
 
     output_dir = PROJECT_ROOT / "tests" / "diagnostics" / "output" / "api"

@@ -7,6 +7,26 @@ import {
   modeApplicability,
 } from "./longImagePolicy.js";
 
+export const TARGET_FORMAT_OPTIONS = Object.freeze([
+  { value: "SMART_COMPRESSION", label: "智能压缩（推荐）" },
+  { value: "PRESERVE_FORMAT", label: "保持原格式" },
+  { value: "JPEG", label: "JPG" },
+  { value: "PNG", label: "PNG" },
+  { value: "WEBP", label: "WebP" },
+]);
+
+const TARGET_FORMAT_HELPERS = Object.freeze({
+  SMART_COMPRESSION: "在安全范围内自动选择更小的合格结果；透明图片默认保留原格式。",
+  PRESERVE_FORMAT: "保持原图片格式，仅优化当前格式。",
+  JPEG: "统一输出为 JPG。",
+  PNG: "统一输出为 PNG。",
+  WEBP: "统一输出为 WebP，部分软件可能不兼容。",
+});
+
+export function targetFormatHelper(targetFormat) {
+  return TARGET_FORMAT_HELPERS[targetFormat] || TARGET_FORMAT_HELPERS.SMART_COMPRESSION;
+}
+
 function withEstimatedDimensions(plan, fileInfo) {
   if (!plan.valid) return plan;
   const estimated = estimateOutputDimensions(fileInfo.width, fileInfo.height, plan.params);
@@ -155,6 +175,7 @@ function resizePlan({
 export function buildCompressionRequestPlan({
   fileInfo,
   mode,
+  targetFormat = "SMART_COMPRESSION",
   resizeStrategy = "short_side",
   shortSidePreset = "1080",
   customShortSide = "",
@@ -165,6 +186,18 @@ export function buildCompressionRequestPlan({
   longImageRiskConfirmed = false,
 }) {
   if (!fileInfo) return { valid: false, message: "选择图片后即可设置处理参数。", params: {} };
+  if (mode === "DELIVERY_OPTIMIZATION") {
+    const normalizedTarget = String(targetFormat || "SMART_COMPRESSION").toUpperCase();
+    if (!TARGET_FORMAT_OPTIONS.some((item) => item.value === normalizedTarget)) {
+      return { valid: false, severity: "danger", message: "请选择有效的目标格式。", params: {} };
+    }
+    return {
+      valid: true,
+      message: targetFormatHelper(normalizedTarget),
+      params: { target_format: normalizedTarget },
+    };
+  }
+  if (fileInfo.format === "WEBP") return { valid: false, message: "WebP 当前仅支持交付方案中的保格式压缩或明确格式转换。", params: {} };
   const applicability = modeApplicability(fileInfo, mode);
   if (!applicability.applicable) {
     return {

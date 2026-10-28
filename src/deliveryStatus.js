@@ -1,60 +1,24 @@
 const LIMITATION_STATUS = "PASS_WITH_LIMITATION";
 
-const LIMITATION_REASON_TOKENS = [
-  "PASS_WITH_LIMITATION",
-  "manual_review",
-  "quality_1080p_gate_not_fully_passed",
-  "smooth_region_guard",
-  "very_large_size_limited_benefit",
-  "limited_benefit",
-  "size_guard",
-  "quality_gate_not_fully_passed",
-];
-
 function readNumber(payload, key) {
   const value = payload?.[key];
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function hasLimitationReason(payload) {
-  const text = [
-    payload?.final_delivery_status,
-    payload?.final_delivery_reason,
-    payload?.final_delivery_risk_level,
-    payload?.final_delivery_recommended_usage,
-    payload?.quality_1080p_level,
-    payload?.phase6_size_fallback_reason,
-    payload?.phase6_smooth_region_fallback_reason,
-    payload?.phase4_fallback_reason,
-    payload?.warnings,
-  ]
-    .flat()
-    .filter(Boolean)
-    .join(" ");
-  return LIMITATION_REASON_TOKENS.some((token) => text.includes(token));
-}
-
 export function resolveDeliveryStatus(...sources) {
   const payload = Object.assign({}, ...sources.filter(Boolean));
   const rawStatus = String(payload.final_delivery_status || payload.delivery_status || "").toUpperCase();
-  const textScore = readNumber(payload, "text_clarity_score");
-  const textureScore = readNumber(payload, "texture_score");
-  const edgeScore = readNumber(payload, "edge_quality_score");
-  const lowScore =
-    (textScore !== null && textScore < 60) ||
-    (textureScore !== null && textureScore < 60) ||
-    (edgeScore !== null && edgeScore < 65);
-  const limited = rawStatus === LIMITATION_STATUS || lowScore || hasLimitationReason(payload);
+  const limited = rawStatus === LIMITATION_STATUS;
 
-  if (rawStatus === "FAIL" || rawStatus === "REJECT") {
+  if (["FAIL", "FAILED", "REJECT", "REJECTED"].includes(rawStatus)) {
     return {
       status: "FAIL",
-      label: "不建议交付",
-      badge: "不建议交付",
+      label: "不可使用",
+      badge: "不可使用",
       tone: "var(--status-danger)",
       border: "color-mix(in srgb, var(--status-danger) 40%, var(--border-color))",
-      description: "系统检测到交付风险，不建议作为正式成品使用。",
+      description: "系统检测到明确风险，请回到原图或调整输入后重新处理。",
       limited,
     };
   }
@@ -62,11 +26,11 @@ export function resolveDeliveryStatus(...sources) {
   if (limited) {
     return {
       status: LIMITATION_STATUS,
-      label: "建议人工复核",
-      badge: "1080P 本地预览",
+      label: "建议复核",
+      badge: "建议复核",
       tone: "var(--status-warning)",
       border: "color-mix(in srgb, var(--status-warning) 40%, var(--border-color))",
-      description: "成品已生成，但存在质量门、体积收益比、低分指标或保护策略限制，正式使用前建议人工查看。",
+      description: "结果已生成，但保护策略或质量条件提示需要查看关键局部后再使用。",
       limited: true,
     };
   }
@@ -74,22 +38,22 @@ export function resolveDeliveryStatus(...sources) {
   if (rawStatus === "PASS") {
     return {
       status: "PASS",
-      label: "可交付",
-      badge: "1080P 高清成品",
+      label: "已改善",
+      badge: "可直接使用",
       tone: "var(--status-success)",
       border: "color-mix(in srgb, var(--status-success) 40%, var(--border-color))",
-      description: "最终交付门通过，可用于 1080P 本地交付。",
+      description: "处理结果通过必要保护检查，可直接进入后续交付。",
       limited: false,
     };
   }
 
   return {
     status: "WAITING",
-    label: "等待判定",
-    badge: "1080P 本地预览",
+    label: "待确认",
+    badge: "待确认",
     tone: "var(--text-secondary)",
     border: "var(--border-color)",
-    description: "等待后端交付状态或人工确认。",
+    description: "正在等待处理结果或必要确认。",
     limited: false,
   };
 }
@@ -158,7 +122,7 @@ export function resolveReviewReasonTags(...sources) {
     tags.push({ label: "文件体积增长明显", detail: `体积倍率 ${sizeGrowth.toFixed(2)}，建议确认交付场景是否接受。` });
   }
   if (text.includes("quality_1080p_gate_not_fully_passed") || text.includes("quality_gate_not_fully_passed")) {
-    tags.push({ label: "1080P 质量门未完全通过", detail: "后端已输出成品，但前台按 RC1 规则提示复核。" });
+    tags.push({ label: "保护检查需复核", detail: "结果已生成，但质量保护条件尚未完全通过。" });
   }
   if (text.includes("smooth_region_guard") || payload.phase6_smooth_region_fallback === true) {
     tags.push({ label: "平滑区域保护触发", detail: "天空、白底、渐变或低频区域采用更保守保护策略。" });
@@ -186,13 +150,13 @@ export function resolveBenefitTag(...sources) {
   const sizeGrowth = readNumber(payload, "phase6_size_growth_ratio") ?? readNumber(payload, "file_size_ratio");
 
   if (delivery.status === "FAIL") {
-    return { label: "不建议通过", detail: "当前结果存在交付风险，不建议作为正式成品使用。", tone: "var(--status-danger)" };
+    return { label: "不可使用", detail: "当前结果存在明确风险，请调整输入后重新处理。", tone: "var(--status-danger)" };
   }
   if (delivery.status === LIMITATION_STATUS) {
     if (sizeGrowth !== null && sizeGrowth > 10 && (visibleBenefit === null || visibleBenefit < 3)) {
       return { label: "低收益提示", detail: "成品已生成，但体积增长或指标限制使收益需要人工确认。", tone: "var(--status-warning)" };
     }
-    return { label: "建议人工复核", detail: "成品可预览，但正式使用前应查看关键局部。", tone: "var(--status-warning)" };
+    return { label: "建议复核", detail: "结果可预览，但正式使用前应查看关键局部。", tone: "var(--status-warning)" };
   }
   if ((visibleBenefit !== null && visibleBenefit >= 4) || (clarityScore !== null && clarityScore >= 85 && textureScore !== null && textureScore >= 60)) {
     return { label: "明显提升", detail: "指标显示清晰度或材质收益较明确，仍建议查看局部确认。", tone: "var(--status-success)" };
@@ -211,12 +175,12 @@ export function resolveReportCenterMeta(...sources) {
   const benefit = resolveBenefitTag(payload);
   const limitationExplanation =
     delivery.status === LIMITATION_STATUS
-      ? "“建议人工复核”不是失败。它表示成品已生成，但文字、材质、边缘、体积收益比或保护策略触发了 RC1 保守交付提示，正式使用前建议人工查看。"
+      ? "“建议复核”不是失败。结果已经生成，但文字、材质、边缘、体积收益或保护策略需要你查看关键局部后再决定是否使用。"
       : delivery.status === "PASS"
-        ? "当前结果满足前台 RC1 可交付口径，可作为 1080P 高清成品查看。"
+        ? "当前结果已通过必要保护检查，可直接查看并进入后续交付。"
         : delivery.status === "FAIL"
-          ? "当前结果不建议交付，需要回到原图或调整输入后重新处理。"
-          : "当前仍在等待后端任务或质量字段。";
+          ? "当前结果不可使用，需要回到原图或调整输入后重新处理。"
+          : "当前仍在等待处理结果或必要确认。";
 
   return {
     delivery,

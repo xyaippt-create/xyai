@@ -71,6 +71,7 @@ def evaluate_delivery_gate(
     visual_review_status: VisualReviewStatus | str,
     *,
     strict_lossless_evidence: bool = False,
+    automated_quality_evidence: bool = False,
     evidence_candidate: bool = False,
     risk_reasons: Iterable[str] = (),
 ) -> DeliveryDecision:
@@ -151,6 +152,14 @@ def evaluate_delivery_gate(
             DeliveryGateStatus.DELIVERY_READY,
             True,
             "Strict lossless hard evidence is complete; visual review is not required.",
+            CandidateDeliveryRole.DELIVERY_CANDIDATE,
+            risks,
+        )
+    if processed and visual is VisualReviewStatus.NOT_REQUIRED and automated_quality_evidence:
+        return DeliveryDecision(
+            DeliveryGateStatus.DELIVERY_READY,
+            True,
+            "The persisted candidate passed the automated delivery quality gate.",
             CandidateDeliveryRole.DELIVERY_CANDIDATE,
             risks,
         )

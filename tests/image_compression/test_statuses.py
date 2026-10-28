@@ -52,6 +52,17 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(decision.eligible)
         self.assertEqual(decision.status, DeliveryGateStatus.REVIEW_REQUIRED)
 
+    def test_automated_quality_evidence_can_release_processed_jpg(self) -> None:
+        decision = evaluate_delivery_gate(
+            TechnicalStatus.TARGET_MET_WITH_REENCODE,
+            VisualReviewStatus.NOT_REQUIRED,
+            automated_quality_evidence=True,
+            evidence_candidate=True,
+        )
+        self.assertEqual(decision.status, DeliveryGateStatus.DELIVERY_READY)
+        self.assertTrue(decision.eligible)
+        self.assertEqual(decision.candidate_role, CandidateDeliveryRole.DELIVERY_CANDIDATE)
+
 
 if __name__ == "__main__":
     unittest.main()

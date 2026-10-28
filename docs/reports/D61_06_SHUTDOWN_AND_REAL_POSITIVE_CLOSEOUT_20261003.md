@@ -1,0 +1,27 @@
+# D61-06｜退出生命周期与真实正链收口
+
+STATUS=PASS_AND_FROZEN
+FREEZE_STATUS=D61已冻结
+NEXT=立即执行S61-OC-02R
+
+VERSION=0.6.1-dev；BRANCH=codex/image-processing-routing-v1；HEAD=aa0dd93265d270eb5192ebbd44a1fe14488d454a；STAGING=EMPTY。受保护dirty全部保留，无Git写操作。用户最新明确指定本聊天独占D61-06，另一D线保持只读；D61-08不同门禁不作为本轮合同。
+
+SHUTDOWN_ROOT_CAUSE=后端实际为启动器进程内非daemon线程，并无独立后端子进程。历史三次失败的desktop-first/diagnose/trace日志记录Proactor _call_connection_lost→socket.shutdown的WinError10054；当前Python源码该异常跳过close/_detach，Uvicorn连接/任务均为空时仍可能等待asyncio.Server.wait_closed。关闭事件和should_exit已送达，线程未退出是后端连接释放阻塞。这里的遗漏detach归因由真实历史异常、等待记录及当前依赖源码共同支持；本轮七个轻量桌面/断连诊断均正常，没有伪称新增复现失败。全局trace观察器造成启动超时及早期conhost统计误判均保留为观察器问题，排除出产品失败/通过计数。
+
+FILES_MODIFIED=runtime/packaged_launcher.py；tests/test_packaged_runtime.py；docs/09_CODEX_CHANGELOG.md；本报告；独立证据与派生测试输入。逐阶段patch见output/playwright/d61-06-closeout-20261003/packaged_launcher.patch、test_packaged_runtime.patch。
+
+IMPLEMENTATION=仅正式桌面后端使用局部SelectorEventLoop工厂，避免已观察到的Proactor释放路径；Uvicorn正常关闭连接/任务等待上限5秒，保留启动器15秒正常等待、finally清理及失败报告。首次/processing检查和D61-05刷新修复不变。重复should_exit/stop设置仍幂等。没有后端子进程，故不新增猜测PID、进程名扫描、强制杀线程或共享服务；没有扩大为子进程架构。真实双Uvicorn服务测试证明重复关闭一个服务不影响另一服务，全局loop policy不变。
+
+TESTS=启动器16/16（新增真实双服务退出隔离测试）；D61 Python70/70；输出中心Python57/57，共143/143，无跳过。前端380/380，fail0/skip0；production build通过，输出到独立production-build目录，未覆盖正式dist。初版loop工厂接口返回class的错误由新测试捕获并修正为当前Uvicorn要求的loop实例；初始Node沙箱EPERM在自动审核许可后真实通过，没有修改业务断言来清零。
+
+REAL_RUNTIME=正式production dist、正式D:\影界文件、原生EdgeChromium窗口。关闭重开10轮，另外真实参考处理与两个Result/反馈重开复核均正常退出。已通过的10次连续刷新验收没有重做。继续处理只创建Result输入绑定，未再次执行图片算法。
+
+PROCESS_CLEANUP=after-01至after-10连续10/10 exit0、所有捕获的所属进程树无残留、零强制回收，端口再次启动前断言空闲。正常关闭事件1次，backend_shutdown_return和launcher_return可查jsonl。Result第一次打开产生外部Photos.exe，早期观察器曾误纳入清理；记录明确保留，不算HDDE残留或10轮通过证据。已修正观察器仅清理失败的HDDE进程，再运行binding-confirmed：正常exit0、残留空、未清理外部查看器。
+
+POSITIVE_CHAIN=真实未改照片B D:\定制业务\学校定制\照片s\Image_1781401250990_757.jpg；B SHA e39d47bbe5dcf9a9366056aaf3e05c99e2e0bc7213672875b5084221285e282c。隔离A C:\Users\xyppt\.codex\visualizations\2026\09\21\01a0c410-c6b2-7562-a3e5-2a0588993e30\d61-06-derived-fixture\D61_06_target_meeting_warm_luma.png；A SHA a6df5163aa0a286f79ebd5e9d127e1152617526f0ab5ac69251a0d728956db95。固定RGB gains[1,.98,.85]、按固定BT.709编码亮度比例归一后四舍五入PNG，保持几何；formula/像素SHA完整记录positive-pair.json。此前固定曝光/偏色副本未通过均留档，不冒充正式Result；最终亮度保持的偏色副本预审与正式UI真实处理均ACCEPT_CORRECTED。当前Source通过真实source_token与缓存路径/SHA绑定，未伪造不存在的source_id。Task=color_3562488347494d9a；Result=color_result_1f597b4c536f45e2；正式输出=D:\影界文件\输出\颜色校正\D61_06_target_meeting_warm_luma_影界校色_261003.png；输出SHA=de22eba1e3c42e44e76ac663bd977f690b40117a9d86dc332c400c5ac00fdd52。Source/Reference副本和Task/Registry/Result/正式文件全部一致，真实PNG完整解码[2138, 1600]，实际产物已视觉查看。完整进程重开、刷新、缩略图、打开200与继续编辑source_result_id/source_sha256一致，positive-restart-binding.json和binding-confirmed-close.json。
+
+NEGATIVE_CHAIN=保留原真实A/B的color_e7f6d3324075469e与color_6bd8ce8d079d48b2，ACCEPT_ORIGINAL、failed、Result=null，原图与缓存SHA一致，重开后仍成立。negative-context-proof.json。成功反馈request及response common_context的Task/Result/feature一致；两次跨enhancement_4k反馈均409，无串绑。
+
+REGRESSION=原34正式输出、当前开始时48输出、原50输入、settings SHA 7d904536f0c34b9ae8636b378556f733d32c5d23c5e8f1384a5e09f34271f7d5、冻结OC/D业务源码全部不变，仅授权启动器/其测试变化；本轮新增1个真实正式Result，未覆盖历史文件。完整字段保护及代码patch见integrity-current.json。正式dist未重建或覆盖。
+
+REMAINING_RISK=10轮是本机本版本的真实验收，不宣称任意负载/后续版本的关闭上界。当前架构仍为后端线程；本轮未制造算法线程永久挂死，也没有用强杀启动器掩盖它。历史偶发Proactor失败本轮定向探针未新增复现，因此具体首次RST来源未知；退出机制修复和真实10轮证据独立保留。不处理全软件启动时间、安装包、算法、阈值或输出中心合同。

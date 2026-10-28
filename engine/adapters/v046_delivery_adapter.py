@@ -19,5 +19,6 @@ def run_v046_delivery(context: Mapping[str, Any]) -> dict[str, Any]:
         debug_keep_intermediate=context.get("debug_keep_intermediate", False),
         color_stability_enabled=context.get("color_stability_enabled", True),
         color_correction_enabled=context.get("color_correction_enabled", False),
+        original_filename=str(context.get("original_filename") or "") or None,
     )
     return result

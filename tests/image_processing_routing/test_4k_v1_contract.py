@@ -22,7 +22,7 @@ class FourKV1ContractTests(unittest.TestCase):
     def test_route_and_capability_are_unique_and_truthful(self):
         contract = get_4k_v1_contract()
 
-        self.assertEqual(FOUR_K_V1_ROUTE, "PILLOW_LANCZOS_SAFE_RESIZE")
+        self.assertEqual(FOUR_K_V1_ROUTE, "REALESRGAN_X4PLUS_FIDELITY_FUSION")
         self.assertEqual(contract["route"], FOUR_K_V1_ROUTE)
         self.assertEqual(contract["mode"], FOUR_K_V1_MODE)
         self.assertEqual(contract["output_profile"], FOUR_K_V1_OUTPUT_PROFILE)
@@ -32,7 +32,7 @@ class FourKV1ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["frozen_evidence"]["route_b_product_adoption"],
-            "NO",
+            "YES_PRODUCT_OWNER_DECISION_20261028",
         )
         self.assertNotIn("candidate_routes", contract)
         self.assertNotIn(
@@ -87,12 +87,14 @@ class FourKV1ContractTests(unittest.TestCase):
             / "4K_STAGE_2_POC_VALUE_NOT_PROVEN_CLOSURE_REPORT.md"
         ).read_text(encoding="utf-8")
 
+        # Historical evidence stays bound; the product owner superseded the
+        # LANCZOS-only decision on 2026-10-28 with the SR fidelity-fusion route.
         self.assertEqual(selection["status"], "FROZEN")
         self.assertEqual(selection["selected_method"], "pillow_lanczos")
-        self.assertIn("CURRENT_ROUTE_B_PRODUCT_ADOPTION: NO", closure)
         self.assertIn("AI_SAFE_GAIN_STATUS: NOT_PROVEN", closure)
-        for relative_path in contract["frozen_evidence"].values():
-            if relative_path == "NO":
+        self.assertEqual(contract["output"]["super_resolution"]["failure_policy"], "FAIL_TASK_NO_LANCZOS_FALLBACK")
+        for key, relative_path in contract["frozen_evidence"].items():
+            if key == "route_b_product_adoption":
                 continue
             self.assertTrue((PROJECT_ROOT / relative_path).is_file(), relative_path)
 

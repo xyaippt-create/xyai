@@ -101,9 +101,9 @@ export function validateQualityReport(report, context = {}) {
     if (!taskId) missingFields.push("task_identity");
     if (!isPositiveNumber(taskResult.input_width) || !isPositiveNumber(taskResult.input_height)) missingFields.push("input_facts");
     if (!isPositiveNumber(taskResult.output_width) || !isPositiveNumber(taskResult.output_height)) missingFields.push("output_facts");
-    if (report.route !== "PILLOW_LANCZOS_SAFE_RESIZE") missingFields.push("route");
-    if (report.quality_capability_boundary !== "HIGH_QUALITY_SIZE_ADAPTATION_ONLY") missingFields.push("quality_capability_boundary");
-    if (!["SIZE_ADAPTATION_COMPLETED", "NO_PROCESSING_NEEDED"].includes(report.quality_conclusion)) missingFields.push("quality_conclusion");
+    if (report.route !== "REALESRGAN_X4PLUS_FIDELITY_FUSION") missingFields.push("route");
+    if (report.quality_capability_boundary !== "SR_DETAIL_ENHANCEMENT_WITH_SOURCE_FIDELITY_GUARD") missingFields.push("quality_capability_boundary");
+    if (!["DETAIL_ENHANCEMENT_COMPLETED", "NO_PROCESSING_NEEDED"].includes(report.quality_conclusion)) missingFields.push("quality_conclusion");
     if (report.source_hash_unchanged !== true) missingFields.push("source_hash_unchanged");
     return {
       valid: missingFields.length === 0,

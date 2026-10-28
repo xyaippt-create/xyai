@@ -19,6 +19,31 @@ export function HddeStatusPill({ tone = "neutral", children }) {
   return <span className="hdde-status-pill" data-tone={tone}>{children}</span>;
 }
 
+export function HddeResultHero({ eyebrow = "处理结果", conclusion, tone = "neutral", title, summary, changes = [], protections = [], nextAction = "", actions = null }) {
+  return (
+    <section className="hdde-result-hero" data-tone={tone} aria-label="结果结论">
+      <div className="hdde-result-hero__lead">
+        <p className="hdde-eyebrow">{eyebrow}</p>
+        <div className="hdde-result-hero__title-row">
+          <span className="hdde-result-conclusion" data-tone={tone}>{conclusion}</span>
+          <h2>{title}</h2>
+        </div>
+        {summary ? <p className="hdde-result-hero__summary">{summary}</p> : null}
+      </div>
+      <div className="hdde-result-hero__facts">
+        {changes.length ? <div><span>处理前后变化</span><ul>{changes.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+        {protections.length ? <div><span>安全保护</span><ul>{protections.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+        {nextAction ? <div className="hdde-result-hero__next"><span>下一步</span><strong>{nextAction}</strong></div> : null}
+      </div>
+      {actions ? <div className="hdde-result-hero__actions">{actions}</div> : null}
+    </section>
+  );
+}
+
+export function HddeTechnicalDetails({ summary = "查看技术详情", children, className = "" }) {
+  return <details className={`hdde-technical-details ${className}`.trim()}><summary>{summary}</summary><div className="hdde-technical-details__body">{children}</div></details>;
+}
+
 export function HddeSectionHeader({ eyebrow, title, description, aside = null, headingId }) {
   return (
     <header className="hdde-section-header">

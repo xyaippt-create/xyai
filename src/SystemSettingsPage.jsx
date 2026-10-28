@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useAppTheme } from "./AppShell.jsx";
-import { CURRENT_BUILD_ID } from "./buildInfo.js";
 import { HddePageHeader } from "./HddeUI.jsx";
 import { PRODUCT_VERSION_LABEL } from "./productVersion.js";
 
-const API_BASE = "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 let settingsSnapshotPromise = null;
 
@@ -49,6 +48,14 @@ export async function requestWorkdirStatus() {
   return requestApi(noStorePath("/api/app/workdir"), { cache: "no-store" });
 }
 
+export async function requestRestoreDefaultDirectory() {
+  return requestApiPayload("/api/app/workdir/reset-default", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
 export function loadSettingsSnapshot({ fresh = false } = {}) {
   if (fresh) settingsSnapshotPromise = null;
   if (!settingsSnapshotPromise) {
@@ -77,6 +84,16 @@ function hasValue(value) {
 function displayValue(value) {
   if (Array.isArray(value)) return value.length ? value.join("、") : "接口未提供";
   return hasValue(value) ? String(value) : "接口未提供";
+}
+
+export function resolveFormalOutputRoot(appDataRoot) {
+  const rawRoot = String(appDataRoot || "").trim();
+  if (!rawRoot) return "";
+  const separator = rawRoot.includes("\\") ? "\\" : "/";
+  const normalizedRoot = rawRoot.replace(/[\\/]+$/, "") || separator;
+  return normalizedRoot.endsWith(separator)
+    ? `${normalizedRoot}输出`
+    : `${normalizedRoot}${separator}输出`;
 }
 
 export function resolveDirectoryStatus(requestStatus, workdir) {
@@ -150,7 +167,7 @@ function SettingsSection({ title, description, children }) {
   );
 }
 
-function ReadOnlyRow({ label, value, status, path = false }) {
+function ReadOnlyRow({ label, value, status, valueAddon = null, path = false }) {
   const rendered = displayValue(value);
   return (
     <div className="hdde-settings-row">
@@ -159,7 +176,14 @@ function ReadOnlyRow({ label, value, status, path = false }) {
         className={`hdde-settings-row__value ${path ? "hdde-settings-row__value--path" : ""}`}
         title={hasValue(value) ? String(value) : undefined}
       >
-        {status ? <span className="hdde-settings-fact" data-tone={status.tone}>{status.label}</span> : rendered}
+        {status ? (
+          <span className="hdde-settings-fact" data-tone={status.tone}>{status.label}</span>
+        ) : valueAddon ? (
+          <span className="hdde-settings-row__value-group">
+            <span>{rendered}</span>
+            {valueAddon}
+          </span>
+        ) : rendered}
       </div>
     </div>
   );
@@ -192,6 +216,8 @@ export default function SystemSettingsPage() {
   const health = snapshot.health.data;
   const workdir = snapshot.workdir.data;
   const directoryStatus = resolveDirectoryStatus(snapshot.workdir.status, workdir);
+  const formalOutputRoot = workdir.formal_output_root || resolveFormalOutputRoot(workdir.app_data_root);
+  const isDefaultFormalDirectory = workdir.is_default_app_data_root === true;
 
   const handleSelectFormalDirectory = async () => {
     setDirectoryAction({ status: "loading", message: "正在等待本地目录选择…" });
@@ -228,6 +254,22 @@ export default function SystemSettingsPage() {
       });
     } catch (error) {
       setDirectoryAction({ status: "error", message: error.message || "重新检测正式目录失败。" });
+    }
+  };
+
+  const handleRestoreDefaultDirectory = async () => {
+    if (isDefaultFormalDirectory) {
+      setDirectoryAction({ status: "idle", message: "当前已是默认目录。" });
+      return;
+    }
+    setDirectoryAction({ status: "loading", message: "正在恢复默认正式目录…" });
+    try {
+      const payload = await requestRestoreDefaultDirectory();
+      const nextSnapshot = await loadSettingsSnapshot({ fresh: true });
+      setSnapshot(nextSnapshot);
+      setDirectoryAction({ status: "success", message: payload.message || "已恢复默认正式目录并通过校验。" });
+    } catch (error) {
+      setDirectoryAction({ status: "error", message: error.message || "恢复默认正式目录失败。" });
     }
   };
 
@@ -280,10 +322,7 @@ export default function SystemSettingsPage() {
             <>
               <ReadOnlyRow label="正式根目录" value={workdir.app_data_root || workdir.failed_path} path />
               {workdir.directory_ready ? (
-                <>
-                  <ReadOnlyRow label="当前输出目录" value={workdir.output_dir} path />
-                  <ReadOnlyRow label="1080P安全增强输出目录" value={workdir.beta_output_dir} path />
-                </>
+                <ReadOnlyRow label="正式输出根目录" value={formalOutputRoot} path />
               ) : null}
             </>
           ) : null}
@@ -295,27 +334,40 @@ export default function SystemSettingsPage() {
           <button type="button" onClick={handleRecheckFormalDirectory} disabled={directoryAction.status === "loading"}>
             {directoryAction.status === "loading" ? "检测中…" : "重新检测"}
           </button>
+          <button
+            type="button"
+            onClick={handleRestoreDefaultDirectory}
+            disabled={directoryAction.status === "loading" || isDefaultFormalDirectory}
+            title={isDefaultFormalDirectory ? "当前已是默认目录" : undefined}
+          >
+            恢复默认
+          </button>
           {directoryAction.message ? <span>{directoryAction.message}</span> : null}
         </div>
       </SettingsSection>
 
       <SettingsSection
         title="产品与版本"
-        description="集中展示当前版本、交付规格与必要联系信息。"
+        description="集中展示当前版本与官方联系信息。"
       >
         <RequestState status={snapshot.health.status} error={snapshot.health.error || "运行信息暂不可用。"} loadingText="正在读取平台运行信息…" />
-        <div className="hdde-settings-rows hdde-settings-rows--two-column">
-          <ReadOnlyRow label="软件名称" value="影界 HDDE" />
-          <ReadOnlyRow label="产品版本" value={health.version || PRODUCT_VERSION_LABEL} />
-          <ReadOnlyRow label="当前构建" value={CURRENT_BUILD_ID} />
-          {snapshot.health.status === "success" ? (
-            <>
-              <ReadOnlyRow label="默认交付分辨率" value={health.target_resolution} />
-              <ReadOnlyRow label="当前输出格式" value={health.outputFormats} />
-            </>
-          ) : null}
-          <ReadOnlyRow label="版权信息" value="© 雪原Ai·PPT设计" />
-          <ReadOnlyRow label="官方联系方式" value="微信 xuey_aippt" />
+        <div className="hdde-settings-product-layout">
+          <div className="hdde-settings-rows">
+            <ReadOnlyRow label="软件名称" value="影界 HDDE" />
+            <ReadOnlyRow label="产品版本" value={health.version || PRODUCT_VERSION_LABEL} />
+            <ReadOnlyRow label="版权信息" value="© 2026 雪原PPT设计·品牌视觉" />
+            <ReadOnlyRow label="官方邮箱" value="xueyaippt@outlook.com" />
+          </div>
+          <figure className="hdde-settings-contact-qr">
+            <img
+              src="/assets/contact/wechat-qr.png"
+              alt="影界 HDDE 官方微信二维码"
+              width="104"
+              height="104"
+              loading="lazy"
+            />
+            <figcaption>扫码联系</figcaption>
+          </figure>
         </div>
       </SettingsSection>
     </div>

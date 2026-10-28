@@ -13,22 +13,53 @@ const THEME_MODES = Object.freeze([
 const AppThemeContext = createContext(null);
 
 const NAVIGATION_GROUPS = Object.freeze([
-  { label: "工作台", items: ["processing", "image-diagnosis"] },
-  { label: "图片处理", items: ["four-k-enhancement", "color-correction", "compression", "retouch"] },
-  { label: "交付", items: ["outputs", "smart-delivery"] },
+  { label: "工作台", items: ["processing"] },
+  { label: "图片处理", items: ["four-k-enhancement", "color-correction", "compression", "retouch", "batch-watermark"] },
+  { label: "交付", items: ["outputs"] },
   { label: "系统", items: ["settings"] },
 ]);
 
 const ROUTE_ICONS = Object.freeze({
   processing: "processing",
-  "image-diagnosis": "diagnosis",
   "four-k-enhancement": "sparkle",
   "color-correction": "color",
   compression: "compress",
   retouch: "retouch",
+  "batch-watermark": "watermark",
   outputs: "outputs",
   "smart-delivery": "delivery",
   settings: "settings",
+});
+
+const FEEDBACK_FEATURE_BY_ROUTE = Object.freeze({
+  processing: "processing_center",
+  "four-k-enhancement": "enhancement_4k",
+  batch: "batch_processing",
+  "color-correction": "color_correction",
+  "color-correction-review": "quality_confirm",
+  compression: "image_compression",
+  retouch: "local_retouch",
+  "batch-watermark": "batch_watermark",
+  tasks: "processing_center",
+  compare: "quality_confirm",
+  "quality-report": "quality_confirm",
+  "task-detail": "processing_center",
+  "task-compare": "quality_confirm",
+  "task-report": "quality_confirm",
+  outputs: "output_center",
+  "output-compare": "quality_confirm",
+  "smart-delivery": "smart_delivery",
+  history: "processing_center",
+  settings: "system_settings",
+  "safe-1080p-beta": "enhancement_1080p",
+});
+
+const NAVIGATION_CONTEXT_BY_ROUTE = Object.freeze({
+  "task-detail": "processing",
+  "task-compare": "processing",
+  "task-report": "processing",
+  "color-correction-review": "color-correction",
+  "output-compare": "outputs",
 });
 
 export function useAppTheme() {
@@ -55,7 +86,15 @@ function isPlainPrimaryClick(event) {
   return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
 }
 
-export default function AppShell({ route, currentPath, onNavigate, children }) {
+export default function AppShell({
+  route,
+  currentPath,
+  onNavigate,
+  workspaceMode = false,
+  feedbackTarget = null,
+  feedbackDisabled = false,
+  children,
+}) {
   const [themeMode, setThemeMode] = useState(readStoredThemeMode);
   const [systemTheme, setSystemTheme] = useState(readSystemTheme);
   const mainRef = useRef(null);
@@ -109,13 +148,16 @@ export default function AppShell({ route, currentPath, onNavigate, children }) {
   return (
     <AppThemeContext.Provider value={themeContextValue}>
       <a className="hdde-skip-link" href="#hdde-main-content">跳到主要内容</a>
-      <div className="hdde-app-shell" data-resolved-theme={resolvedTheme}>
-      <aside className="hdde-sidebar" aria-label="影界HDDE一级导航">
+      <div
+        className={`hdde-app-shell ${workspaceMode ? "hdde-app-shell--workspace" : ""}`}
+        data-resolved-theme={resolvedTheme}
+        data-workspace-mode={workspaceMode ? "true" : "false"}
+      >
+      {workspaceMode ? null : <aside className="hdde-sidebar" aria-label="影界HDDE一级导航">
         <div className="hdde-sidebar-brand">
-          <span className="hdde-brand-mark" aria-hidden="true">界</span>
-          <span className="hdde-brand-copy">
-            <strong>影界 HDDE</strong>
-            <small>高清交付引擎</small>
+          <span className="hdde-brand-logo-stack">
+            <img className="hdde-brand-logo hdde-brand-logo--light" src="/branding/hdde/logo-light.png" alt="影界 HDDE 高清交付引擎" />
+            <img className="hdde-brand-logo hdde-brand-logo--dark" src="/branding/hdde/logo-dark.png" alt="影界 HDDE 高清交付引擎" />
           </span>
         </div>
 
@@ -128,18 +170,19 @@ export default function AppShell({ route, currentPath, onNavigate, children }) {
                 <p className="hdde-navigation-group__label">{group.label}</p>
                 <div className="hdde-navigation-group__items">
                   {routes.map((item) => {
-                    const active = item.path === currentPath;
+                    const active = item.key === (NAVIGATION_CONTEXT_BY_ROUTE[route?.key] || route?.key);
+                    const navigationLabel = item.key === "four-k-enhancement" ? "画质增强" : item.key === "compression" ? "图片交付" : item.name;
                     return (
                       <a
                         key={item.key}
                         href={item.path}
-                        title={item.name}
+                        title={navigationLabel}
                         className={`hdde-navigation-item ${active ? "hdde-navigation-item--active" : ""}`}
                         aria-current={active ? "page" : undefined}
                         onClick={(event) => handleNavigation(event, item.path)}
                       >
                         <span className="hdde-navigation-icon"><HddeIcon name={ROUTE_ICONS[item.key]} /></span>
-                        <span className="hdde-navigation-name">{item.name}</span>
+                        <span className="hdde-navigation-name">{navigationLabel}</span>
                         <HddeIcon name="chevron" size={15} className="hdde-navigation-chevron" />
                       </a>
                     );
@@ -154,10 +197,10 @@ export default function AppShell({ route, currentPath, onNavigate, children }) {
           <span aria-hidden="true" />
           <p><strong>本地工作区</strong><small>图片与结果留在设备中</small></p>
         </div>
-      </aside>
+      </aside>}
 
       <div className="hdde-shell-main">
-        <header className="hdde-topbar">
+        {workspaceMode ? null : <header className="hdde-topbar">
           <div className="hdde-topbar-inner">
             <div className="hdde-route-context" aria-label="当前位置">
               <span>影界 HDDE</span>
@@ -183,17 +226,20 @@ export default function AppShell({ route, currentPath, onNavigate, children }) {
                 </div>
               </div>
               <UnifiedFeedback
-                sourceFeature="runtime_failure"
-                stage="application_runtime"
+                sourceFeature={FEEDBACK_FEATURE_BY_ROUTE[route?.key] || "runtime_failure"}
+                stage="user_feedback_entry"
+                route={currentPath}
                 triggerLabel="反馈问题"
                 triggerClassName="hdde-topbar-feedback"
                 testId="global-feedback-trigger"
+                feedbackTarget={feedbackTarget}
+                disabled={feedbackDisabled}
               />
             </div>
           </div>
-        </header>
+        </header>}
 
-        <main id="hdde-main-content" ref={mainRef} className="hdde-shell-content" tabIndex="-1">
+        <main id="hdde-main-content" ref={mainRef} className={`hdde-shell-content ${workspaceMode ? "hdde-shell-content--workspace" : ""}`} tabIndex="-1">
           <div className="hdde-platform-surface">{children}</div>
         </main>
       </div>

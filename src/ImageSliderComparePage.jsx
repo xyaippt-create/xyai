@@ -1,8 +1,11 @@
 import React, { useMemo, useRef, useState } from "react";
 import { resolveDeliveryStatus } from "./deliveryStatus.js";
 import { PRODUCT_VERSION_LABEL } from "./productVersion.js";
+import { getFileDisplayName } from "./fileDisplayName.js";
+import { HddeResultHero, HddeTechnicalDetails } from "./HddeUI.jsx";
+import { processingModeDisplayName, resultConclusionFromDelivery } from "./productDisplay.js";
 
-const API_BASE = "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 const reviewItems = [
   "小字边界是否更清楚，并且没有白边或黑边",
@@ -80,10 +83,7 @@ const qaMetrics = [
 ];
 
 function modeLabel(mode) {
-  if (["fidelity", "texture", "text_safe", "standard"].includes(mode)) return "1080P标准增强";
-  if (mode === "safe_1080p_beta") return "1080P安全增强";
-  if (mode === "4k_v1") return "4K高清画质增强";
-  return mode || "未选择";
+  return processingModeDisplayName(mode);
 }
 
 function EmptyImagePlane({ label, error }) {
@@ -100,11 +100,11 @@ function EmptyImagePlane({ label, error }) {
   );
 }
 
-function ImagePlane({ src, alt, dim = false, onError }) {
+function ImagePlane({ src, alt, dim = false, onLoad, onError }) {
   if (!src) return <EmptyImagePlane label={alt} />;
   return (
     <>
-      <img src={src} alt={alt} draggable={false} className="absolute inset-0 h-full w-full object-contain" onError={onError} />
+      <img src={src} alt={alt} draggable={false} className="absolute inset-0 h-full w-full object-contain" onLoad={onLoad} onError={onError} />
       <div className={`absolute inset-0 ${dim ? "bg-black/10" : "bg-black/0"}`} />
     </>
   );
@@ -134,7 +134,14 @@ function ZoomGlass({ zoom, originalUrl, enhancedUrl, split }) {
   );
 }
 
-export function SliderCompareStage({ originalUrl, enhancedUrl, fileName, deliveryBadge }) {
+export function SliderCompareStage({
+  originalUrl,
+  enhancedUrl,
+  fileName,
+  deliveryBadge,
+  onEnhancedAssetLoad,
+  onEnhancedAssetError,
+}) {
   const stageRef = useRef(null);
   const [split, setSplit] = useState(50);
   const [dragging, setDragging] = useState(false);
@@ -172,7 +179,15 @@ export function SliderCompareStage({ originalUrl, enhancedUrl, fileName, deliver
       ) : (
         <>
           <div className="absolute inset-0">
-            <ImagePlane src={enhancedUrl} alt={deliveryBadge} onError={() => setLoadError(true)} />
+            <ImagePlane
+              src={enhancedUrl}
+              alt={deliveryBadge}
+              onLoad={onEnhancedAssetLoad}
+              onError={() => {
+                setLoadError(true);
+                onEnhancedAssetError?.();
+              }}
+            />
           </div>
           <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(0 ${100 - split}% 0 0)` }}>
             <ImagePlane src={originalUrl} alt="原图" dim onError={() => {}} />
@@ -184,10 +199,21 @@ export function SliderCompareStage({ originalUrl, enhancedUrl, fileName, deliver
         <button
           type="button"
           aria-label="拖动对比滑杆"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={split}
+          role="slider"
           className="absolute left-1/2 top-1/2 flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-[#9ab7ff]/75 bg-[#080d16]/90 font-mono text-xs tracking-[0.18em] text-[#9ab7ff] backdrop-blur-xl"
           onMouseDown={(event) => {
             event.stopPropagation();
             setDragging(true);
+          }}
+          onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            if (event.key === "Home") setSplit(0);
+            else if (event.key === "End") setSplit(100);
+            else setSplit((value) => Math.min(100, Math.max(0, value + (event.key === "ArrowRight" ? 5 : -5))));
           }}
         >
           拖动
@@ -219,8 +245,8 @@ function QualityPanel({ assets }) {
       <aside className="hdde-compare-side">
         <article className="hdde-compare-panel">
           <p className="hdde-eyebrow">4K处理结果</p>
-          <h2>尺寸适配信息</h2>
-          <p className="hdde-compare-subtitle" title={assets.fileName}>{assets.fileName} · 4K高清画质增强</p>
+          <h2>4K增强信息</h2>
+          <p className="hdde-compare-subtitle" title={assets.fileName}>{assets.fileName} · 4K画质增强</p>
           <dl className="hdde-compare-output">
             <div><dt>输入尺寸</dt><dd>{result.input_width} × {result.input_height}</dd></div>
             <div><dt>输出尺寸</dt><dd>{result.output_width} × {result.output_height}</dd></div>
@@ -239,7 +265,7 @@ function QualityPanel({ assets }) {
         </article>
         <article className="hdde-compare-panel">
           <p className="hdde-eyebrow">能力边界</p>
-          <p className="hdde-compare-subtitle">本功能属于高质量4K尺寸增强适配，不代表真实细节重建、AI超分辨率或已证明的画质增益。</p>
+          <p className="hdde-compare-subtitle">保持原图比例与构图，长边提升至3840像素：超分重建细节，并以原图保真融合，防止色偏、重绘与过锐光晕。</p>
         </article>
       </aside>
     );
@@ -248,26 +274,17 @@ function QualityPanel({ assets }) {
   return (
     <aside className="hdde-compare-side">
       <article className="hdde-compare-panel">
-        <p className="hdde-eyebrow">质量指标</p>
-        <h2>高清交付指标</h2>
+        <p className="hdde-eyebrow">辅助判断</p>
+        <h2>技术指标</h2>
         <p className="hdde-compare-subtitle" title={assets.fileName}>{assets.fileName} · {modeLabel(assets.mode)}</p>
-        <div className="hdde-compare-metrics">
-          {qaMetrics.map(([name, key]) => {
-            const value = metricValue(report, result, key);
-            const width = Math.max(0, Math.min(100, Number(value) || 0));
-            return (
-              <div key={key} className="hdde-compare-metric">
-                <div>
-                  <strong>{name}</strong>
-                  <span>{value}</span>
-                </div>
-                <div className="hdde-compare-meter" aria-label={`${name} ${value}`}>
-                  <span style={{ width: `${width}%` }} />
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <HddeTechnicalDetails summary="查看技术指标">
+          <div className="hdde-compare-metrics">
+            {qaMetrics.map(([name, key]) => {
+              const value = metricValue(report, result, key);
+              return <div key={key} className="hdde-compare-metric"><div><strong>{name}</strong><span>{value}</span></div></div>;
+            })}
+          </div>
+        </HddeTechnicalDetails>
       </article>
 
       <article className="hdde-compare-panel">
@@ -288,9 +305,7 @@ function QualityPanel({ assets }) {
           </div>
           <div>
             <dt>输出位置</dt>
-            <dd title={assets.finalOutputUrl || assets.previewOutputUrl || "暂无数据"}>
-              {assets.finalOutputUrl || assets.previewOutputUrl || "暂无数据"}
-            </dd>
+            <dd>{assets.finalOutputUrl || assets.previewOutputUrl ? `正式输出目录 / ${getFileDisplayName(assets.finalOutputUrl || assets.previewOutputUrl, "成品文件")}` : "暂无数据"}</dd>
           </div>
         </dl>
       </article>
@@ -314,6 +329,16 @@ function QualityPanel({ assets }) {
 export default function ImageSliderComparePage({ taskConfig, compareAssets, onBackToTask, onViewReport }) {
   const assets = useMemo(() => resolveAssets(taskConfig, compareAssets), [taskConfig, compareAssets]);
   const isFourK = assets.mode === "4k_v1";
+  const result = assets.result || {};
+  const report = assets.report || {};
+  const conclusion = resultConclusionFromDelivery(assets.deliveryMeta?.status, { improved: !isFourK });
+  const dimensionChange = result.input_width && result.input_height && result.output_width && result.output_height
+    ? `${result.input_width} × ${result.input_height} → ${result.output_width} × ${result.output_height}`
+    : "处理前后图片已进入同屏对比";
+  const protections = [
+    "原图未覆盖",
+    isFourK && report.source_hash_unchanged ? "原图完整性已确认" : "构图与原始比例保持",
+  ];
 
   return (
     <section className="hdde-compare-page" data-testid="comparison-page">
@@ -333,10 +358,20 @@ export default function ImageSliderComparePage({ taskConfig, compareAssets, onBa
         </div>
       </header>
 
-      <main className="hdde-compare-layout">
-        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl} fileName={assets.fileName} deliveryBadge={assets.deliveryMeta?.badge || (isFourK ? "4K处理结果" : "1080P 本地预览")} />
+      <HddeResultHero
+        conclusion={conclusion.label}
+        tone={conclusion.tone}
+        title={isFourK ? assets.deliveryMeta?.label : assets.deliveryMeta?.label || "处理结果"}
+        summary={isFourK ? "已完成4K画质增强。请通过处理前后对比确认内容完整性；当前处理不代表凭空重建细节。" : assets.deliveryMeta?.description || "请通过处理前后对比确认改善与保护情况。"}
+        changes={[dimensionChange]}
+        protections={protections}
+        nextAction={conclusion.nextAction}
+      />
+
+      <div className="hdde-compare-layout">
+        <SliderCompareStage originalUrl={assets.originalUrl} enhancedUrl={assets.enhancedUrl} fileName={assets.fileName} deliveryBadge={assets.deliveryMeta?.badge || (isFourK ? "4K画质增强结果" : "1080P画质结果")} />
         <QualityPanel assets={assets} />
-      </main>
+      </div>
     </section>
   );
 }

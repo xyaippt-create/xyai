@@ -2,9 +2,10 @@ import React, { useMemo, useState } from "react";
 import { resolveDeliveryStatus, resolveReportCenterMeta } from "./deliveryStatus.js";
 import { getFileDisplayName } from "./fileDisplayName.js";
 import { resolve1080pSizeTreatment } from "./sizeTreatment.js";
-import UnifiedFeedback from "./UnifiedFeedback.jsx";
+import { HddeResultHero, HddeTechnicalDetails } from "./HddeUI.jsx";
+import { resultConclusionFromDelivery } from "./productDisplay.js";
 
-const API_BASE = "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 function getReport(taskConfig) {
   const report = taskConfig?.task_report || taskConfig?.compareAssets?.task_report || {};
@@ -19,10 +20,6 @@ function getReport(taskConfig) {
 
 function getResult(taskConfig) {
   return taskConfig?.task_result || taskConfig?.compareAssets?.task_result || {};
-}
-
-function getTaskId(taskConfig) {
-  return taskConfig?.taskId || taskConfig?.task_id || taskConfig?.compareAssets?.taskId || "";
 }
 
 function score(value) {
@@ -110,7 +107,6 @@ function resolveSuggestedUsage(report, meta) {
 export default function QualityReportPage({ taskConfig, onBackToCompare, onArchive }) {
   const report = useMemo(() => getReport(taskConfig), [taskConfig]);
   const result = useMemo(() => getResult(taskConfig), [taskConfig]);
-  const taskId = useMemo(() => getTaskId(taskConfig), [taskConfig]);
   const isFourK = (taskConfig?.mode || result.mode) === "4k_v1";
   const delivery = useMemo(
     () => resolveDeliveryStatus(report, result, report, taskConfig || {}),
@@ -146,14 +142,14 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
         label: result.processing_disposition === "NO_PROCESSING_NEEDED" ? "已达到4K门槛" : "4K成品已生成",
         detail: result.processing_disposition === "NO_PROCESSING_NEEDED"
           ? "原图长边已达到3840像素，未执行像素放大。"
-          : "保持原图比例，长边已适配至3840像素。",
+          : "保持原图比例，长边已提升至3840像素并完成超分细节增强。",
       }
     : resolve1080pSizeTreatment({
         inputWidth: result.input_width,
         inputHeight: result.input_height,
         outputWidth: result.output_width,
         outputHeight: result.output_height,
-        modeLabel: "1080P标准增强",
+        modeLabel: "1080P画质",
       });
   const dimensionSummary = [
     inputDimensions ? `输入 ${inputDimensions}` : "",
@@ -168,6 +164,10 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
     result.output_format ? ["输出格式", String(result.output_format).toUpperCase(), ""] : null,
     outputFileName ? ["输出文件", outputFileDisplayName, outputFileName] : null,
   ].filter(Boolean);
+  const conclusion = resultConclusionFromDelivery(
+    isFourK ? (result.final_output_exists ? "PASS" : "PASS_WITH_LIMITATION") : delivery.status,
+    { improved: !isFourK },
+  );
 
   const openOutputFolder = async () => {
     if (!outputDirectory) {
@@ -213,50 +213,40 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
           <button type="button" className="hdde-report-button hdde-report-button--secondary" onClick={onBackToCompare}>
             返回对比结果
           </button>
-          <div className="hdde-report-feedback-action">
-            <UnifiedFeedback
-              taskId={taskId}
-              sourceFeature="quality_confirm"
-              stage="quality_review"
-              triggerLabel="反馈问题"
-              triggerClassName="hdde-report-button hdde-report-button--primary"
-              testId="quality-report-feedback-package"
-            />
-            <span>用于问题反馈和故障排查。</span>
-          </div>
         </div>
       </header>
 
+      <HddeResultHero
+        conclusion={conclusion.label}
+        tone={conclusion.tone}
+        title={isFourK ? (result.final_output_exists ? "4K成品已生成" : "无需重复放大") : delivery.label}
+        summary={isFourK ? "已保持原图比例完成4K画质增强；该结论不代表凭空重建细节。" : delivery.description}
+        changes={[dimensionSummary || "处理前后信息已记录"]}
+        protections={[isFourK && report.source_hash_unchanged ? "原图完整性已确认" : "原图未覆盖", "文字、Logo、颜色与结构需在对比页确认"]}
+        nextAction={conclusion.nextAction}
+      />
+
       <div className="hdde-report-layout">
-        <main className="hdde-report-main">
+        <div className="hdde-report-main">
           {isFourK ? (
             <section className="hdde-report-panel">
               <div className="hdde-report-section-heading">
                 <div>
                   <p className="hdde-eyebrow">处理摘要</p>
-                  <h2>4K高清画质增强</h2>
+                  <h2>4K画质增强报告</h2>
                 </div>
                 {dimensionSummary ? <span>{dimensionSummary}</span> : null}
               </div>
               <dl className="hdde-report-facts">
-                <div><dt>处理路线</dt><dd>Pillow LANCZOS</dd></div>
                 <div><dt>比例策略</dt><dd>保持原图比例</dd></div>
                 <div><dt>原图完整性</dt><dd>{report.source_hash_unchanged ? "已确认" : "需要复核"}</dd></div>
               </dl>
             </section>
           ) : (
-          <section className="hdde-report-panel">
-            <div className="hdde-report-section-heading">
-              <div>
-                <p className="hdde-eyebrow">核心指标</p>
-                <h2>质量评分</h2>
-              </div>
-              {dimensionSummary ? <span>{dimensionSummary}</span> : null}
-            </div>
-            <div className="hdde-report-score-grid">
-              {visibleScores.map(([label, value]) => <ScoreCard key={label} label={label} value={value} />)}
-            </div>
-          </section>
+          <HddeTechnicalDetails summary="查看技术评分" className="hdde-report-panel">
+            <p className="hdde-technical-note">评分仅用于诊断，没有统一量表解释，不作为用户层质量结论。</p>
+            <div className="hdde-report-score-grid">{visibleScores.map(([label, value]) => <ScoreCard key={label} label={label} value={value} />)}</div>
+          </HddeTechnicalDetails>
           )}
 
           <section className="hdde-report-panel">
@@ -275,7 +265,7 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
               ))}
             </dl>
           </section>
-        </main>
+        </div>
 
         <aside className="hdde-report-side">
           <section className="hdde-report-panel hdde-report-verdict">
@@ -308,7 +298,7 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
               复制成品路径
             </button>
             <button type="button" className="hdde-report-button hdde-report-button--secondary" onClick={onArchive}>
-              {isFourK ? "完成复核并返回4K高清画质增强" : "完成复核并返回"}
+              {isFourK ? "完成复核并返回4K画质增强" : "完成复核并返回"}
             </button>
           </section>
 
@@ -316,10 +306,10 @@ export default function QualityReportPage({ taskConfig, onBackToCompare, onArchi
 
           <section className="hdde-report-panel">
             <p className="hdde-eyebrow">{isFourK ? "能力边界" : "建议用途"}</p>
-            <h2>{isFourK ? "高质量尺寸适配" : "交付建议"}</h2>
+            <h2>{isFourK ? "4K超分细节增强" : "交付建议"}</h2>
             <p className="hdde-report-usage">
               {isFourK
-                ? "本功能属于高质量4K尺寸增强适配，不代表真实细节重建、AI超分辨率或已证明的画质增益。"
+                ? "保持原图比例与构图，长边提升至3840像素：超分重建细节，并以原图保真融合，防止色偏、重绘与过锐光晕。"
                 : suggestedUsage}
             </p>
           </section>

@@ -1,0 +1,152 @@
+{
+  "schema_version": "hdde.stage5.chrome-network-evidence.v1",
+  "evidence_type": "sanitized_equivalent_network_capture",
+  "captured_from": "real_chrome",
+  "capture_method": "local_reverse_proxy_intercepting_real_chrome_page_request",
+  "request_started_at": "2026-07-18T07:24:09.506140+00:00",
+  "response_completed_at": "2026-07-18T07:24:09.530947+00:00",
+  "duration_ms": 26.054,
+  "request": {
+    "captured_from": "real_chrome",
+    "capture_method": "local_reverse_proxy_from_real_browser_interaction",
+    "method": "POST",
+    "url": "http://127.0.0.1:5174/api/image-processing/preflight",
+    "content_type": "application/json",
+    "request_body": {
+      "file_token": "[REDACTED_VALID_TOKEN]",
+      "purpose": "REDUCE_DIMENSIONS",
+      "targets": {
+        "resize_strategy": "FIXED_SHORT_SIDE",
+        "target_short_side": 599
+      },
+      "requested_action": null
+    },
+    "absolute_path_in_request": false,
+    "source_token_redacted": true,
+    "raw_image_binary_in_request": false,
+    "browser_signals": {
+      "user_agent_family": "Google Chrome",
+      "sec_fetch_mode": "cors",
+      "sec_fetch_site": "same-origin",
+      "origin": "http://127.0.0.1:5174"
+    },
+    "captured_at": "2026-07-18T07:24:09.506140+00:00"
+  },
+  "response": {
+    "captured_from": "real_chrome",
+    "http_status": 200,
+    "content_type": "application/json",
+    "response_body": {
+      "schema_version": "1.0",
+      "decision_version": "image_processing_routing_v1",
+      "profile": {
+        "format": "PNG",
+        "mime_type": "image/png",
+        "width": 1000,
+        "height": 5000,
+        "short_side": 1000,
+        "long_side": 5000,
+        "aspect_ratio": 0.2,
+        "orientation": "PORTRAIT",
+        "size_bytes": 31172,
+        "size_kb": 30.441406,
+        "size_mb": 0.029728,
+        "has_alpha": false,
+        "is_animated": false,
+        "frame_count": 1,
+        "is_long_image": true,
+        "is_ultra_wide": false,
+        "resolution_bucket": "SHORT_SIDE_600_1079",
+        "processing_eligibility": "ELIGIBLE_WITH_WARNING",
+        "warnings": [
+          "LONG_IMAGE_DETECTED"
+        ]
+      },
+      "purpose": "REDUCE_DIMENSIONS",
+      "preflight_status": "BLOCKED_UNSAFE",
+      "recommended_action": "UNSUPPORTED",
+      "executable": false,
+      "reason_codes": [
+        "TARGET_SMALLER_THAN_SOURCE",
+        "LONG_IMAGE_DETECTED",
+        "ESTIMATED_SHORT_SIDE_LT_600"
+      ],
+      "blocking_reasons": [
+        "ESTIMATED_SHORT_SIDE_LT_600"
+      ],
+      "warnings": [],
+      "recommended_parameters": {
+        "min_safe_short_side": 600,
+        "preferred_short_side": 750
+      },
+      "estimated_output": {
+        "width": 599,
+        "height": 2995,
+        "short_side": 599,
+        "long_side": 2995,
+        "max_bytes": null
+      },
+      "alternatives": [
+        {
+          "action": "RESIZE_REDUCTION",
+          "targets": {
+            "resize_strategy": "FIXED_SHORT_SIDE",
+            "target_short_side": 750
+          }
+        }
+      ]
+    },
+    "captured_at": "2026-07-18T07:24:09.530947+00:00"
+  },
+  "session_requests_sanitized": [
+    {
+      "started_at": "2026-07-18T07:23:21.943338+00:00",
+      "ended_at": "2026-07-18T07:23:21.949963+00:00",
+      "duration_ms": 6.711,
+      "method": "GET",
+      "path": "/api/image-compression/capabilities",
+      "http_status": 200,
+      "browser_request": true
+    },
+    {
+      "started_at": "2026-07-18T07:23:21.943840+00:00",
+      "ended_at": "2026-07-18T07:23:21.960420+00:00",
+      "duration_ms": 16.455,
+      "method": "GET",
+      "path": "/api/image-compression/output-settings",
+      "http_status": 400,
+      "browser_request": true
+    },
+    {
+      "started_at": "2026-07-18T07:24:05.878600+00:00",
+      "ended_at": "2026-07-18T07:24:05.940288+00:00",
+      "duration_ms": 59.831,
+      "method": "POST",
+      "path": "/api/image-compression/intake",
+      "http_status": 200,
+      "browser_request": true
+    },
+    {
+      "started_at": "2026-07-18T07:24:05.970799+00:00",
+      "ended_at": "2026-07-18T07:24:06.029809+00:00",
+      "duration_ms": 59.87,
+      "method": "GET",
+      "path": "/api/image-compression/preview/[REDACTED_TOKEN]",
+      "http_status": 200,
+      "browser_request": true
+    },
+    {
+      "started_at": "2026-07-18T07:24:09.506140+00:00",
+      "ended_at": "2026-07-18T07:24:09.530947+00:00",
+      "duration_ms": 26.054,
+      "method": "POST",
+      "path": "/api/image-processing/preflight",
+      "http_status": 200,
+      "browser_request": true
+    }
+  ],
+  "integrity": {
+    "request_sanitized_sha256": "a705c05572e14af7d961d16a197fe58a4f84b8146a5b2da51871bbc719585535",
+    "response_sanitized_sha256": "92d0b29d24198f5818f4271d6a5bc60480f38ed853e99ee3b16f8e9d29a2759d"
+  }
+}

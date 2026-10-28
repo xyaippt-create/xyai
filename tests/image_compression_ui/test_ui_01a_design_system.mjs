@@ -10,16 +10,16 @@ const read = (relativePath) => fs.readFileSync(path.join(ROOT, relativePath), "u
 const shell = read("src/AppShell.jsx");
 const routes = read("src/appRoutes.js");
 const styles = read("src/index.css");
-const diagnosis = read("src/ImageDiagnosisPage.jsx");
 const outputs = read("src/OutputCenterPage.jsx");
 const settings = read("src/SystemSettingsPage.jsx");
 const dashboard = read("src/DashboardPage.jsx");
 
 test("UI-01A shell groups the complete formal navigation without restoring removed entries", () => {
   for (const group of ["工作台", "图片处理", "交付", "系统"]) assert.match(shell, new RegExp(`label: "${group}"`));
-  for (const key of ["processing", "image-diagnosis", "four-k-enhancement", "color-correction", "compression", "retouch", "outputs", "smart-delivery", "settings"]) {
+  for (const key of ["processing", "four-k-enhancement", "color-correction", "compression", "retouch", "batch-watermark", "outputs", "settings"]) {
     assert.match(shell, new RegExp(`"?${key}"?`));
   }
+  assert.match(routes, /key: "smart-delivery"[\s\S]*?showInNavigation: false/);
   assert.match(routes, /key: "tasks"[\s\S]*?showInNavigation: false/);
   assert.match(routes, /key: "history"[\s\S]*?showInNavigation: false/);
   assert.match(routes, /key: "batch"[\s\S]*?showInNavigation: false/);
@@ -38,15 +38,14 @@ test("UI-01A removes redundant shell status badges and retains accessible naviga
 test("formal navigation status and public processing names use the frozen product wording", () => {
   assert.match(routes, /key: "compression"[\s\S]*?status: FEATURE_STATUSES\.ENABLED/);
   assert.match(routes, /key: "settings"[\s\S]*?status: FEATURE_STATUSES\.ENABLED/);
-  assert.match(routes, /name: "4K高清增强"/);
-  assert.match(dashboard, /label: "1080P标准增强"/);
-  assert.match(dashboard, /label: "1080P安全增强"/);
-  assert.match(dashboard, /label: "4K高清画质增强"/);
+  assert.match(routes, /name: "4K画质增强"/);
+  assert.match(dashboard, /label: "1080P画质"/);
+  assert.match(dashboard, /label: "4K画质增强"/);
+  assert.doesNotMatch(dashboard, /label: "1080P(?:标准|安全|普通)增强"/);
 });
 
 test("representative pages consume one shared page hierarchy", () => {
-  for (const source of [diagnosis, outputs, settings]) assert.match(source, /HddePageHeader/);
-  assert.match(diagnosis, /HddeStatusPill tone="info"/);
+  for (const source of [outputs, settings]) assert.match(source, /HddePageHeader/);
   assert.match(outputs, /headingId="output-center-title"/);
 });
 

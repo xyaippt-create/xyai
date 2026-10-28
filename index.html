@@ -4,7 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2D6FE8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("hdde-ui-theme");
+          const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.dataset.theme = stored === "light" || stored === "dark"
+            ? stored
+            : systemDark ? "dark" : "light";
+        } catch {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+    <link rel="icon" type="image/png" href="/branding/hdde/app-icon.png" />
+    <link rel="apple-touch-icon" href="/branding/hdde/app-icon.png" />
     <title>影界 HDDE｜高清交付引擎</title>
   </head>
   <body>

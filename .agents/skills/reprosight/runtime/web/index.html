@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090b13" />
+    <title>ReproSight — From screenshot to verified fix</title>
+    <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <header class="nav shell">
+      <a class="brand" href="/" aria-label="ReproSight home">
+        <img src="/logo.svg" alt="" />
+        <span>ReproSight</span>
+      </a>
+      <div class="connection" id="connection"><span></span> Connecting</div>
+    </header>
+
+    <main class="shell">
+      <section class="hero">
+        <div class="eyebrow">Evidence-first debugging for Codex</div>
+        <h1>A bug report<br /><em>you can prove.</em></h1>
+        <p>
+          Turn a screenshot and one sentence into a reproduced failure, a regression
+          test, a minimal patch, and visible before/after evidence.
+        </p>
+        <div class="flow" aria-label="ReproSight workflow">
+          <span>See it</span><i>→</i><span>Reproduce it</span><i>→</i><span>Fix it</span><i>→</i><span>Prove it</span>
+        </div>
+      </section>
+
+      <section class="intake-panel panel">
+        <div class="panel-heading">
+          <div>
+            <div class="kicker">New case</div>
+            <h2>Drop the evidence</h2>
+          </div>
+          <div class="step-number">01</div>
+        </div>
+        <form id="case-form">
+          <div class="form-grid">
+            <label>
+              <span>Bug title</span>
+              <input id="title" name="title" required maxlength="120" placeholder="Cart badge does not update" />
+            </label>
+            <label>
+              <span>Target URL or route</span>
+              <input id="target-url" name="targetUrl" placeholder="http://localhost:3000/cart" />
+            </label>
+          </div>
+          <label>
+            <span>What happened, and what should happen?</span>
+            <textarea id="description" name="description" required rows="4" placeholder="After clicking Add to cart, the badge stays at 0. It should increment to 1."></textarea>
+          </label>
+          <div class="submit-row">
+            <label class="drop-zone" id="drop-zone">
+              <input id="screenshot" name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" />
+              <span class="drop-icon">⌁</span>
+              <span><strong id="file-label">Choose a screenshot</strong><small>PNG, JPG, WebP, GIF or SVG · max 10 MB</small></span>
+            </label>
+            <button class="primary" id="create-button" type="submit">
+              <span>Create evidence case</span><b>↗</b>
+            </button>
+          </div>
+          <p class="form-message" id="form-message" role="status"></p>
+        </form>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel run-sidebar">
+          <div class="panel-heading compact">
+            <div><div class="kicker">Case history</div><h2>Runs</h2></div>
+            <button class="icon-button" id="refresh-button" aria-label="Refresh runs">↻</button>
+          </div>
+          <div id="run-list" class="run-list">
+            <div class="empty small">No evidence cases yet.</div>
+          </div>
+        </aside>
+
+        <section class="panel detail-panel" id="detail-panel">
+          <div class="empty detail-empty">
+            <div class="empty-mark"><img src="/logo.svg" alt="" /></div>
+            <h2>Select a run</h2>
+            <p>Its reproduction trail, patch, and proof will appear here.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="shell footer">
+      <span>ReproSight</span>
+      <span>See it. Reproduce it. Fix it. Prove it.</span>
+    </footer>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
