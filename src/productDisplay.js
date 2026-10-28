@@ -22,6 +22,7 @@ export function processingModeDisplayName(mode, fallback = "") {
   if (normalized === "4k_v1" || normalized === "4k") return PRODUCT_DISPLAY_NAMES.enhancement4k;
   if (normalized === "AUTO_COLOR_CORRECTION" || normalized === "color_correction") return "颜色校正";
   if (normalized === "LEVEL_PICK_COLOR_CORRECTION") return "挑档校色";
+  if (normalized === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" || normalized === "REFERENCE_COLOR_CORRECTION") return "参考图校色";
   return fallback || normalized || "未选择";
 }
 

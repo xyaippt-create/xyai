@@ -106,3 +106,51 @@
 - 正式目录只新增用户选定的结果文件；
 - Settings、版本号、其他功能页面不变；
 - 自动校色、参考图校色、批量颜色校正的行为不变。
+
+## 7. 参考图挑档（S66-A，2026-10-28 增补）
+
+授权：负责人于 2026-10-28 批准 S66 决策（选方案 A：用新流程升级"参考图校色"页签，页面改动在 S66-B）及 S66-A、S66-B 任务卡（`docs/drafts/S66_REFERENCE_LEVEL_PICK_INTEGRATION_CARDS_DRAFT.md`）。
+
+### 7.1 方法（冻结自 S65 R3）
+
+实现位于 `engine/color_correction/reference_level_pick.py`，版本号 `hdde.color-reference-level-pick.v1`。
+
+- 把目标图（C\* ≤ 50）与参考图（C\* ≤ 30）中合格像素的颜色，换算到对数色度 (log R/G, log B/G)，用二维互相关求出两者之间的偏移；搜索范围 ±0.40，并做亚格精修。
+- 分三个亮度段（15–40、40–70、70–99）分别对齐。某段证据不足，或与整图偏移相差超过 0.15 时，改用整图偏移。段与段之间分段线性过渡，两端平延。
+- 在线性光中用通道增益 exp(−强度 × 偏移) 修正，并保持每个像素的亮度；三档强度 40% / 70% / 100%。肤色保护、柔和收顶与收底、Alpha 规则、安全检查均沿用第 2、3 节。
+- 参考图只提供"白应该是什么白"，不提供颜色、明暗或内容。
+- 两张图色度分布的互相关峰值不明显（峰值比 < 1.15）时，判定参考图"不可用"：各档保持原样，且不可选择。
+
+### 7.2 接口
+
+`POST /api/color-correction/level-preview` 增加可选字段 `reference_source_token`：
+
+- 带这个字段时，走参考图挑档流程；不带时，行为与第 4 节完全相同。
+- 参考图会话无效返回 404 `REFERENCE_TOKEN_INVALID`；参考图内容已变化返回 409 `REFERENCE_IDENTITY_CHANGED`。
+- 响应增加 `reference_preview_url`、`reference_display_name`。
+- `measurement` 包含以下字段：
+  - `summary`：如"目标图比参考图偏黄"，或"两张图的色调已接近"；
+  - `measured_offset`：中灰的 Lab 偏移量；
+  - `recommended_level`：偏移量 ≥ 3 时为"中"，否则为"原图"；
+  - `reference_usable`；
+  - `notice`：可用时提示"结果会采用参考图的白，请选同一系列、同一光线的参考图"，不可用时提示换参考图。
+
+`POST /api/color-correction/level-run` 的请求字段不变：
+- 参考图挑档的会话在执行前会再次校验参考图 SHA，不一致返回 409 `REFERENCE_IDENTITY_CHANGED`。
+- 预览中不可选的档位返回 409 `LEVEL_NOT_SELECTABLE`。
+
+`GET /api/color-correction/capabilities` 增加 `reference_level_pick_available` 和 `reference_level_pick_version`。
+
+### 7.3 Result
+
+- `operation_mode` 为 `REFERENCE_LEVEL_PICK_COLOR_CORRECTION`。交付语义与第 5 节完全相同：用户选定即人工确认，不新增 FinalAction。
+- Result 额外记录以下内容：
+  - `analysis.REFERENCE_LEVEL_PICK`：偏移量、分段结果、描述、推荐档位；
+  - `analysis.REFERENCE_PROVENANCE.reference_source_fingerprint`（参考图 SHA）；
+  - `parameters.reference_sha256`。
+- 参考图只读：不被修改，不作为输出，也不进入输出中心。
+
+### 7.4 旧参考图校色
+
+`POST /api/color-correction/reference-run` 及其 `REFERENCE_COLOR_CORRECTION` 结果保持原样，历史任务照常可读。按方案 A，S66-B 起页面不再调用这个接口：参考图页签改为四档预览，由用户挑选；参考图不可用时，被锁定的档位提示"参考图不可用，不可选"。
+

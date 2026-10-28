@@ -1524,3 +1524,27 @@ S64-B 冻结补记（同日）：产品负责人签收挑档校色页面。S64-B
 ## 2026-10-28｜S65 草稿｜参考图挑档校色原则补充与 PoC 任务卡
 
 执行者：Claude。只读扫描现有参考图校色：10 组测试（8 组以干净原图作参考、有标准答案）中 5 组保持原图、5 组改动不可见（ΔE00 0.2–0.6），离正确颜色最多近约 4%；8/10 组因“缺少共同中性色锚点”关闭颜色匹配。据此起草 docs/drafts/S65_REFERENCE_LEVEL_PICK_PRINCIPLE_AND_POC_CARD_DRAFT.md（待负责人批准）。未改代码，未触碰 4K 文件，staging 空，无 Git 写操作。
+
+## 2026-10-28｜S65-REFCOLOR-POC｜参考图挑档校色第一轮
+
+执行者：Claude。隔离执行器 tools/experiments/s65_refcolor_poc.py（只读复用 level_pick 内部函数）。33 组测试：24 组有标准答案（8 张图 × 偏黄/偏蓝/偏绿，参考为干净原图）、4 组同系列、3 组参考即自身、2 组色调一致。R1（白平衡匹配）明显强于现有参考图校色（后者 17/24 保持原图），但强档缩小 ≥60% 仅约 9/24，偏黄失败（S05 反向 +122%）；同系列门店组几乎无效。R2（加明暗匹配）有害，淘汰。根因：目标图与参考图各自独立选择中性色，偏色后选中不同表面。STATUS=BLOCKED，提议一轮有界修正：改为低饱和 a*b* 分布对齐、取消白端钉为中性、淘汰 R2。真实配对未提供。正式代码与 4K 文件未改，staging 空，无 Git 写操作。报告：artifacts/s65_refcolor_poc/REPORT.md。
+
+S65 修正轮补记（同日）：经负责人批准，把中性色配对改为低饱和像素在对数色度空间的分布对齐（分三个亮度段，偏离整图过大的段回退到整图，不再钉白，R2 淘汰），全量重跑 33 组。R3 在有标准答案组中强档缩小 ≥60% 达 21/24、中档 ≥40% 达 22/24，三档 24/24 单调；现有参考图校色 0/24。参考即自身 3/3 通过；同系列 1/4、色调一致 1/2 未过，经实测发现门店两图的白本身不同，测试前提不成立。三档用时中位 1.5 s。STATUS=BLOCKED，待负责人裁定门禁口径（以人工复核为准或接受 21/24）。正式代码与 4K 文件未改，staging 空，无 Git 写操作。
+
+S65 复核收口（同日）：负责人裁定门禁口径（有标准答案组接受 21/24、22/24，同系列与色调一致组以人工复核为准），并授权执行方代判。同系列 3/4=75% 有一档明显优于现有参考图校色、可直接使用，达标；无伤害。R3 路线 ACCEPTED，STATUS=REVIEW_PACKAGE_READY（价值成立，真实配对未验证）。正式接入需另开集成阶段。
+
+## 2026-10-28｜S66 草稿｜参考图挑档校色正式接入决策与两阶段任务卡
+
+执行者：Claude。基线 HEAD 已变为 39c591f（负责人提交，含此前颜色成果）。起草 docs/drafts/S66_REFERENCE_LEVEL_PICK_INTEGRATION_CARDS_DRAFT.md：建议用新流程升级“参考图校色”页签（旧 reference-run 后端保留不再调用），S66-A 后端与接口、S66-B 页面与真实桌面验收；写入与并行 4K 工作的共享文件协调规则。待负责人批准，未改代码，staging 空，无 Git 写操作。
+
+## 2026-10-28｜S66-A｜参考图挑档后端与接口
+
+执行者：Claude。新增 engine/color_correction/reference_level_pick.py（S65 R3 的正式实现，加 Alpha 处理）；level-preview 增加可选 reference_source_token，level-run 复核参考图 SHA，新运行模式 REFERENCE_LEVEL_PICK_COLOR_CORRECTION，复用 S64 会话、写入与人工确认交付。改动 API 前已确认该文件无他人未提交改动，未触碰 4K 文件。验证：33 组 99 档与 S65 逐像素一致；25 个选档结果与预览一致并进入输出中心可交付，8 组选原图 0 文件；参考图 SHA 全部不变、不进入输出中心；新测试 11/11，挑档校色 19/19；全量 81 个模块，失败 9 个（8 个同基线，新增 1 个为 4K 路由变化所致）。预览耗时空闲 1.8–2.4 s，处理器降频（约 55% 性能）或并行任务时 5.5–7 s。STATUS=BLOCKED，待负责人裁定耗时门禁。staging 空，无 Git 写操作。报告：artifacts/s66a_reference_level_pick/REPORT.md。
+
+S66-A 冻结补记（同日）：负责人接受预览耗时现状（空闲达标，降频或负载下变慢）。S66-A=PASS_AND_FROZEN。S66-B 尚未开始，开始前须与并行进行的输出中心、4K 改动协调。
+
+## 2026-10-28｜S66-B｜参考图挑档页面与真实桌面验收
+
+执行者：Claude。按方案 A 改造 ColorCorrectionPage、TaskDetailPage、App、productDisplay、DashboardPage 与两个前端测试：参考图页签走 level-preview（带 reference_source_token）四档挑选，页面不再调用 reference-run；新模式 REFERENCE_LEVEL_PICK_COLOR_CORRECTION 沿用挑档交付语义，并以三图对照展示。经负责人确认重建 dist（附带他人未提交的 OutputCenterPage 轮次名称改动），旧 dist 已备份。真实桌面（8797；8787 被他人服务占用，未动）4 组：中、强两组生成结果，SHA 一致、参考图 SHA 已记录、可交付；选原图和不可用参考图两组 0 文件；全程未调用 reference-run，控制台 0 错误，输出中心无参考图，预览缓存无残留，输入图 SHA 不变。验收中修正：不可用参考图下被锁定的档位，原先误提示"未通过安全检查"，改为"参考图不可用，不可选"，重建后复验通过。前端 387/387，API 30/30。STATUS=REVIEW_PACKAGE_READY，待签收。staging 空，无 Git 写操作。报告：artifacts/s66b_reference_level_pick/REPORT.md。
+
+S66-B 冻结补记（同日）：负责人签收。S66-B=PASS_AND_FROZEN，S66 参考图挑档（后端 + 页面）整体冻结。staging 空，无 Git 写操作。

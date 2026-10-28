@@ -155,7 +155,115 @@ def render(target: np.ndarray, p: dict[str, Any], strength: float, *, with_tone:
     return (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-ROUTES = {"R1_WB": False, "R2_WB_TONE": True}
+# ---------------------------------------------------- round 2: alignment ---
+# Fix round (owner-approved 2026-10-28): the two images no longer pick their own neutral.
+# Their near-neutral pixels are aligned in log-chromaticity (log R/G, log B/G of linear
+# RGB), where an illuminant cast is a pure translation at every lightness. The best shift
+# per lightness band is the cast relative to the reference; it is removed with linear-RGB
+# channel gains. No white pin; R2 tone matching is dropped.
+
+ALIGN_REF_MAX_CHROMA = 30.0     # reference: only near-neutral pixels define "what white looks like"
+ALIGN_TARGET_MAX_CHROMA = 50.0  # target: wide enough to still contain cast-shifted neutrals
+ALIGN_BIN = 0.01                # log-chroma bin (~1% channel ratio)
+ALIGN_RANGE = 0.8               # histogram covers ±0.8 in each axis
+ALIGN_MAX_SHIFT = 0.40          # search window for the cast, ±0.40 (±49% channel ratio)
+ALIGN_BANDS = ((15, 40), (40, 70), (70, 99))
+ALIGN_MIN_PIXELS = 400
+ALIGN_MIN_PEAK_RATIO = 1.15
+ALIGN_BAND_MAX_DEVIATION = 0.15
+
+
+def _log_chroma(view: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    lin = _to_linear(view.astype(np.float32) / 255.0) + 1e-4
+    u = np.log(lin[..., 0] / lin[..., 1])
+    v = np.log(lin[..., 2] / lin[..., 1])
+    lab = cv2.cvtColor(view.astype(np.float32) / 255.0, cv2.COLOR_RGB2LAB)
+    return u, v, lab
+
+
+def _uv_hist(u: np.ndarray, v: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    n = int(round(2 * ALIGN_RANGE / ALIGN_BIN)) + 1
+    edges = (np.arange(n + 1) - 0.5) * ALIGN_BIN - ALIGN_RANGE
+    hist, _, _ = np.histogram2d(u[mask], v[mask], bins=[edges, edges])
+    # sqrt keeps one large surface from outvoting every other neutral surface
+    return cv2.GaussianBlur(np.sqrt(hist).astype(np.float32), (0, 0), 1.5)
+
+
+def align_shift(tu, tv, tmask, ru, rv, rmask) -> dict[str, Any]:
+    """Shift d (log R/G, log B/G) such that target ≈ reference + d over near-neutral pixels."""
+
+    if tmask.sum() < ALIGN_MIN_PIXELS or rmask.sum() < ALIGN_MIN_PIXELS:
+        return {"reliable": False, "reason": "TOO_FEW_PIXELS", "shift": [0.0, 0.0]}
+    ht, hr = _uv_hist(tu, tv, tmask), _uv_hist(ru, rv, rmask)
+    n = ht.shape[0]
+    pad = 2 * n
+    corr = np.fft.fftshift(np.real(np.fft.ifft2(np.fft.fft2(ht, (pad, pad)) * np.conj(np.fft.fft2(hr, (pad, pad))))))
+    c = pad // 2
+    k = int(round(ALIGN_MAX_SHIFT / ALIGN_BIN))
+    window = corr[c - k:c + k + 1, c - k:c + k + 1]
+    ia, ib = np.unravel_index(int(window.argmax()), window.shape)
+    lo_a, lo_b = max(ia - 1, 0), max(ib - 1, 0)
+    patch = np.clip(window[lo_a:ia + 2, lo_b:ib + 2], 0, None)
+    ys, xs = np.mgrid[lo_a:lo_a + patch.shape[0], lo_b:lo_b + patch.shape[1]]
+    du = (float((patch * ys).sum() / max(patch.sum(), 1e-9)) - k) * ALIGN_BIN
+    dv = (float((patch * xs).sum() / max(patch.sum(), 1e-9)) - k) * ALIGN_BIN
+    positive = window[window > 0]
+    peak_ratio = float(window.max() / max(float(np.median(positive)) if positive.size else 1e-9, 1e-9))
+    reliable = peak_ratio >= ALIGN_MIN_PEAK_RATIO
+    return {"reliable": reliable, "reason": "OK" if reliable else "FLAT_ALIGNMENT", "shift": [round(du, 4), round(dv, 4)], "peak_ratio": round(peak_ratio, 2)}
+
+
+def _view(rgb: np.ndarray) -> np.ndarray:
+    scale = min(1.0, 768 / max(rgb.shape[:2]))
+    return rgb if scale == 1.0 else cv2.resize(rgb, (round(rgb.shape[1] * scale), round(rgb.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+
+
+def plan_aligned(target: np.ndarray, reference: np.ndarray) -> dict[str, Any]:
+    t_analysis = analyze_level_pick(target)
+    tview, rview = _view(target), _view(reference)
+    tu, tv, tlab = _log_chroma(tview)
+    ru, rv, rlab = _log_chroma(rview)
+
+    def valid(view, lab, max_chroma):
+        clipped = (view.max(axis=-1) >= 254) | (view.min(axis=-1) <= 1)
+        return (lab[..., 0] > 15) & (lab[..., 0] < 99) & ~clipped & (np.hypot(lab[..., 1], lab[..., 2]) <= max_chroma)
+
+    tm, rm = valid(tview, tlab, ALIGN_TARGET_MAX_CHROMA), valid(rview, rlab, ALIGN_REF_MAX_CHROMA)
+    overall = align_shift(tu, tv, tm, ru, rv, rm)
+    bands = []
+    for lo, hi in ALIGN_BANDS:
+        res = align_shift(tu, tv, tm & (tlab[..., 0] >= lo) & (tlab[..., 0] < hi), ru, rv, rm & (rlab[..., 0] >= lo) & (rlab[..., 0] < hi))
+        # A band without its own evidence, or one that disagrees sharply with the whole image
+        # (it locked onto a different surface), follows the whole-image alignment.
+        own = res["reliable"] and float(np.hypot(res["shift"][0] - overall["shift"][0], res["shift"][1] - overall["shift"][1])) <= ALIGN_BAND_MAX_DEVIATION
+        bands.append({"L": (lo + hi) / 2, "shift": res["shift"] if own else overall["shift"], "own": own,
+                      "peak_ratio": res.get("peak_ratio"), "reason": res.get("reason")})
+    return {"target": t_analysis, "usable": bool(overall["reliable"]), "reason": overall["reason"], "overall": overall, "bands": bands}
+
+
+def render_aligned(target: np.ndarray, p: dict[str, Any], strength: float) -> np.ndarray:
+    analysis: LevelPickAnalysis = p["target"]
+    src = target.astype(np.float32) / 255.0
+    img = src
+    if p["usable"]:
+        lin = _to_linear(src)
+        pixel_l = cv2.cvtColor(src, cv2.COLOR_RGB2LAB)[..., 0]
+        # per-pixel shift, piecewise linear over band centres and flat beyond them (no pins)
+        centres = np.array([b["L"] for b in p["bands"]])
+        du = np.interp(pixel_l, centres, [b["shift"][0] for b in p["bands"]]).astype(np.float32)
+        dv = np.interp(pixel_l, centres, [b["shift"][1] for b in p["bands"]]).astype(np.float32)
+        gain_r, gain_b = np.exp(-strength * du), np.exp(-strength * dv)
+        # keep each pixel's luminance: only the chromaticity moves toward the reference
+        y_row = np.array([0.2126729, 0.7151522, 0.0721750], np.float32)
+        norm = 1.0 / (y_row[0] * gain_r + y_row[1] + y_row[2] * gain_b)
+        out = lin * np.stack((gain_r * norm, norm, gain_b * norm), axis=-1)
+        img = _to_srgb(_gamut_pull(out))
+    if analysis.skin is not None:
+        img = img + (SKIN_KEEP * analysis.skin)[..., None] * (src - img)
+    return (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+ROUTES = {"R1_WB": False, "R3_ALIGN": None}
 
 
 def high_chroma_de(a: np.ndarray, b: np.ndarray) -> float | None:
@@ -193,15 +301,19 @@ def run_case(case_id: str, kind: str, target: np.ndarray, reference: np.ndarray,
              target_path: Path, reference_path: Path) -> dict[str, Any]:
     t0 = time.perf_counter()
     p = plan(target, reference)
-    levels = {route: {name: render(target, p, s, with_tone=tone) for name, s in LEVELS.items()} for route, tone in ROUTES.items()}
-    seconds = (time.perf_counter() - t0) / len(ROUTES)
-    row: dict[str, Any] = {"case": case_id, "kind": kind, "usable": p["usable"], "reason": p["reason"], "seconds_per_route": round(seconds, 2)}
+    levels = {"R1_WB": {name: render(target, p, s, with_tone=False) for name, s in LEVELS.items()}}
+    t1 = time.perf_counter()
+    pa = plan_aligned(target, reference)
+    levels["R3_ALIGN"] = {name: render_aligned(target, pa, s) for name, s in LEVELS.items()}
+    seconds = time.perf_counter() - t1
+    row: dict[str, Any] = {"case": case_id, "kind": kind, "usable": pa["usable"], "reason": pa["reason"], "seconds_r3": round(seconds, 2),
+                           "seconds_r1": round(t1 - t0, 2), "align": {"overall": pa["overall"], "bands": pa["bands"]}}
     base_t = mean_de(target, truth) if truth is not None else None
     row["dE_target_truth"] = round(base_t, 2) if base_t is not None else None
     for route, outs in levels.items():
         info = {}
         for name, img in outs.items():
-            safety = level_safety(target, img, p["target"])
+            safety = level_safety(target, img, (pa if route == "R3_ALIGN" else p)["target"])
             entry = {"dE_vs_target": round(mean_de(img, target), 2), "safe": safety["passed"], "failures": safety["failures"],
                      "clip_growth": safety["clip_growth"], "high_chroma_dE": high_chroma_de(target, img)}
             if truth is not None:
@@ -221,13 +333,13 @@ def run_case(case_id: str, kind: str, target: np.ndarray, reference: np.ndarray,
     if truth is not None:
         d = mean_de(produced, truth)
         row["formal"].update({"dE_truth": round(d, 2), "reduction": round(1 - d / base_t, 3) if base_t else None})
-    panels = [("目标", target), ("参考", reference)] + [(f"R1 {n}", levels["R1_WB"][n]) for n in LEVELS] + [("现有参考校色", produced)]
+    panels = [("目标", target), ("参考", reference)] + [(f"{n}", levels["R3_ALIGN"][n]) for n in LEVELS] + [("现有参考校色", produced)]
     if truth is not None:
         panels.append(("标准答案", truth))
     sheet(f"{case_id}  {kind}", panels, out_path(f"review/{case_id}.jpg"))
-    print(json.dumps({k: row[k] for k in ("case", "usable", "dE_target_truth", "seconds_per_route")}
+    print(json.dumps({k: row[k] for k in ("case", "usable", "dE_target_truth", "seconds_r3")} | {"shift": pa["overall"]["shift"]}
                      | {"R1": {n: row["R1_WB"][n].get("reduction", row["R1_WB"][n]["dE_vs_target"]) for n in LEVELS},
-                        "R2": {n: row["R2_WB_TONE"][n].get("reduction", row["R2_WB_TONE"][n]["dE_vs_target"]) for n in LEVELS},
+                        "R3": {n: row["R3_ALIGN"][n].get("reduction", row["R3_ALIGN"][n]["dE_vs_target"]) for n in LEVELS},
                         "formal": row["formal"].get("reduction", row["formal"]["dE_vs_target"])}, ensure_ascii=False), flush=True)
     return row
 
@@ -272,6 +384,8 @@ def main() -> int:
                   "same_tone_medium_max_dE": GATE_SAME_TONE_MEDIUM_MAX_DE, "seconds_max": GATE_SECONDS},
         "samples_unchanged": before == after, "rows": rows,
     }
+    summary["round"] = 2
+    summary["routes"] = {"R1_WB": "round-1 method, kept for comparison", "R3_ALIGN": "round-2 distribution alignment (candidate)", "R2_WB_TONE": "REJECTED in round 1"}
     out_path("summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0
 

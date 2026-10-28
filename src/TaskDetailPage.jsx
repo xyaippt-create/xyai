@@ -194,20 +194,22 @@ export default function TaskDetailPage({
     || "fidelity";
   const isFourK = rawMode === "4k_v1";
   const isReferenceCorrection = rawMode === "REFERENCE_COLOR_CORRECTION" || result?.operation_mode === "REFERENCE_COLOR_CORRECTION";
-  const isLevelPick = rawMode === "LEVEL_PICK_COLOR_CORRECTION" || result?.operation_mode === "LEVEL_PICK_COLOR_CORRECTION";
+  const isReferenceLevelPick = rawMode === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" || result?.operation_mode === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION";
+  const isLevelPick = isReferenceLevelPick || rawMode === "LEVEL_PICK_COLOR_CORRECTION" || result?.operation_mode === "LEVEL_PICK_COLOR_CORRECTION";
+  const showReferenceCompare = isReferenceCorrection || isReferenceLevelPick;
   const isColorCorrection = isReferenceCorrection || isLevelPick || ["AUTO_COLOR_CORRECTION", "color_correction"].includes(rawMode);
-  const displayMode = isReferenceCorrection ? "参考图校色" : isLevelPick ? "挑档校色" : modeLabel(rawMode);
+  const displayMode = showReferenceCompare ? "参考图校色" : isLevelPick ? "挑档校色" : modeLabel(rawMode);
   const [referenceDetails, setReferenceDetails] = useState(null);
   useEffect(() => {
     let active = true;
     setReferenceDetails(null);
-    if (isReferenceCorrection && taskId) {
+    if (showReferenceCompare && taskId) {
       requestDeliveryJson(normalizeUrl(`/api/color-correction/tasks/${encodeURIComponent(taskId)}`))
         .then((payload) => { if (active) setReferenceDetails(payload.data); })
         .catch(() => { if (active) setReferenceDetails(null); });
     }
     return () => { active = false; };
-  }, [isReferenceCorrection, taskId]);
+  }, [showReferenceCompare, taskId]);
   const isLocalRetouch = ["LOCAL_RETOUCH", "local_retouch"].includes(rawMode);
   const resultAction = String(taskConfig?.result_action || result?.result_action || result?.d3_final_action || "").toUpperCase();
   const outputSelected = String(taskConfig?.output_selected || result?.output_selected || "").toUpperCase();
@@ -413,6 +415,8 @@ export default function TaskDetailPage({
     ? referenceResultSummary(result, referenceDetails?.ui?.reference_match_status || result?.reference_provenance?.reference_match_status)
     : isFourK
     ? "保持原图比例与构图，长边提升至3840像素：超分重建细节，并以原图保真融合，防止色偏、重绘与过锐光晕。"
+    : isReferenceLevelPick
+      ? "按你选定的档位，把目标图的白拉向参考图；只调整现有像素，不重绘内容，不改变尺寸与构图。参考图未被修改，也不会交付。"
     : isLevelPick
       ? "按你选定的档位修正偏色，只调整现有像素，不重绘内容，不改变尺寸与构图。"
     : isColorCorrection
@@ -644,7 +648,7 @@ export default function TaskDetailPage({
 
       {visibleTaskStatus === "completed" ? (
         <div className="hdde-detail-result-flow">
-          {isReferenceCorrection ? <section className="hdde-detail-panel hdde-detail-compare-anchor" data-testid="result-compare-anchor" aria-label="参考图校色对照">
+          {showReferenceCompare ? <section className="hdde-detail-panel hdde-detail-compare-anchor" data-testid="result-compare-anchor" aria-label="参考图校色对照">
             <h2>目标原图 · 参考图 · 校色结果</h2>
             <p>{capabilityBoundary}</p>
             <ReferenceComparison

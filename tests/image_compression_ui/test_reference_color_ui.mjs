@@ -31,9 +31,18 @@ test("protection API error preserves the failed task without creating a successf
 
 test("reference mode keeps automatic default and separates intake roles and payload", () => {
   assert.match(page, /useState\("automatic"\)/);
-  assert.match(page, /referenceMode && \(readyItems.length !== 1 \|\| !referenceInput\?\.data\?\.source_token\)/);
-  assert.match(page, /target_source_token: readyItems\[0\].data.source_token, reference_source_token: referenceInput.data.source_token/);
-  assert.match(page, /\/api\/color-correction\/reference-run/);
+  // S66 option A: the reference tab uses the level-pick preview with the reference token; the old reference-run is no longer called.
+  assert.match(page, /const pickMode = levelMode \|\| referenceMode/);
+  assert.match(page, /referenceMode && !referenceInput\?\.data\?\.source_token/);
+  assert.match(page, /\{ source_token: item\.data\.source_token, reference_source_token: referenceInput\.data\.source_token \}/);
+  assert.doesNotMatch(page, /\/api\/color-correction\/reference-run/);
+  assert.doesNotMatch(page, /target_source_token/);
+  assert.doesNotMatch(page, /开始参考图校色/);
+  assert.match(page, /pickMode && levelPreview && !completed/);
+  assert.match(page, /结果会采用参考图的白/);
+  // A level locked by an unusable reference must not be blamed on the safety check.
+  assert.match(page, /measurement\.reference_usable === false \? "参考图不可用，不可选" : "未通过安全检查，不可选"/);
+  assert.match(page, /REFERENCE_LEVEL_PICK_COLOR_CORRECTION/);
   // Reference and level-pick modes both take exactly one source image.
   assert.match(page, /const singleSourceMode = referenceMode \|\| levelMode/);
   assert.match(page, /multiple=\{!singleSourceMode\}/);
@@ -56,6 +65,10 @@ test("reference status text never pretends original or review is accepted correc
 test("unified Result page recognizes reference mode without replacing delivery authority", () => {
   assert.match(detail, /isReferenceCorrection.*REFERENCE_COLOR_CORRECTION/);
   assert.match(detail, /isColorCorrection = isReferenceCorrection \|\|/);
+  // Reference level-pick Results reuse level-pick delivery semantics and the reference comparison.
+  assert.match(detail, /isLevelPick = isReferenceLevelPick \|\|/);
+  assert.match(detail, /showReferenceCompare = isReferenceCorrection \|\| isReferenceLevelPick/);
+  assert.match(detail, /\{showReferenceCompare \? <section/);
   assert.match(detail, /<ReferenceComparison/);
   assert.match(detail, /referenceDetails\?\.ui\?\.reference_preview_url/);
   assert.match(detail, /candidate=\{acceptOriginal \?/);

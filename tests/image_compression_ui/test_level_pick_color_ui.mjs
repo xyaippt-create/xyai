@@ -19,7 +19,7 @@ test("level pick is a third mode next to automatic and reference, automatic stay
 
 test("level pick asks the backend for four previews and runs only the chosen level", () => {
   assert.match(page, /\/api\/color-correction\/level-preview/);
-  assert.match(page, /JSON\.stringify\(\{ source_token: item\.data\.source_token \}\)/);
+  assert.match(page, /: \{ source_token: item\.data\.source_token \}\)/);
   assert.match(page, /\/api\/color-correction\/level-run/);
   assert.match(page, /\{ preview_id: levelPreview\.preview_id, level: chosenLevel \}/);
   assert.match(page, /current_task_output_root = currentTaskOutputRoot/);
@@ -55,7 +55,7 @@ test("options show measurement, recommendation, zoom and block unsafe levels", (
 });
 
 test("result page treats level pick as colour correction and still offers delivery", () => {
-  assert.match(detail, /isLevelPick = rawMode === "LEVEL_PICK_COLOR_CORRECTION"/);
+  assert.match(detail, /isLevelPick = isReferenceLevelPick \|\| rawMode === "LEVEL_PICK_COLOR_CORRECTION"/);
   assert.match(detail, /isColorCorrection = isReferenceCorrection \|\| isLevelPick \|\|/);
   assert.match(detail, /persistedReviewConfirmed = persistedReviewStatusConfirmed && !isLevelPick/);
   assert.match(detail, /persistedDeliveryCompleted = persistedReviewStatusConfirmed/);
@@ -64,5 +64,5 @@ test("result page treats level pick as colour correction and still offers delive
   assert.match(detail, /交付所选结果/);
   assert.match(detail, /已选定档位，待交付/);
   assert.match(display, /LEVEL_PICK_COLOR_CORRECTION"\) return "挑档校色"/);
-  assert.match(app, /"LEVEL_PICK_COLOR_CORRECTION", "color_correction"\]\.includes\(taskContext\?\.mode\)/);
+  assert.match(app, /"LEVEL_PICK_COLOR_CORRECTION", "REFERENCE_LEVEL_PICK_COLOR_CORRECTION", "color_correction"\]\.includes\(taskContext\?\.mode\)/);
 });

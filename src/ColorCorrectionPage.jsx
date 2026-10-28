@@ -37,6 +37,13 @@ export function levelPickSummary(level) {
     : "已选择原图，未生成新文件。";
 }
 
+export function referenceLevelSummary(level) {
+  const label = LEVEL_PICK_LABELS[level];
+  return label && level !== "original"
+    ? `已按你选择的“${label}”档，把目标图的白拉向参考图；只调整现有像素，尺寸与构图不变。`
+    : "已选择原图，未生成新文件。";
+}
+
 export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false }) {
   const measurement = preview?.measurement || {};
   return <div className="hdde-level-pick" data-testid="color-level-options">
@@ -59,7 +66,7 @@ export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled =
               <span>{item.label}</span>
               {recommended ? <em>建议</em> : null}
             </label>
-            {!item.selectable ? <small>未通过安全检查，不可选</small> : null}
+            {!item.selectable ? <small>{measurement.reference_usable === false ? "参考图不可用，不可选" : "未通过安全检查，不可选"}</small> : null}
           </figcaption>
         </figure>;
       })}
@@ -202,6 +209,8 @@ export default function ColorCorrectionPage({
   const referenceMode = colorMode === "reference";
   const levelMode = colorMode === "level";
   const singleSourceMode = referenceMode || levelMode;
+  // Both the level-pick and the reference tab show four previews and let the user choose.
+  const pickMode = levelMode || referenceMode;
   const [levelPreview, setLevelPreview] = useState(null);
   const [chosenLevel, setChosenLevel] = useState("");
   const [zoomItem, setZoomItem] = useState(null);
@@ -323,7 +332,9 @@ export default function ColorCorrectionPage({
   const outputPreview = apiUrl(ui?.output_preview_url);
   const referencePreview = apiUrl(ui?.reference_preview_url || referenceInput?.data?.safe_preview_url);
   const referenceResult = task?.operation_mode === "REFERENCE_COLOR_CORRECTION";
-  const levelResult = task?.operation_mode === "LEVEL_PICK_COLOR_CORRECTION";
+  const referenceLevelResult = task?.operation_mode === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION";
+  const levelResult = task?.operation_mode === "LEVEL_PICK_COLOR_CORRECTION" || referenceLevelResult;
+  const referenceView = referenceResult || referenceLevelResult;
   const selectedLevel = ui?.level_pick?.level || decision?.selected_level || "";
   const originalSelected = decision?.result_action === "ACCEPT_ORIGINAL";
   const outputRoot = effectiveOutputRoot(outputSettings, currentTaskOutputRoot);
@@ -333,9 +344,11 @@ export default function ColorCorrectionPage({
   const protectionBlocked = isColorProtectionBlocked(task, decision);
   const resultSummary = referenceResult
     ? referenceResultSummary(decision, ui?.reference_match_status)
-    : levelResult
-      ? levelPickSummary(selectedLevel)
-      : strategySummary(decision);
+    : referenceLevelResult
+      ? referenceLevelSummary(selectedLevel)
+      : levelResult
+        ? levelPickSummary(selectedLevel)
+        : strategySummary(decision);
   const hasReliablePersonRegion = Boolean(decision?.analysis?.person_region_reliably_detected);
   const resultConclusion = referenceResult ? {
     label: originalSelected ? "已保留原图" : decision?.result_action === "ACCEPT_CORRECTED" ? "已完成受控校色" : "待复核",
@@ -477,10 +490,6 @@ export default function ColorCorrectionPage({
 
   const runCorrection = async () => {
     const readyItems = selectedItems.filter((item) => item.data?.source_token);
-    if (referenceMode && (readyItems.length !== 1 || !referenceInput?.data?.source_token)) {
-      setError("请选择一张目标图片和一张合法参考图片。");
-      return;
-    }
     if (!readyItems.length) {
       setError("请先选择 PNG、JPG 或 JPEG 图片。");
       return;
@@ -491,20 +500,18 @@ export default function ColorCorrectionPage({
     onTaskContextChange?.(null);
     if (readyItems.length === 1) {
       setTaskData({
-        task: { status: "processing", progress: 20, operation_mode: referenceMode ? "REFERENCE_COLOR_CORRECTION" : "AUTO_COLOR_CORRECTION" },
+        task: { status: "processing", progress: 20, operation_mode: "AUTO_COLOR_CORRECTION" },
         result: null,
-        ui: { source_preview_url: readyItems[0].data.safe_preview_url, reference_preview_url: referenceInput?.data?.safe_preview_url },
+        ui: { source_preview_url: readyItems[0].data.safe_preview_url },
       });
     }
     try {
-      const isBatch = !referenceMode && readyItems.length > 1;
-      const requestBody = referenceMode
-        ? { target_source_token: readyItems[0].data.source_token, reference_source_token: referenceInput.data.source_token }
-        : isBatch
+      const isBatch = readyItems.length > 1;
+      const requestBody = isBatch
         ? { source_tokens: readyItems.map((item) => item.data.source_token) }
         : { source_token: readyItems[0].data.source_token };
       if (currentTaskOutputRoot) requestBody.current_task_output_root = currentTaskOutputRoot;
-      const payload = await requestJson(referenceMode ? "/api/color-correction/reference-run" : isBatch ? "/api/color-correction/batches" : "/api/color-correction/run", {
+      const payload = await requestJson(isBatch ? "/api/color-correction/batches" : "/api/color-correction/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -546,7 +553,11 @@ export default function ColorCorrectionPage({
   const createLevelPreview = async () => {
     const item = selectedItems.find((entry) => entry.data?.source_token);
     if (!item || selectedItems.length !== 1) {
-      setError("挑档校色每次处理一张图片，请先选择一张图片。");
+      setError(referenceMode ? "参考图校色每次处理一张目标图片，请先选择一张目标图片。" : "挑档校色每次处理一张图片，请先选择一张图片。");
+      return;
+    }
+    if (referenceMode && !referenceInput?.data?.source_token) {
+      setError("请先上传一张参考图片。");
       return;
     }
     setBusy(true);
@@ -557,7 +568,9 @@ export default function ColorCorrectionPage({
       const payload = await requestJson("/api/color-correction/level-preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_token: item.data.source_token }),
+        body: JSON.stringify(referenceMode
+          ? { source_token: item.data.source_token, reference_source_token: referenceInput.data.source_token }
+          : { source_token: item.data.source_token }),
       });
       setLevelPreview(payload.data);
       setChosenLevel(payload.data?.measurement?.recommended_level || "original");
@@ -589,7 +602,7 @@ export default function ColorCorrectionPage({
       setZoomItem(null);
       if (payload.data?.selected_level === "original") {
         setChosenLevel("");
-        setNotice(payload.data.message || levelPickSummary("original"));
+        setNotice(payload.data.message || (referenceMode ? referenceLevelSummary("original") : levelPickSummary("original")));
         return;
       }
       setTaskData(payload.data);
@@ -657,10 +670,11 @@ export default function ColorCorrectionPage({
     }
   };
 
-  const taskLabel = levelMode && !completed
-    ? busy ? (levelPreview ? "正在按所选档位生成结果" : "正在生成四档预览") : levelPreview ? "请选择一档后生成结果" : selectedItems.length ? "图片已就绪，可生成四档预览" : "等待选择图片"
+  const taskLabel = pickMode && !completed
+    ? busy ? (levelPreview ? "正在按所选档位生成结果" : "正在生成四档预览") : levelPreview ? "请选择一档后生成结果"
+      : referenceMode && selectedItems.length && !referenceInput ? "请上传参考图片" : selectedItems.length ? "图片已就绪，可生成四档预览" : "等待选择图片"
     : busy && task?.status === "processing"
-    ? referenceMode ? "正在分析目标与参考图并校色" : "正在分析光线与颜色"
+    ? "正在分析光线与颜色"
     : completed
       ? referenceResult ? resultConclusion.label : "自动校正已完成"
       : failed
@@ -711,11 +725,11 @@ export default function ColorCorrectionPage({
             <dl className="hdde-color-review-facts">
               <div><dt>文件名称</dt><dd title={ui?.output_display_name}>{ui?.output_display_name || "—"}</dd></div>
               <div><dt>图片尺寸</dt><dd>{decision?.width} × {decision?.height}</dd></div>
-              <div><dt>处理状态</dt><dd>{referenceResult || levelResult ? resultConclusion.label : "自动颜色校正已完成"}</dd></div>
+              <div><dt>处理状态</dt><dd>{referenceView || levelResult ? resultConclusion.label : "自动颜色校正已完成"}</dd></div>
               <div><dt>输出位置</dt><dd title={ui?.output_directory}>{ui?.output_directory || "—"}</dd></div>
             </dl>
 
-            {originalSelected ? <div className="hdde-color-preview-fallback" role="status" data-testid="color-original-no-result"><strong>未生成新 Result</strong><p>本次颜色校正决定保留当前成品；未登记指向缓存文件的输出，可从原成品继续处理。</p></div> : referenceResult ? <ReferenceComparison target={sourcePreview} reference={referencePreview} candidate={outputPreview} /> : previewUnavailable ? (
+            {originalSelected ? <div className="hdde-color-preview-fallback" role="status" data-testid="color-original-no-result"><strong>未生成新 Result</strong><p>本次颜色校正决定保留当前成品；未登记指向缓存文件的输出，可从原成品继续处理。</p></div> : referenceView ? <ReferenceComparison target={sourcePreview} reference={referencePreview} candidate={outputPreview} /> : previewUnavailable ? (
               <div className="hdde-color-preview-fallback" role="status" data-testid="color-review-preview-fallback">
                 <strong>当前预览暂不可用</strong>
                 <p>历史预览资源未能读取，但结果结论、保护信息和成品操作仍可继续使用。</p>
@@ -797,7 +811,7 @@ export default function ColorCorrectionPage({
           </div>
           {referenceMode && <div className="hdde-reference-input" aria-label="参考图片">
             <h3>参考图片</h3>
-            <p>仅用于分析综合色调，不会被修改或作为成品输出。支持 PNG、JPEG，最大 50 MB。</p>
+            <p>只用来告诉系统"白应该是什么白"，结果会采用参考图的白，请选同一系列、同一光线的参考图。参考图不会被修改，也不会作为成品输出。支持 PNG、JPEG，最大 50 MB。</p>
             <input ref={referenceInputRef} id="color-reference-input" data-testid="color-reference-input" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={intakeReference} disabled={busy} aria-label="上传参考图片" />
             {referenceInput?.data && <div className="hdde-reference-input-preview">
               <img src={apiUrl(referenceInput.data.safe_preview_url)} alt="参考图片预览" />
@@ -812,7 +826,7 @@ export default function ColorCorrectionPage({
         </section>
 
         <section className="hdde-color-card hdde-color-controls" aria-label="输出与处理">
-          <div className="hdde-color-section-title"><span>2</span><div><h2>确认输出并开始</h2><p>{levelMode ? "先看四档预览，由你选定一档；系统不替你决定改不改。" : "系统会自动判断，不需要手动调参数。"}</p></div></div>
+          <div className="hdde-color-section-title"><span>2</span><div><h2>确认输出并开始</h2><p>{referenceMode ? "先看按参考图生成的四档预览，由你选定一档。" : levelMode ? "先看四档预览，由你选定一档；系统不替你决定改不改。" : "系统会自动判断，不需要手动调参数。"}</p></div></div>
           <div className="hdde-color-output-path">
             <span>本次输出目录</span>
             <code title={outputDirectory}>{outputDirectory || "正在读取正式输出目录…"}</code>
@@ -821,14 +835,14 @@ export default function ColorCorrectionPage({
           </div>
           <div className="hdde-color-safety">
             <strong>自动保护</strong>
-            {levelMode
+            {pickMode
               ? <><span>保持原尺寸与比例</span><span>人物肤色保留原有暖调</span><span>高光不过曝、暗部不死黑</span></>
               : <><span>保持原尺寸与比例</span><span>保护高光、LED屏与透明边缘</span><span>逆光时优先改善人物和前景</span></>}
           </div>
-          {levelMode ? <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-level-preview" onClick={createLevelPreview} disabled={busy || selectedItems.length !== 1 || !outputSettings}>
+          {pickMode ? <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-level-preview" onClick={createLevelPreview} disabled={busy || selectedItems.length !== 1 || !outputSettings || (referenceMode && !referenceInput?.data?.source_token)}>
             {busy && !levelPreview ? "正在生成四档预览…" : levelPreview ? "重新生成四档预览" : "生成四档预览"}
-          </button> : <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-run" onClick={runCorrection} disabled={busy || !selectedItems.length || !outputSettings || (referenceMode && (selectedItems.length !== 1 || !referenceInput?.data?.source_token))}>
-            {busy ? "正在创建处理任务…" : referenceMode ? "开始参考图校色" : selectedItems.length > 1 ? `开始处理 ${selectedItems.length} 张图片` : "开始自动校正"}
+          </button> : <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-run" onClick={runCorrection} disabled={busy || !selectedItems.length || !outputSettings}>
+            {busy ? "正在创建处理任务…" : selectedItems.length > 1 ? `开始处理 ${selectedItems.length} 张图片` : "开始自动校正"}
           </button>}
           <p className="hdde-color-task-state" data-status={failed ? "failed" : completed ? "completed" : task?.status || "idle"} role="status">
             {taskLabel}{task?.progress != null ? ` · ${task.progress}%` : ""}
@@ -839,7 +853,7 @@ export default function ColorCorrectionPage({
       {error ? <div className="hdde-color-alert" role="alert">{error}</div> : null}
       {notice ? <div className="hdde-color-notice" role="status">{notice}</div> : null}
 
-      {levelMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
+      {pickMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
         <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。</p></div></div>
         <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy} />
         <div className="hdde-level-actions">
@@ -859,7 +873,7 @@ export default function ColorCorrectionPage({
           <HddeResultHero
             conclusion={resultConclusion.label}
             tone={resultConclusion.tone}
-            title={referenceResult || levelResult ? resultConclusion.label : "颜色校正已完成"}
+            title={referenceView || levelResult ? resultConclusion.label : "颜色校正已完成"}
             summary={resultSummary}
             changes={(decision?.improvements || []).slice(0, 3)}
             protections={protectionItems.slice(0, 4)}
@@ -871,7 +885,7 @@ export default function ColorCorrectionPage({
             </>}
           />
 
-          {originalSelected ? <div className="hdde-color-preview-fallback" role="status" data-testid="color-original-no-result"><strong>未生成新 Result</strong><p>本次颜色校正决定保留当前成品；原成品身份与文件保持不变，可继续执行其他处理。</p></div> : referenceResult ? <ReferenceComparison target={sourcePreview} reference={referencePreview} candidate={outputPreview} /> : <div className="hdde-color-compare" data-testid="color-before-after">
+          {originalSelected ? <div className="hdde-color-preview-fallback" role="status" data-testid="color-original-no-result"><strong>未生成新 Result</strong><p>本次颜色校正决定保留当前成品；原成品身份与文件保持不变，可继续执行其他处理。</p></div> : referenceView ? <ReferenceComparison target={sourcePreview} reference={referencePreview} candidate={outputPreview} /> : <div className="hdde-color-compare" data-testid="color-before-after">
             <img src={sourcePreview} alt="校正前" />
             <div className="hdde-color-compare-after" style={{ clipPath: `inset(0 ${100 - comparePosition}% 0 0)` }}><img src={outputPreview} alt="校正后" /></div>
             <div className="hdde-color-divider" style={{ left: `${comparePosition}%` }} aria-hidden="true"><span>↔</span></div>

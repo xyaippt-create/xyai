@@ -523,6 +523,12 @@ def register_image_compression_routes(
         pixel_sha256,
         render_level,
     )
+    from engine.color_correction.reference_level_pick import (
+        REFERENCE_LEVEL_PICK_VERSION,
+        build_reference_level_pick_preview,
+        plan_reference,
+        render_reference_level,
+    )
     from PIL import Image
 
     token_registry: dict[str, dict[str, Any]] = {}
@@ -2774,7 +2780,7 @@ def register_image_compression_routes(
         decision = dict(record.get("decision") or result)
         reference_preview = None
         cache_root = Path(require_compression_directory()["tmp_dir"]).resolve()
-        if record.get("operation_mode") == "REFERENCE_COLOR_CORRECTION":
+        if record.get("operation_mode") in {"REFERENCE_COLOR_CORRECTION", "REFERENCE_LEVEL_PICK_COLOR_CORRECTION"}:
             reference = record.get("reference_metadata") or {}
             reference_path = Path(str(reference.get("path") or "")).resolve()
             if cache_root in reference_path.parents and reference_path.is_file() and _sha256_file(reference_path) == reference.get("sha256"):
@@ -2836,6 +2842,15 @@ def register_image_compression_routes(
                         "measurement": public_level_measurement(record["level_pick"].get("analysis") or {}),
                     },
                 } if record.get("operation_mode") == "LEVEL_PICK_COLOR_CORRECTION" else {}),
+                **({
+                    "level_pick": {
+                        "level": record["level_pick"]["level"],
+                        "label": LEVEL_LABELS[record["level_pick"]["level"]],
+                        "measurement": public_reference_measurement(record["level_pick"].get("analysis") or {}),
+                    },
+                    "reference_preview_url": reference_preview,
+                    "reference_display_name": str(record.get("reference_metadata", {}).get("filename") or "参考图"),
+                } if record.get("operation_mode") == "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" else {}),
             },
         }
 
@@ -2908,6 +2923,14 @@ def register_image_compression_routes(
         if level_pick is not None:
             record.update({"operation_mode": "LEVEL_PICK_COLOR_CORRECTION", "level_pick": dict(level_pick)})
             record["task_context"]["purpose"] = "AI_LEVEL_PICK_COLOR_CORRECTION"
+            if level_pick.get("reference"):
+                reference_source = level_pick["reference"]
+                record.update({
+                    "operation_mode": "REFERENCE_LEVEL_PICK_COLOR_CORRECTION",
+                    "reference_metadata": dict(reference_source),
+                    "reference_preview_token": preview_token_for(Path(str(reference_source["path"])), role="source_preview"),
+                })
+                record["task_context"]["purpose"] = "REFERENCE_LEVEL_PICK_COLOR_CORRECTION"
         record.update(operation_event_fields(record["task_context"]))
         record["error_context"] = {}
         record["related_events"] = []
@@ -3246,6 +3269,21 @@ def register_image_compression_routes(
             token_registry.pop(str(item.get("preview_token") or ""), None)
         remove_level_preview_files(session["preview_id"], Path(session["directory"]))
 
+    def public_reference_measurement(analysis: Mapping[str, Any]) -> dict[str, Any]:
+        description = dict(analysis.get("description") or {})
+        usable = bool(analysis.get("usable"))
+        recommended = str(analysis.get("recommended_level") or "original")
+        return {
+            "category": "REFERENCE_SHIFT" if usable else "REFERENCE_UNUSABLE",
+            "summary": str(description.get("summary") or ""),
+            "measured_offset": description.get("offset"),
+            "recommended_level": recommended,
+            "recommended_label": LEVEL_LABELS.get(recommended, "原图"),
+            "intent_hints": [],
+            "reference_usable": usable,
+            "notice": "结果会采用参考图的白，请选同一系列、同一光线的参考图。" if usable else "这张参考图不适合用来校色，请换一张有白色或灰色区域的参考图。",
+        }
+
     def prune_level_preview_sessions() -> None:
         cache_root = Path(require_compression_directory()["tmp_dir"]).resolve() / "color-level-preview"
         for preview_id, session in list(color_level_preview_sessions.items()):
@@ -3283,8 +3321,19 @@ def register_image_compression_routes(
             if source_sha != session["source_sha256"]:
                 raise RuntimeError("原图内容已变化，预览已失效，请重新生成预览。")
             managed = load_color_managed_source(source_path)
-            analysis = analyze_level_pick(managed.pixels)
-            candidate = render_level(managed.pixels, analysis, level)
+            reference_source = record["level_pick"].get("reference")
+            if reference_source:
+                reference_path = Path(str(reference_source["path"])).resolve()
+                if _sha256_file(reference_path) != session["reference_sha256"]:
+                    raise RuntimeError("参考图内容已变化，预览已失效，请重新生成预览。")
+                reference_plan = plan_reference(managed.pixels, load_color_managed_source(reference_path).pixels)
+                if not reference_plan.usable:
+                    raise RuntimeError("参考图没有可用的中性区域，不能生成结果。")
+                analysis = reference_plan.target
+                candidate = render_reference_level(managed.pixels, reference_plan, level)
+            else:
+                analysis = analyze_level_pick(managed.pixels)
+                candidate = render_level(managed.pixels, analysis, level)
             if pixel_sha256(candidate) != session["levels"][level]["pixel_sha256"]:
                 raise RuntimeError("正式结果与所选预览不一致，任务已阻断。")
             safety = level_safety(managed.pixels, candidate, analysis)
@@ -3316,10 +3365,12 @@ def register_image_compression_routes(
                 raise RuntimeError("挑档校色结果验证失败：格式、尺寸、摘要或元数据不一致。")
             result_id = f"color_result_{uuid.uuid4().hex[:16]}"
             reviewed_at = lifecycle_timestamp()
-            analysis_record = analysis.to_record()
+            analysis_record = reference_plan.to_record() if reference_source else analysis.to_record()
+            mode = "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" if reference_source else "LEVEL_PICK_COLOR_CORRECTION"
+            version = REFERENCE_LEVEL_PICK_VERSION if reference_source else LEVEL_PICK_VERSION
             result_data = {
-                "engine_version": LEVEL_PICK_VERSION,
-                "runtime_schema_version": LEVEL_PICK_VERSION,
+                "engine_version": version,
+                "runtime_schema_version": version,
                 "source_sha256": source_sha,
                 "source_format": managed.source_format,
                 "width": int(candidate.shape[1]),
@@ -3343,14 +3394,24 @@ def register_image_compression_routes(
                 "result_review_status": "confirmed",
                 "delivery_eligible": True,
                 "candidate_identity": session["levels"][level]["pixel_sha256"],
-                "analysis": {"LEVEL_PICK": analysis_record, "LEVEL_PICK_SAFETY": safety, "SELECTED_LEVEL": level},
+                "analysis": {
+                    ("REFERENCE_LEVEL_PICK" if reference_source else "LEVEL_PICK"): analysis_record,
+                    "LEVEL_PICK_SAFETY": safety,
+                    "SELECTED_LEVEL": level,
+                    **({"REFERENCE_PROVENANCE": {
+                        "reference_source_fingerprint": session["reference_sha256"],
+                        "reference_display_name": str(reference_source.get("filename") or ""),
+                    }} if reference_source else {}),
+                },
                 "before_metrics": {},
                 "after_metrics": {"delta_e00_mean": safety["delta_e00_mean"], "neutral_delta_e00_mean": safety["neutral_delta_e00_mean"], "clip_growth": safety["clip_growth"]},
-                "detected_issues": [tag for tag in analysis.category.split("+") if tag != "NO_CAST"],
+                "detected_issues": (["REFERENCE_SHIFT"] if analysis_record.get("recommended_level") == "medium" else []) if reference_source
+                else [tag for tag in analysis.category.split("+") if tag != "NO_CAST"],
                 "improvements": ["原图哈希保持不变，未覆盖或修改原图", f"按用户选择的“{LEVEL_LABELS[level]}”档生成，与预览逐像素一致", "候选文件已完成存在、解码、尺寸、格式与摘要验证"],
                 "review_points": ["用户在四档预览中选定该档，视为人工确认"],
                 "applied_actions": ["USER_SELECTED_LEVEL_COLOR_CORRECTION"],
-                "parameters": {"level": level, "strength": LEVELS[level], "level_pick_version": LEVEL_PICK_VERSION},
+                "parameters": {"level": level, "strength": LEVELS[level], "level_pick_version": version,
+                               **({"reference_sha256": session["reference_sha256"]} if reference_source else {})},
                 "result_id": result_id,
                 "task_id": record["task_id"],
                 "feature_key": record["feature_key"],
@@ -3358,7 +3419,7 @@ def register_image_compression_routes(
                 "source_path": str(record["source_path"]),
                 "status": "REVIEW_REQUIRED",
                 "result_file": str(output_path),
-                "operation_mode": "LEVEL_PICK_COLOR_CORRECTION",
+                "operation_mode": mode,
                 "selected_level": level,
                 **result_lineage_fields(record.get("source_metadata")),
             }
@@ -5542,6 +5603,8 @@ def register_image_compression_routes(
                 "level_pick_preview_endpoint": "/api/color-correction/level-preview",
                 "level_pick_run_endpoint": "/api/color-correction/level-run",
                 "level_pick_levels": ["original", *LEVELS],
+                "reference_level_pick_available": True,
+                "reference_level_pick_version": REFERENCE_LEVEL_PICK_VERSION,
                 "batch_available": True,
                 "max_batch_size": 20,
                 "queue_mode": "local_sequential",
@@ -5644,7 +5707,7 @@ def register_image_compression_routes(
     @app.post("/api/color-correction/level-preview")
     async def color_correction_level_preview(payload: dict = Body(default_factory=dict)):
         require_compression_directory()
-        allowed_fields = {"source_token", "client_context"}
+        allowed_fields = {"source_token", "reference_source_token", "client_context"}
         unknown = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "LEVEL_PREVIEW_REQUEST_INVALID", "message": f"挑档校色请求包含未知字段：{', '.join(unknown)}。"})
@@ -5652,11 +5715,24 @@ def register_image_compression_routes(
         source_path = Path(str(source["path"])).resolve()
         if _sha256_file(source_path) != source.get("sha256"):
             raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "图片内容发生变化，请重新选择。"})
+        reference_source = None
+        if payload.get("reference_source_token"):
+            try:
+                reference_source = require_token(str(payload["reference_source_token"]), role="source")
+            except HTTPException as exc:
+                raise HTTPException(status_code=404, detail={"code": "REFERENCE_TOKEN_INVALID", "message": "参考图片会话无效，请重新选择。"}) from exc
+            reference_path = Path(str(reference_source["path"])).resolve()
+            if _sha256_file(reference_path) != reference_source.get("sha256"):
+                raise HTTPException(status_code=409, detail={"code": "REFERENCE_IDENTITY_CHANGED", "message": "参考图片内容发生变化，请重新选择。"})
         prune_level_preview_sessions()
         try:
-            preview = await asyncio.to_thread(build_level_pick_preview, source_path)
+            if reference_source is None:
+                preview = await asyncio.to_thread(build_level_pick_preview, source_path)
+            else:
+                preview = await asyncio.to_thread(build_reference_level_pick_preview, source_path, reference_path)
         except ColorManagementError as exc:
             raise HTTPException(status_code=415, detail={"code": "UNSUPPORTED_SOURCE_FORMAT", "message": "图片的格式或色彩信息不受支持，请选择合法 PNG 或 JPEG 图片。"}) from exc
+        reference_usable = reference_source is None or bool(preview.plan.usable)
         preview_id = uuid.uuid4().hex
         directory = Path(require_compression_directory()["tmp_dir"]).resolve() / "color-level-preview" / f"preview_{preview_id}"
         directory.mkdir(parents=True, exist_ok=False)
@@ -5684,12 +5760,16 @@ def register_image_compression_routes(
                 "path": str(path),
                 "preview_token": preview_token_for(path, role="output_preview"),
                 "safety": preview.safety[name],
+                # an unusable reference leaves every level unchanged; none of them may be produced
+                "selectable": bool(preview.safety[name]["passed"]) and reference_usable,
             }
-        analysis_record = preview.analysis.to_record()
+        analysis_record = preview.plan.to_record() if reference_source is not None else preview.analysis.to_record()
         color_level_preview_sessions[preview_id] = {
             "preview_id": preview_id,
             "source": dict(source),
             "source_sha256": str(source["sha256"]),
+            "reference": dict(reference_source) if reference_source is not None else None,
+            "reference_sha256": str(reference_source["sha256"]) if reference_source is not None else None,
             "directory": str(directory),
             "levels": levels,
             "analysis": analysis_record,
@@ -5699,8 +5779,10 @@ def register_image_compression_routes(
         }
         emit_runtime_event(
             "COLOR_LEVEL_PREVIEW_CREATED", stage="level_pick_preview", result="success",
-            impact="level_preview_available", operation="LEVEL_PICK_COLOR_CORRECTION",
-            feature_key=COLOR_CORRECTION_FEATURE_KEY, category=analysis_record["category"],
+            impact="level_preview_available",
+            operation="REFERENCE_LEVEL_PICK_COLOR_CORRECTION" if reference_source is not None else "LEVEL_PICK_COLOR_CORRECTION",
+            feature_key=COLOR_CORRECTION_FEATURE_KEY,
+            category=analysis_record.get("category") or ("REFERENCE_SHIFT" if reference_usable else "REFERENCE_UNUSABLE"),
             processing_time_ms=preview.processing_time_ms,
         )
         return {"code": 200, "status": "success", "success": True, "data": {
@@ -5708,12 +5790,14 @@ def register_image_compression_routes(
             "level_pick_version": LEVEL_PICK_VERSION,
             "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
             "processing_time_ms": preview.processing_time_ms,
-            "measurement": public_level_measurement(analysis_record),
+            "measurement": public_reference_measurement(analysis_record) if reference_source is not None else public_level_measurement(analysis_record),
+            **({"reference_preview_url": preview_url(preview_token_for(reference_path, role="source_preview")),
+                "reference_display_name": str(reference_source.get("filename") or "参考图")} if reference_source is not None else {}),
             "levels": [
                 {"level": "original", "label": LEVEL_LABELS["original"], "preview_url": preview_url(preview_token_for(source_path, role="source_preview")), "selectable": True, "failures": []},
                 *({
                     "level": name, "label": LEVEL_LABELS[name], "preview_url": preview_url(item["preview_token"]),
-                    "selectable": bool(item["safety"]["passed"]), "failures": list(item["safety"]["failures"]),
+                    "selectable": item["selectable"], "failures": list(item["safety"]["failures"]),
                     "delta_e00_mean": item["safety"]["delta_e00_mean"], "neutral_delta_e00_mean": item["safety"]["neutral_delta_e00_mean"],
                 } for name, item in levels.items()),
             ],
@@ -5736,18 +5820,23 @@ def register_image_compression_routes(
             raise HTTPException(status_code=410, detail={"code": "LEVEL_PREVIEW_EXPIRED", "message": "预览已过期，请重新生成预览。"})
         if session.get("used_by_task_id") or session.get("running_task_id"):
             raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_ALREADY_USED", "message": "这组预览已经生成过结果，请重新生成预览后再选择。"})
-        if level != "original" and not session["levels"][level]["safety"]["passed"]:
+        if level != "original" and not session["levels"][level]["selectable"]:
             raise HTTPException(status_code=409, detail={"code": "LEVEL_NOT_SELECTABLE", "message": "该档位未通过安全检查，不能选择。"})
         source_path = Path(str(session["source"]["path"])).resolve()
         if not source_path.is_file() or _sha256_file(source_path) != session["source_sha256"]:
             raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "原图已变化或不存在，请重新选择图片。"})
+        if session.get("reference"):
+            reference_path = Path(str(session["reference"]["path"])).resolve()
+            if not reference_path.is_file() or _sha256_file(reference_path) != session["reference_sha256"]:
+                raise HTTPException(status_code=409, detail={"code": "REFERENCE_IDENTITY_CHANGED", "message": "参考图已变化或不存在，请重新选择参考图。"})
         if level == "original":
             session["used_by_task_id"] = "ORIGINAL_SELECTED"
             release_used_level_preview(session)
             emit_runtime_event(
                 "COLOR_LEVEL_PICK_ORIGINAL_SELECTED", stage="human_quality_review", result="original_selected",
-                impact="original_preserved_no_new_result", operation="LEVEL_PICK_COLOR_CORRECTION",
-                feature_key=COLOR_CORRECTION_FEATURE_KEY, category=session["analysis"]["category"],
+                impact="original_preserved_no_new_result",
+                operation="REFERENCE_LEVEL_PICK_COLOR_CORRECTION" if session.get("reference") else "LEVEL_PICK_COLOR_CORRECTION",
+                feature_key=COLOR_CORRECTION_FEATURE_KEY, category=session["analysis"].get("category") or "REFERENCE_SHIFT",
             )
             return {"code": 200, "status": "success", "success": True, "data": {
                 "selected_level": "original", "task": None, "result": None,
@@ -5756,6 +5845,7 @@ def register_image_compression_routes(
         output_root = effective_color_output_root(payload)
         record = create_color_task_record(session["source"], output_root, level_pick={
             "preview_id": session["preview_id"], "level": level, "analysis": dict(session["analysis"]),
+            **({"reference": dict(session["reference"])} if session.get("reference") else {}),
         })
         session["running_task_id"] = record["task_id"]
         try:

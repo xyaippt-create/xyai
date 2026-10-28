@@ -421,7 +421,7 @@ export default function App() {
 
   const handleTaskReprocess = useCallback(async () => {
     if (!isLocalRetouchResult) {
-      navigateTo(["AUTO_COLOR_CORRECTION", "REFERENCE_COLOR_CORRECTION", "LEVEL_PICK_COLOR_CORRECTION", "color_correction"].includes(taskContext?.mode)
+      navigateTo(["AUTO_COLOR_CORRECTION", "REFERENCE_COLOR_CORRECTION", "LEVEL_PICK_COLOR_CORRECTION", "REFERENCE_LEVEL_PICK_COLOR_CORRECTION", "color_correction"].includes(taskContext?.mode)
         ? "/color-correction"
         : `${DEFAULT_APP_PATH}?mode=${encodeURIComponent(taskContext?.mode || "standard")}`);
       return;

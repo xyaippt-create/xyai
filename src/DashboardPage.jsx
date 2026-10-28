@@ -181,6 +181,7 @@ function getModeDisplay(mode) {
   if (normalized === PROCESSING_MODE_FOUR_K) return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
   if (normalized === PROCESSING_MODE_COLOR_CORRECTION) return { label: "自动颜色校正", className: "text-[var(--brand-primary)]" };
   if (normalized === "LEVEL_PICK_COLOR_CORRECTION") return { label: "挑档校色", className: "text-[var(--brand-primary)]" };
+  if (normalized === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" || normalized === "REFERENCE_COLOR_CORRECTION") return { label: "参考图校色", className: "text-[var(--brand-primary)]" };
   if (normalized === RETIRED_IMAGE_DIAGNOSIS_FAMILY) return { label: "图片诊断（已下线）", className: "text-[var(--text-secondary)]" };
   return { label: normalized || "未选择", className: "text-[var(--text-secondary)]" };
 }
