@@ -53,6 +53,9 @@ ANALYSIS_LONG_EDGE = 768
 
 # Description only (not a gate): a mid-grey moved by the measured shift, in Lab units.
 NOTICEABLE_OFFSET = 3.0
+# S66-C: the reference's own white counts as tinted from this level-pick offset on.
+REFERENCE_TINTED_OFFSET = 8.0
+REFERENCE_ADVICE_VERSION = "hdde.color-reference-advice.v1"
 
 _Y_ROW = np.array([0.2126729, 0.7151522, 0.0721750], np.float32)
 
@@ -119,8 +122,25 @@ def describe_shift(shift: list[float]) -> dict[str, Any]:
     if abs(a) >= 1.5:
         parts.append("偏品红" if a > 0 else "偏绿")
     offset = round(float(np.hypot(a, b)), 1)
+    # The correction removes this shift, so the result moves the opposite way.
+    moves = []
+    if abs(b) >= 1.5:
+        moves.append("变冷（偏蓝）" if b > 0 else "变暖（偏黄）")
+    if abs(a) >= 1.5:
+        moves.append("偏绿" if a > 0 else "偏品红")
     return {"lab_a": round(a, 1), "lab_b": round(b, 1), "offset": offset,
-            "summary": ("目标图比参考图" + "、".join(parts)) if parts and offset >= NOTICEABLE_OFFSET else "两张图的色调已接近"}
+            "target_vs_reference": "、".join(parts),
+            "summary": ("按这张参考图校色，结果会" + "、".join(moves)) if moves and offset >= NOTICEABLE_OFFSET else "两张图的色调已接近"}
+
+
+def _tint_words(ab: list[float]) -> str:
+    a, b = float(ab[0]), float(ab[1])
+    words = []
+    if abs(b) >= 1.5:
+        words.append("偏黄" if b > 0 else "偏蓝")
+    if abs(a) >= 1.5:
+        words.append("偏品红" if a > 0 else "偏绿")
+    return "、".join(words)
 
 
 @dataclass
@@ -133,10 +153,27 @@ class ReferencePlan:
     overall: dict[str, Any]
     bands: list[dict[str, Any]]
     description: dict[str, Any] = field(default_factory=dict)
+    reference_self: dict[str, Any] = field(default_factory=dict)
+
+    def advice(self) -> tuple[str, str, str]:
+        """Recommended level, its reason code and the notice shown before the user picks."""
+
+        if not self.usable:
+            return "original", "REFERENCE_UNUSABLE", "这张参考图不适合用来校色，请换一张有白色或灰色区域的参考图。"
+        base = "结果会采用参考图的白，请选同一系列、同一光线的参考图。"
+        tinted = float(self.reference_self.get("measured_offset") or 0.0) >= REFERENCE_TINTED_OFFSET
+        tint = _tint_words(self.reference_self.get("ab") or [0.0, 0.0]) if tinted else ""
+        tint_note = f"参考图的白本身{tint}。" if tint else ""
+        if float(self.description.get("offset") or 0.0) < NOTICEABLE_OFFSET:
+            return "original", "SHIFT_NOT_NOTICEABLE", tint_note + base
+        if tint and self.target.category == "NO_CAST":
+            # A neutral target matched to a tinted white only inherits the tint.
+            return ("original", "TARGET_NEUTRAL_REFERENCE_TINTED",
+                    f"{tint_note}目标图颜色已正常，{self.description.get('summary', '')}，建议保留原图；如需统一成参考图的色调，可手动选档。")
+        return "medium", "REFERENCE_SHIFT_NOTICEABLE", tint_note + base
 
     def to_record(self) -> dict[str, Any]:
-        offset = float(self.description.get("offset") or 0.0)
-        recommended = "medium" if self.usable and offset >= NOTICEABLE_OFFSET else "original"
+        recommended, reason, notice = self.advice()
         return {
             "reference_level_pick_version": REFERENCE_LEVEL_PICK_VERSION,
             "usable": self.usable,
@@ -146,6 +183,11 @@ class ReferencePlan:
             "bands": [dict(b) for b in self.bands],
             "description": dict(self.description),
             "recommended_level": recommended,
+            "recommendation_reason": reason,
+            "notice": notice,
+            "advice_version": REFERENCE_ADVICE_VERSION,
+            "target_self_measurement": {"category": self.target.category, "measured_offset": self.target.measured_offset},
+            "reference_self_measurement": dict(self.reference_self),
             "faces": len(self.target.face_boxes),
         }
 
@@ -176,6 +218,7 @@ def plan_reference(target: np.ndarray, reference: np.ndarray) -> ReferencePlan:
         bands.append({"L": (lo + hi) / 2, "shift": res["shift"] if own else overall["shift"], "own": own,
                       "peak_ratio": res.get("peak_ratio"), "reason": res.get("reason")})
     usable = bool(overall["reliable"])
+    ref_self = analyze_level_pick(reference)
     return ReferencePlan(
         target=analyze_level_pick(target),
         usable=usable,
@@ -183,6 +226,8 @@ def plan_reference(target: np.ndarray, reference: np.ndarray) -> ReferencePlan:
         overall=overall,
         bands=bands,
         description=describe_shift(overall["shift"]) if usable else {"summary": "这张参考图不适合用来校色（没有可用的中性区域）", "offset": 0.0},
+        reference_self={"category": ref_self.category, "measured_offset": ref_self.measured_offset,
+                        "ab": [round(float(x), 2) for x in (ref_self.neutral.get("ab") or [0.0, 0.0])]},
     )
 
 

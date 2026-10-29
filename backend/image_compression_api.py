@@ -3333,7 +3333,8 @@ def register_image_compression_routes(
             "recommended_label": LEVEL_LABELS.get(recommended, "原图"),
             "intent_hints": [],
             "reference_usable": usable,
-            "notice": "结果会采用参考图的白，请选同一系列、同一光线的参考图。" if usable else "这张参考图不适合用来校色，请换一张有白色或灰色区域的参考图。",
+            # S66-C: the engine words the notice (direction, tinted reference); older records fall back.
+            "notice": str(analysis.get("notice") or ("结果会采用参考图的白，请选同一系列、同一光线的参考图。" if usable else "这张参考图不适合用来校色，请换一张有白色或灰色区域的参考图。")),
         }
 
     def prune_level_preview_sessions() -> None:

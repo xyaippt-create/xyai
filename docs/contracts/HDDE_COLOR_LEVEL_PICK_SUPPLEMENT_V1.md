@@ -154,3 +154,11 @@
 
 `POST /api/color-correction/reference-run` 及其 `REFERENCE_COLOR_CORRECTION` 结果保持原样，历史任务照常可读。按方案 A，S66-B 起页面不再调用这个接口：参考图页签改为四档预览，由用户挑选；参考图不可用时，被锁定的档位提示"参考图不可用，不可选"。
 
+### 7.5 提示方向与建议档位（S66-C，2026-10-29 增补）
+
+授权：负责人于 2026-10-29 批准 S66-C 任务卡（`docs/drafts/S66C_REFERENCE_DIRECTION_AND_RECOMMENDATION_FIX_CARD_DRAFT.md`）。渲染算法与各档像素不变。
+
+- `measurement.summary` 说明结果的变化方向，例如"按这张参考图校色，结果会变暖（偏黄）"。相对描述保留在测量记录的 `description.target_vs_reference` 中。
+- 预览时用第 2 节的单图测量再测一次参考图。偏色量 ≥ 8 时，`notice` 提示"参考图的白本身偏 X"。
+- 目标图单图测量为 `NO_CAST`，且参考图的白偏色量 ≥ 8 时，`recommended_level` 为 `original`（`recommendation_reason = TARGET_NEUTRAL_REFERENCE_TINTED`），各档仍可选；其余情况维持 7.2 节的规则。
+- 测量记录（预览会话与 Result 的 `analysis.REFERENCE_LEVEL_PICK`）新增 `recommendation_reason`、`notice`、`advice_version`、`target_self_measurement`、`reference_self_measurement`。

@@ -46,7 +46,8 @@ class ReferenceLevelPickAlgorithmTests(unittest.TestCase):
         target = with_cast(clean)
         plan = plan_reference(target, clean)
         self.assertTrue(plan.usable)
-        self.assertIn("偏黄", plan.description["summary"])
+        self.assertIn("结果会变冷（偏蓝）", plan.description["summary"])
+        self.assertEqual(plan.description["target_vs_reference"], "偏黄")
         before = float(delta_e2000(target, clean).mean())
         after = [float(delta_e2000(render_reference_level(target, plan, name), clean).mean()) for name in LEVELS]
         self.assertGreater(after[0], after[1])
@@ -59,6 +60,28 @@ class ReferenceLevelPickAlgorithmTests(unittest.TestCase):
         out = render_reference_level(clean, plan, "strong")
         self.assertLess(float(delta_e2000(out, clean).mean()), 0.5)
         self.assertEqual(plan.to_record()["recommended_level"], "original")
+
+    def test_neutral_target_with_tinted_reference_recommends_the_original(self):
+        # S66-C owner case: a correct photo matched to a yellow-white reference would only turn yellow.
+        clean = clean_scene()
+        plan = plan_reference(clean, with_cast(clean))
+        record = plan.to_record()
+        self.assertTrue(plan.usable)
+        self.assertIn("结果会变暖（偏黄）", plan.description["summary"])
+        self.assertEqual(record["recommended_level"], "original")
+        self.assertEqual(record["recommendation_reason"], "TARGET_NEUTRAL_REFERENCE_TINTED")
+        self.assertIn("参考图的白本身偏黄", record["notice"])
+        self.assertIn("目标图颜色已正常", record["notice"])
+        self.assertEqual(record["target_self_measurement"]["category"], "NO_CAST")
+        # advice only: every level still renders the same pixels as before
+        self.assertGreater(float(delta_e2000(render_reference_level(clean, plan, "medium"), clean).mean()), 3.0)
+
+    def test_cast_target_with_neutral_reference_keeps_the_medium_advice(self):
+        clean = clean_scene()
+        record = plan_reference(with_cast(clean), clean).to_record()
+        self.assertEqual(record["recommended_level"], "medium")
+        self.assertEqual(record["recommendation_reason"], "REFERENCE_SHIFT_NOTICEABLE")
+        self.assertNotIn("参考图的白本身", record["notice"])
 
     def test_reference_without_neutral_pixels_is_unusable(self):
         clean = clean_scene()
@@ -135,11 +158,21 @@ class ReferenceLevelPickApiTests(unittest.TestCase):
         clean = clean_scene()
         target, reference = self.intake(with_cast(clean), "target.png"), self.intake(clean, "reference.png")
         data = self.preview(target, reference)
-        self.assertIn("偏黄", data["measurement"]["summary"])
+        self.assertIn("结果会变冷（偏蓝）", data["measurement"]["summary"])
         self.assertEqual(data["measurement"]["recommended_level"], "medium")
         self.assertIn("同一系列", data["measurement"]["notice"])
         self.assertTrue(all(item["selectable"] for item in data["levels"]))
         self.assertEqual(self.client.get(data["reference_preview_url"]).status_code, 200)
+        self.assertEqual(self.color_files(), [])
+
+    def test_tinted_reference_on_neutral_target_advises_original_but_keeps_levels(self):
+        clean = clean_scene()
+        target, reference = self.intake(clean, "target.png"), self.intake(with_cast(clean), "reference.png")
+        data = self.preview(target, reference)
+        self.assertEqual(data["measurement"]["recommended_level"], "original")
+        self.assertIn("结果会变暖（偏黄）", data["measurement"]["summary"])
+        self.assertIn("参考图的白本身偏黄", data["measurement"]["notice"])
+        self.assertTrue(all(item["selectable"] for item in data["levels"]))
         self.assertEqual(self.color_files(), [])
 
     def test_selected_level_is_human_confirmed_and_records_the_reference(self):
@@ -161,7 +194,7 @@ class ReferenceLevelPickApiTests(unittest.TestCase):
         self.assertEqual(result["parameters"]["reference_sha256"], reference_sha)
         self.assertEqual(result["analysis"]["REFERENCE_PROVENANCE"]["reference_source_fingerprint"], reference_sha)
         self.assertEqual(body["ui"]["level_pick"]["label"], "强")
-        self.assertIn("偏黄", body["ui"]["level_pick"]["measurement"]["summary"])
+        self.assertIn("结果会变冷（偏蓝）", body["ui"]["level_pick"]["measurement"]["summary"])
         output = Path(body["ui"]["output_path"])
         self.assertEqual(self.color_files(), [output])
         with Image.open(output) as opened:
