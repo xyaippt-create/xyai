@@ -15,20 +15,6 @@ export const FUNCTION_DIRECTORY_BY_MODE = Object.freeze({
   UPLOAD_ADAPTATION: "上传适配",
 });
 
-export function groupDeliveryCandidates(result) {
-  const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
-  const available = candidates.filter((item) => item?.status === "AVAILABLE");
-  const recommended = candidates.find((item) => item?.recommended) || null;
-  const selected = candidates.find((item) => item?.selected) || null;
-  return {
-    candidates,
-    available,
-    recommended,
-    selected,
-    alternatives: candidates.filter((item) => item !== recommended),
-  };
-}
-
 export const REQUIRED_INTAKE_FIELDS = Object.freeze([
   "source_token",
   "display_name",

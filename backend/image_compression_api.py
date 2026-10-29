@@ -54,6 +54,7 @@ from engine.storage.result_reuse import (
     result_lineage,
     result_reuse_denial,
 )
+from engine.image_compression.common import sha256_file as _sha256_file
 from engine.image_compression.delivery_options import (
     DELIVERY_OPTIMIZATION_MODE,
     KEEP_ORIGINAL_SCHEME,
@@ -435,14 +436,6 @@ def readable_output_name(source_name: str, output_suffix: str, request: Mapping[
         trusted_original_filename=source.name,
         moment=datetime.fromtimestamp(now_value),
     )
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _safe_name(filename: str | None) -> str:
@@ -6744,17 +6737,26 @@ def register_image_compression_routes(
                 )
             return replay_delivery_request(record)
 
-    def latest_failed_delivery_for_entry(entry: Mapping[str, Any]) -> str:
-        source_task_id = str(entry.get("source_task_id") or "")
-        source_result_id = str(entry.get("source_result_id") or "")
-        task_record = task_registry.get(source_task_id)
+    def delivery_task_record(source_task_id: str) -> tuple[Mapping[str, Any] | None, str]:
+        """The live Task, else its shared fact, else the Result retained after Task deletion.
+
+        Returns the record and the registry key it is stored under.
+        """
+        task_record: Any = task_registry.get(source_task_id)
+        key = source_task_id
         if not isinstance(task_record, Mapping) and shared_task_registry is not None:
             task_record = shared_task_registry.get(source_task_id)
-        if not isinstance(task_record, Mapping) and shared_task_registry is not None:
-            result_reference_for_task = getattr(shared_task_registry, "result_reference_for_task", None)
-            if callable(result_reference_for_task):
-                task_record = result_reference_for_task(source_task_id)
-        if not isinstance(task_record, Mapping):
+            if not isinstance(task_record, Mapping):
+                result_reference_for_task = getattr(shared_task_registry, "result_reference_for_task", None)
+                if callable(result_reference_for_task):
+                    task_record = result_reference_for_task(source_task_id)
+                    key = str((task_record or {}).get("result_id") or "")
+        return (task_record if isinstance(task_record, Mapping) else None), key
+
+    def latest_failed_delivery_for_entry(entry: Mapping[str, Any]) -> str:
+        source_result_id = str(entry.get("source_result_id") or "")
+        task_record, _key = delivery_task_record(str(entry.get("source_task_id") or ""))
+        if task_record is None:
             return ""
         matching_attempts = [
             attempt
@@ -7031,6 +7033,32 @@ def register_image_compression_routes(
                     **correlation_fields,
                     **delivery_operation,
                 )
+                # Fields shared by the completed and the failed result of this entry.
+                result_base = {
+                    "result_id": result_id,
+                    "delivery_item_id": delivery_item_id,
+                    "delivery_id": delivery_id,
+                    "item_id": entry["item_id"],
+                    "source_result_id": entry["source_result_id"],
+                    "task_id": entry["source_task_id"],
+                    "feature_key": entry["source_feature_key"],
+                    "module_id": entry["source_module_id"],
+                    "operation_id": entry["source_operation_id"],
+                    "trace_id": entry["source_trace_id"],
+                    "parent_operation_id": entry["source_operation_id"],
+                    "parent_trace_id": entry["source_trace_id"],
+                    "retry_of_delivery_id": retry_of_delivery_id,
+                    "source_processing_type": entry["source_processing_type"],
+                    "source_file_name": entry["source_file_name"],
+                    "source_filename": entry["source_filename"],
+                    "suggested_filename": entry["suggested_filename"],
+                    "final_filename": entry["final_filename"],
+                    "naming_source": entry["naming_source"],
+                    "naming_evidence": entry["naming_evidence"],
+                    "delivery_file_name": entry["delivery_file_name"],
+                    "content_name": entry["content_name"],
+                    "content_name_source": entry["content_name_source"],
+                }
                 try:
                     copied = await asyncio.to_thread(
                         copy_delivery_item,
@@ -7039,29 +7067,7 @@ def register_image_compression_routes(
                         registered_output_sha256=entry["_registered_output_sha256"],
                     )
                     results.append({
-                        "result_id": result_id,
-                        "delivery_item_id": delivery_item_id,
-                        "delivery_id": delivery_id,
-                        "item_id": entry["item_id"],
-                        "source_result_id": entry["source_result_id"],
-                        "task_id": entry["source_task_id"],
-                        "feature_key": entry["source_feature_key"],
-                        "module_id": entry["source_module_id"],
-                        "operation_id": entry["source_operation_id"],
-                        "trace_id": entry["source_trace_id"],
-                        "parent_operation_id": entry["source_operation_id"],
-                        "parent_trace_id": entry["source_trace_id"],
-                        "retry_of_delivery_id": retry_of_delivery_id,
-                        "source_processing_type": entry["source_processing_type"],
-                        "source_file_name": entry["source_file_name"],
-                        "source_filename": entry["source_filename"],
-                        "suggested_filename": entry["suggested_filename"],
-                        "final_filename": entry["final_filename"],
-                        "naming_source": entry["naming_source"],
-                        "naming_evidence": entry["naming_evidence"],
-                        "delivery_file_name": entry["delivery_file_name"],
-                        "content_name": entry["content_name"],
-                        "content_name_source": entry["content_name_source"],
+                        **result_base,
                         "status": "completed",
                         "failure_reason": "",
                         **copied,
@@ -7100,29 +7106,7 @@ def register_image_compression_routes(
                         trace_id=delivery_operation["trace_id"],
                     )
                     results.append({
-                        "result_id": result_id,
-                        "delivery_item_id": delivery_item_id,
-                        "delivery_id": delivery_id,
-                        "item_id": entry["item_id"],
-                        "source_result_id": entry["source_result_id"],
-                        "task_id": entry["source_task_id"],
-                        "feature_key": entry["source_feature_key"],
-                        "module_id": entry["source_module_id"],
-                        "operation_id": entry["source_operation_id"],
-                        "trace_id": entry["source_trace_id"],
-                        "parent_operation_id": entry["source_operation_id"],
-                        "parent_trace_id": entry["source_trace_id"],
-                        "retry_of_delivery_id": retry_of_delivery_id,
-                        "source_processing_type": entry["source_processing_type"],
-                        "source_file_name": entry["source_file_name"],
-                        "source_filename": entry["source_filename"],
-                        "suggested_filename": entry["suggested_filename"],
-                        "final_filename": entry["final_filename"],
-                        "naming_source": entry["naming_source"],
-                        "naming_evidence": entry["naming_evidence"],
-                        "delivery_file_name": entry["delivery_file_name"],
-                        "content_name": entry["content_name"],
-                        "content_name_source": entry["content_name_source"],
+                        **result_base,
                         "status": "failed",
                         "failure_code": failure_code,
                         "failure_reason": str(exc) or "生成交付副本失败。",
@@ -7254,15 +7238,7 @@ def register_image_compression_routes(
                 shared_task_registry[batch_naming_delivery_fact_key(delivery_id)] = delivery_fact
             for result in results:
                 source_task_id = str(result.get("task_id") or "")
-                task_record_key = source_task_id
-                task_record = task_registry.get(source_task_id)
-                if not isinstance(task_record, dict) and shared_task_registry is not None:
-                    task_record = shared_task_registry.get(source_task_id)
-                if not isinstance(task_record, dict) and shared_task_registry is not None:
-                    result_reference_for_task = getattr(shared_task_registry, "result_reference_for_task", None)
-                    if callable(result_reference_for_task):
-                        task_record = result_reference_for_task(source_task_id)
-                        task_record_key = str((task_record or {}).get("result_id") or "")
+                task_record, task_record_key = delivery_task_record(source_task_id)
                 if not isinstance(task_record, dict):
                     continue
                 delivery_trace = {
@@ -7500,6 +7476,19 @@ def register_image_compression_routes(
         intake = create_compression_intake(content, filename)
         return dict(require_token(intake["source_token"], role="source"))
 
+    def release_batch_intake(path):
+        """The batch keeps its own verified snapshot; drop the duplicate intake copy now.
+
+        Expiring this file's intake authorizations lets the existing ownership-checked
+        pruning remove it, instead of keeping both copies until the token TTL.
+        """
+        target = Path(path).resolve()
+        expired_at = now_provider() - 1
+        for item in list(token_registry.values()):
+            if item.get("role") in {"source", "source_preview"} and Path(item["path"]).resolve() == target:
+                item["expires_at"] = expired_at
+        prune_tokens()
+
     batch_preview_tokens: dict[tuple[str, str], str] = {}
 
     def batch_source_preview_url(source, filename):
@@ -7526,6 +7515,7 @@ def register_image_compression_routes(
         output_directory=lambda: function_output_dir(
             DELIVERY_OPTIMIZATION_MODE, Path(effective_output_root({})["normalized_path"])),
         intake=batch_intake, execute=execute_compression, source_preview_url=batch_source_preview_url,
+        release_intake=release_batch_intake,
     )
     state = {
         "batch_service": batch_service,

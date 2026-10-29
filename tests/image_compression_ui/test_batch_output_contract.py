@@ -228,6 +228,17 @@ class BatchOutputContractTests(unittest.TestCase):
         self.assertEqual(preflight.json()["detail"]["code"], "UNIFIED_RESULT_NOT_FOUND")
         self.assertFalse((self.runtime.formal_root / "输出" / "智能交付").exists())
 
+    def test_batch_import_does_not_keep_a_second_intake_copy(self):
+        single = self.client.post("/api/image-compression/intake", files={"file": ("single.png", source_bytes(9), "image/png")})
+        self.assertEqual(single.status_code, 200, single.text)
+        batch_id = self.compression([("files", (f"once-{i}.png", source_bytes(i), "image/png")) for i in range(2)])
+        intake_roots = list(self.runtime.formal_root.rglob("image-compression-intake"))
+        self.assertEqual(len(intake_roots), 1)
+        leftovers = sorted(path.name for path in intake_roots[0].rglob("*.png"))
+        self.assertEqual(leftovers, ["single.png"])  # Only the unrelated single-image intake remains.
+        data = self.wait_batch(batch_id)
+        self.assertEqual([item["status"] for item in data["items"]], ["COMPLETED", "COMPLETED"])
+
 
 if __name__ == "__main__":
     unittest.main()

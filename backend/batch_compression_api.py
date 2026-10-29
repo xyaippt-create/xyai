@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
 import logging
 import re
 import time
@@ -18,6 +17,7 @@ from pathlib import Path
 
 from fastapi import Body, File, Form, HTTPException, UploadFile
 
+from engine.image_compression.common import sha256_file as file_sha
 from engine.image_compression.delivery_options import (
     PRESERVE_FORMAT_TARGET_FORMAT,
     SMART_COMPRESSION_TARGET_FORMAT,
@@ -46,11 +46,6 @@ def normalize_target_format(value, *, allow_legacy=False):
     if normalized not in SUPPORTED_TARGET_FORMATS:
         raise ValueError("BATCH_TARGET_FORMAT_INVALID")
     return normalized
-
-
-def file_sha(path):
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def contained(path, root):
@@ -510,7 +505,8 @@ class CompressionBatchService:
             await asyncio.gather(*self.active)
 
 
-def register_batch_compression_routes(app, *, registry, roots, output_directory, intake, execute, source_preview_url):
+def register_batch_compression_routes(app, *, registry, roots, output_directory, intake, execute, source_preview_url,
+                                      release_intake=None):
     service = CompressionBatchService(
         registry=registry, roots=roots, output_directory=output_directory,
         intake=intake, execute=execute, source_preview_url=source_preview_url,
@@ -563,6 +559,13 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
                 snapshot.parent.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(publish_verified_file_copy_no_overwrite, source["path"], [snapshot], expected_sha256=source["sha256"])
                 item.update(source={**source, "path": str(snapshot)}, original_bytes=source["size_bytes"])
+                if release_intake is not None:
+                    try:
+                        await asyncio.to_thread(release_intake, source["path"])
+                    except Exception:
+                        # Only cleanup failed; the copy still expires with its token.
+                        LOGGER.warning("Batch intake copy could not be released early: batch_id=%s item_id=%s",
+                                       batch_id, item["id"], exc_info=True)
             except Exception:
                 item.update(status="FAILED", error="图片无法完整解码、格式不支持或超过50MB限制，请检查原图。")
             finally:

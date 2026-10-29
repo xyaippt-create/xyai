@@ -1,5 +1,13 @@
 # Codex Changelog
 
+## 2026-10-29 - Image delivery redundancy cleanup (behaviour unchanged)
+
+- SHA256: `backend/image_compression_api._sha256_file` and `backend/batch_compression_api.file_sha` are now the shared `engine.image_compression.common.sha256_file`; the module names stay because tests patch them.
+- Smart delivery execute: the 23 fields shared by the completed and failed result of an entry are built once (same keys and order, response unchanged); the three-step source Task lookup (live Task → shared fact → Result retained after Task deletion) is one helper, `delivery_task_record`, used by both callers.
+- Removed the frontend `groupDeliveryCandidates` (multi-scheme leftover, used only by its own two tests) and those tests.
+- Batch import no longer keeps a second copy of each image for the token TTL: once the batch snapshot is verified, the intake copy's authorizations are expired and the existing ownership-checked `prune_tokens()` removes it. Failure to release only logs a warning. A real-app test checks that only the unrelated single-image intake remains.
+- Kept on purpose: `/api/image-compression/select-candidate` (backend tests use it as a contract that only the Winner can be selected); `engine/image_compression/legacy_adapters.py` (legacy evidence converter, only its own test uses it, still-needed status 未确认); the duplicate field aliases in delivery responses (public fields read by frontend and tests); per-page `formatBytes` / `requestJson` copies (they format and resolve URLs differently, so merging them would change display and behaviour); `DUPLICATE_FINAL_NAME` (still reachable when a source name has issues). Desktop app not re-run; the batch import change is covered by the real-app test runtime. No Git write.
+
 ## 2026-10-29 - Image delivery in-memory tables: bounded run cache, delivery runs reopen after restart
 
 - Measured first: `token_registry` is already bounded by its 1 h TTL. Preview tokens are reused while valid and `prune_tokens()` runs on every token lookup, so the earlier review overstated it. `expired_feedback_tokens` grows by one per expired test feedback package and was left as is.

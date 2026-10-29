@@ -13,7 +13,6 @@ import {
   feedbackPackageExpired,
   feedbackPackageUiState,
   functionOutputDirectory,
-  groupDeliveryCandidates,
   intakeSuccessPatch,
   isTokenSessionError,
   newFileSessionPatch,
@@ -173,32 +172,6 @@ test("16 页面显示目录与固定功能目录一致", () => {
   assert.equal(functionOutputDirectory(root, "LOSSLESS_COMPRESSION"), "D:\\统一目录\\PNG无损压缩");
   assert.equal(functionOutputDirectory(root, "RESIZE_REDUCTION"), "D:\\统一目录\\尺寸缩小");
   assert.equal(functionOutputDirectory(root, "UPLOAD_ADAPTATION"), "D:\\统一目录\\上传适配");
-});
-
-test("17 多方案结果稳定分组为一个推荐与两个备选", () => {
-  const grouped = groupDeliveryCandidates({
-    candidates: [
-      { scheme_id: "png_lossless", recommended: true, selected: true, status: "AVAILABLE" },
-      { scheme_id: "jpg_high_quality", recommended: false, selected: false, status: "AVAILABLE" },
-      { scheme_id: "jpg_balanced", recommended: false, selected: false, status: "AVAILABLE" },
-    ],
-  });
-  assert.equal(grouped.recommended.scheme_id, "png_lossless");
-  assert.equal(grouped.selected.scheme_id, "png_lossless");
-  assert.equal(grouped.alternatives.length, 2);
-  assert.equal(grouped.available.length, 3);
-});
-
-test("18 不适用候选保留展示但不会进入可用集合", () => {
-  const grouped = groupDeliveryCandidates({
-    candidates: [
-      { scheme_id: "png_lossless", recommended: true, selected: true, status: "AVAILABLE" },
-      { scheme_id: "jpg_high_quality", status: "NOT_APPLICABLE" },
-      { scheme_id: "jpg_balanced", status: "NOT_APPLICABLE" },
-    ],
-  });
-  assert.equal(grouped.candidates.length, 3);
-  assert.equal(grouped.available.length, 1);
 });
 
 const feedbackPackage = (overrides = {}) => ({
