@@ -1,5 +1,9 @@
 # Codex Changelog
 
+## 2026-10-29 - V0.6.1-dev 4K v3 PASS_AND_FROZEN registered in current status
+
+- Product owner accepted the in-app acceptance of 4K v3. `docs/03_CURRENT_STATUS_V0.4.5.1.md` 4K sections rewritten: `4K_V3: PASS_AND_FROZEN`, contract `4k_v1_contract_2.0`, route `REALESRGAN_X4PLUS_FIDELITY_FUSION`, frozen commits 39c591f / 1b50364 / 730d7eb; the previous LANCZOS-only freeze is kept as history only; the cross-version risk "4K is only LANCZOS resize but named 4K画质增强" is closed. User-visible boundaries, protection rule (no change without owner request plus re-run of sample and in-app acceptance) and untested categories (PPT screenshots, real landscape photos) recorded. Documentation only; no code change.
+
 ## 2026-10-29 - V0.6.1-dev 4K SR v3 in-app acceptance (on behalf of product owner)
 
 - Ran committed v3 (`1b50364`) through the real UI on an isolated backend (127.0.0.1:8797, formal root `D:\影界文件`; 8787 untouched): reported yangrou poster, S07 text poster and S03 portrait. All three `completed`, route `REALESRGAN_X4PLUS_FIDELITY_FUSION`, `DETAIL_ENHANCEMENT_COMPLETED`, `source_hash_unchanged=true`, 74–80s, outputs 2880×3840 / 3073×3840, pixel-identical to the v3 prototype; progress tracked real SR progress and the result page showed correct sizes and copy.
