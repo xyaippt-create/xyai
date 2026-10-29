@@ -607,3 +607,107 @@ class BatchStabilityTests(unittest.TestCase):
                 self.assertNotIn(task_id, self.registry)
                 self.assertEqual(self.registry[result_id], record)
                 self.close()
+
+
+class BatchDispatcherFailureContainmentTests(unittest.TestCase):
+    """A worker that fails outside its own recovery must not stop the batch queue."""
+
+    def make_service(self, registry):
+        from backend.batch_compression_api import CompressionBatchService
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        service = CompressionBatchService(
+            registry=registry, roots=lambda: {"tmp_dir": temp.name}, output_directory=lambda: temp.name,
+            intake=None, execute=None, source_preview_url=lambda *_: "",
+        )
+        service.loaded, service.loaded_root = True, str(service.cache_root())
+        return service
+
+    def test_worker_failure_pauses_batch_and_next_run_continues(self):
+        persisted = []
+
+        class Registry(dict):
+            def persist_facts(self, facts):
+                persisted.append(copy.deepcopy(facts))
+
+        service = self.make_service(Registry())
+        items = [{"id": f"item{index}", "task_id": f"compression_task{index}", "name": f"{index}.png",
+                  "status": "QUEUED", "source_id": "", "original_bytes": 1,
+                  "source": {"width": 10, "height": 10}} for index in range(2)]
+        service.batches = {"b": {"batch_id": "b", "control": "RUNNING", "workers": 1, "created_at": 0, "items": items}}
+        calls = []
+
+        async def work(batch, item):
+            calls.append(item["id"])
+            if item["id"] == "item0":
+                raise RuntimeError("batch snapshot writer failed outside SharedTaskRegistryError")
+            item["status"] = "COMPLETED"
+
+        service.work = work
+
+        async def run():
+            with self.assertLogs("backend.batch_compression_api", level="ERROR"):
+                service.ensure_running()
+                await service.pump
+            self.assertTrue(service.pump.done() and service.pump.exception() is None)
+            self.assertEqual(service.active, {})
+            batch = service.batches["b"]
+            self.assertEqual(batch["control"], "PAUSED")
+            self.assertEqual(items[0]["status"], "QUEUED")
+            self.assertIn("不会重复生成成品", items[0]["error"])
+            self.assertEqual(items[1]["status"], "QUEUED")
+            self.assertTrue(persisted and persisted[-1]["b"]["control"] == "PAUSED")
+
+            calls.clear()
+            batch["control"] = "RUNNING"
+
+            async def recovered(batch, item):
+                item["status"] = "COMPLETED"
+                calls.append(item["id"])
+
+            service.work = recovered
+            service.ensure_running()
+            await service.pump
+            self.assertEqual(calls, ["item0", "item1"])
+            self.assertEqual([item["status"] for item in items], ["COMPLETED", "COMPLETED"])
+
+        asyncio.run(run())
+
+    def test_item_interrupted_by_app_shutdown_is_kept_for_recovery(self):
+        class Registry(dict):
+            def persist_facts(self, facts):
+                self.update(copy.deepcopy(facts))
+
+        registry = Registry()
+        service = self.make_service(registry)
+        source = service.cache_root() / "b" / "item0" / "source.png"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"saved source bytes")
+        item = {"id": "item0", "task_id": "compression_task0", "reserved_result_id": "compression_result0",
+                "name": "big.png", "status": "PROCESSING", "source_id": "", "original_bytes": 1,
+                "source": {"path": str(source), "sha256": hashlib.sha256(b"saved source bytes").hexdigest(),
+                           "width": 10, "height": 10}}
+        batch = {"batch_id": "b", "control": "RUNNING", "workers": 1, "created_at": 0, "items": [item],
+                 "output_directory": str(Path(service.output_directory()).resolve())}
+        service.batches = {"b": batch}
+
+        async def execute(payload, *, batch_job):
+            await batch_job.checked_source()
+            service.closing = True  # The window closed while this encode was running.
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+        service.execute = execute
+        with self.assertLogs("backend.batch_compression_api", level="WARNING"):
+            asyncio.run(service.work(batch, item))
+        self.assertEqual(item["status"], "QUEUED")
+        self.assertTrue(item["recovery_active"])
+        self.assertIn("下次启动", item["error"])
+        self.assertEqual(registry["b"]["items"][0]["status"], "QUEUED")
+
+        # Identity failures are never softened into recovery, even while closing.
+        item.update(status="PROCESSING", recovery_active=False)
+        source.write_bytes(b"replaced while closing")
+        asyncio.run(service.work(batch, item))
+        self.assertEqual(item["status"], "FAILED")
+        self.assertEqual(item["error"], "SOURCE_IDENTITY_MISMATCH")

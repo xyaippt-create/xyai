@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { HddePageHeader } from "./HddeUI.jsx";
+import { createDeliveryRequestId, executeSingleResultDelivery } from "./batchDelivery.js";
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, options);
@@ -8,6 +9,8 @@ async function requestJson(path, options = {}) {
     const detail = payload?.detail;
     const error = new Error(detail?.message || payload?.message || "文件交付暂时无法完成该操作。");
     error.payload = payload;
+    error.status = response.status;
+    error.code = detail?.code || "";
     throw error;
   }
   return payload;
@@ -27,9 +30,11 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
   const [confirmed, setConfirmed] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [delivery, setDelivery] = useState(null);
+  const [requestKey, setRequestKey] = useState(() => createDeliveryRequestId());
   const selectionMode = selectedResultIds.length ? "result_ids" : "item_ids";
   const selectedIds = selectedResultIds.length ? selectedResultIds : selectedItemIds;
   const selectionKey = useMemo(() => selectedIds.join("|"), [selectedIds]);
+  const singleResult = selectionMode === "result_ids" && selectedIds.length === 1;
 
   useEffect(() => {
     const selectedValues = selectionKey ? selectionKey.split("|") : [];
@@ -47,6 +52,7 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
         if (!active) return;
         setPreflight(payload.data);
         setPreflightState(payload.data?.ready ? "ready" : "blocked");
+        setRequestKey(createDeliveryRequestId());
       })
       .catch((reason) => {
         if (!active) return;
@@ -64,6 +70,22 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
     setExecuting(true);
     setError("");
     try {
+      if (singleResult) {
+        const outcome = await executeSingleResultDelivery({
+          planId: preflight.plan_id,
+          resultId: selectedIds[0],
+          idempotencyKey: requestKey,
+          request: requestJson,
+        });
+        if (outcome.outcome === "settled") {
+          setDelivery(outcome.data);
+        } else {
+          setError(outcome.outcome === "pending"
+            ? "交付结果正在确认，请稍后再次点击确认；不会重复生成副本。"
+            : "交付请求没有到达服务端，可以再次点击确认。");
+        }
+        return;
+      }
       const payload = await requestJson("/api/smart-delivery/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -71,6 +93,8 @@ export default function SmartDeliveryPage({ selectedItemIds = [], selectedResult
       });
       setDelivery(payload.data);
     } catch (reason) {
+      // A definite failure ends this request; the next attempt is a new one.
+      if (singleResult) setRequestKey(createDeliveryRequestId());
       const refreshed = reason.payload?.detail?.preflight;
       if (refreshed) {
         setPreflight(refreshed);

@@ -4,6 +4,7 @@ import {
   BATCH_DELIVERY_STATUS,
   blocksBatchDeliverySelection,
   deliverBatchResults,
+  executeSingleResultDelivery,
   invalidatesBatchDeliveryEligibility,
   isBatchDeliveryEligible,
   loadBatchDeliveryStates,
@@ -426,4 +427,64 @@ test("preparing observer reports server facts without creating an expected 404 i
   assert.match(path, /\/import-progress$/);
   assert.equal(await readBatchImportProgress("batch", { request: async () => ({ data: { registered: false, preparedCount: 0, preparingName: "" } }) }), null);
   await assert.rejects(() => readBatchImportProgress("batch", { request: async () => { throw Object.assign(new Error("timeout"), { status: 500 }); } }), /timeout/);
+});
+
+test("single-Result delivery confirms a lost execute response with the same key", async () => {
+  const key = `delivery_request_${"9".repeat(32)}`;
+  const calls = [];
+  const delivered = { delivery_id: "delivery_1", status: "completed", success_count: 1, failure_count: 0, results: [] };
+  const request = async (path, options = {}) => {
+    calls.push({ path, body: options.body ? JSON.parse(options.body) : null });
+    if (path === "/api/smart-delivery/execute") throw Object.assign(new TypeError("Failed to fetch"), { status: 0, code: "" });
+    return { success: true, data: { ...delivered, idempotent_replay: true } };
+  };
+  const outcome = await executeSingleResultDelivery({ planId: "plan_1", resultId: "result-1", idempotencyKey: key, request });
+  assert.equal(outcome.outcome, "settled");
+  assert.equal(outcome.data.delivery_id, "delivery_1");
+  assert.deepEqual(calls[0].body, { plan_id: "plan_1", confirmed: true, idempotency_key: key });
+  assert.equal(calls[1].path, `/api/smart-delivery/requests/${key}?result_id=result-1`);
+  assert.equal(calls.length, 2);
+});
+
+test("single-Result delivery reports pending, not-started and definite outcomes distinctly", async () => {
+  const key = `delivery_request_${"8".repeat(32)}`;
+  const lost = Object.assign(new Error("Server Error"), { status: 502, code: "" });
+  const run = (statusReply) => executeSingleResultDelivery({
+    planId: "plan_2", resultId: "result-2", idempotencyKey: key,
+    request: async (path) => {
+      if (path === "/api/smart-delivery/execute") throw lost;
+      return statusReply();
+    },
+  });
+  assert.equal((await run(() => ({ success: true, data: { status: "processing" } }))).outcome, "pending");
+  assert.equal((await run(() => {
+    throw Object.assign(new Error("not found"), { status: 404, code: "SMART_DELIVERY_REQUEST_NOT_FOUND" });
+  })).outcome, "not_started");
+  await assert.rejects(run(() => {
+    throw Object.assign(new Error("interrupted"), { status: 409, code: "SMART_DELIVERY_INTERRUPTED" });
+  }), /interrupted/);
+
+  const definite = Object.assign(new Error("changed"), { status: 409, code: "SMART_DELIVERY_PREVIEW_CHANGED" });
+  const statusCalls = [];
+  await assert.rejects(executeSingleResultDelivery({
+    planId: "plan_3", resultId: "result-3", idempotencyKey: key,
+    request: async (path) => {
+      if (path === "/api/smart-delivery/execute") throw definite;
+      statusCalls.push(path);
+      return { success: true, data: {} };
+    },
+  }), /changed/);
+  assert.deepEqual(statusCalls, []);
+});
+
+test("batch Results nested under their batch card are found and eligible only while available", async () => {
+  const child = (id, extra = {}) => ({ id: `card-${id}`, result_id: id, unified_result: true, delivery_eligible: true, status: "COMPLETED", available: true, ...extra });
+  const matched = await loadBatchOutputItems(["result-a", "result-b"], { request: async () => ({ data: { items: [
+    { id: "compression_batch_1", batch_id: "compression_batch_1", items: [child("result-a"), child("result-b", { available: false })] },
+  ] } }) });
+  assert.equal(matched["result-a"].id, "card-result-a");
+  const batchItem = (resultId) => ({ status: "COMPLETED", resultId, outputSha256: sha("a") });
+  assert.equal(isBatchDeliveryEligible(batchItem("result-a"), matched["result-a"]), true);
+  assert.equal(isBatchDeliveryEligible(batchItem("result-b"), matched["result-b"]), false);
+  assert.equal(isBatchDeliveryEligible(batchItem("result-a"), { ...matched["result-a"], status: "FAILED" }), false);
 });

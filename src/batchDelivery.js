@@ -117,7 +117,9 @@ export async function loadBatchOutputItems(resultIds, { request = requestBatchDe
   if (!requested.size) return {};
   const payload = await request("/api/output-center/items");
   const matched = {};
-  for (const item of payload.data?.items || []) {
+  // Batch Results are nested under their batch card in the Output Center.
+  const items = (payload.data?.items || []).flatMap((item) => [item, ...(item?.items || [])]);
+  for (const item of items) {
     const resultId = String(item?.result_id || "");
     if (!requested.has(resultId) || matched[resultId]) continue;
     matched[resultId] = item;
@@ -139,7 +141,9 @@ export function isBatchDeliveryEligible(item, outputItem, selectionBlocked = fal
     && outputItem?.result_id === item.resultId
     && outputItem?.unified_result === true
     && outputItem?.delivery_eligible === true
-    && outputItem?.status === "completed";
+    && outputItem?.available !== false
+    // A single card reports "completed"; a batch child keeps its batch status "COMPLETED".
+    && String(outputItem?.status || "").toLowerCase() === "completed";
 }
 
 function issueMessage(preflight) {
@@ -188,6 +192,35 @@ function executeOutcomeUnknown(reason) {
     || !code
     || reason?.name === "AbortError"
     || ["NETWORK_ERROR", "SERVER_ERROR", "FETCH_ERROR", "ECONNRESET", "ETIMEDOUT"].includes(code);
+}
+
+// One Result, one idempotency key: when the execute response is lost, ask the server
+// what that request did instead of resubmitting and creating a second copy.
+// `request` must reject with { status, code } like requestBatchDeliveryJson.
+export async function executeSingleResultDelivery({ planId, resultId, idempotencyKey, request = requestBatchDeliveryJson }) {
+  try {
+    const payload = await request("/api/smart-delivery/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan_id: planId, confirmed: true, idempotency_key: idempotencyKey }),
+    });
+    return { outcome: "settled", data: payload.data };
+  } catch (reason) {
+    if (!executeOutcomeUnknown(reason)) throw reason;
+  }
+  try {
+    const statusPayload = await request(
+      `/api/smart-delivery/requests/${encodeURIComponent(idempotencyKey)}?result_id=${encodeURIComponent(resultId)}`,
+    );
+    const pending = String(statusPayload.data?.status || "").toLowerCase() === "processing";
+    return { outcome: pending ? "pending" : "settled", data: statusPayload.data };
+  } catch (reason) {
+    if (Number(reason?.status) === 404 && String(reason?.code || "") === "SMART_DELIVERY_REQUEST_NOT_FOUND") {
+      return { outcome: "not_started", data: null };
+    }
+    if (executeOutcomeUnknown(reason)) return { outcome: "pending", data: null };
+    throw reason;
+  }
 }
 
 function normalizeDeliveryResult(entry, run) {

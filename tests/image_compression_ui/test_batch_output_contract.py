@@ -186,6 +186,48 @@ class BatchOutputContractTests(unittest.TestCase):
         self.assertNotIn("thumbnail_url", child)
         self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), original_sha)
 
+    def test_compression_batch_results_can_be_delivered_by_result_id(self):
+        files = [("files", (f"deliver-{i}.png", source_bytes(i), "image/png")) for i in range(2)]
+        batch_id = self.compression(files)
+        self.wait_batch(batch_id)
+        children = [item for item in self.card(batch_id)["items"] if item["status"] == "COMPLETED"]
+        self.assertEqual(len(children), 2)
+        for child in children:
+            preflight = self.client.post("/api/smart-delivery/preflight", json={"result_ids": [child["result_id"]], "rules": {}})
+            self.assertEqual(preflight.status_code, 200, preflight.text)
+            plan = preflight.json()["data"]
+            self.assertTrue(plan["ready"], plan)
+            execute = self.client.post("/api/smart-delivery/execute", json={
+                "plan_id": plan["plan_id"], "confirmed": True,
+                "idempotency_key": "delivery_request_" + uuid.uuid4().hex,
+            })
+            self.assertEqual(execute.status_code, 200, execute.text)
+            result = execute.json()["data"]["results"][0]
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["source_result_id"], child["result_id"])
+            self.assertEqual(result["delivery_sha256"], child["output_sha256"])
+            delivered = self.runtime.formal_root / "输出" / "智能交付" / result["delivery_file_name"]
+            self.assertEqual(hashlib.sha256(delivered.read_bytes()).hexdigest(), child["output_sha256"])
+
+    def test_batch_child_with_wrong_registered_sha_is_not_deliverable(self):
+        batch_id = self.compression([("files", ("tampered.png", source_bytes(5), "image/png"))])
+        self.wait_batch(batch_id)
+        result_id = self.card(batch_id)["items"][0]["result_id"]
+        self.client.__exit__(None, None, None)
+        registry = SharedTaskRegistry(self.runtime.formal_root)
+        for key in (batch_id, "output_batch:" + batch_id):
+            if key in registry:
+                record = registry[key]
+                record["items"][0]["output_sha256"] = "0" * 64
+                registry[key] = record
+        self.client = TestClient(self.runtime.main.build_web_app())
+        self.client.__enter__()
+        self.assertFalse(self.card(batch_id)["items"][0]["available"])
+        preflight = self.client.post("/api/smart-delivery/preflight", json={"result_ids": [result_id], "rules": {}})
+        self.assertEqual(preflight.status_code, 404, preflight.text)
+        self.assertEqual(preflight.json()["detail"]["code"], "UNIFIED_RESULT_NOT_FOUND")
+        self.assertFalse((self.runtime.formal_root / "输出" / "智能交付").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -27,6 +28,7 @@ from engine.storage.shared_task_registry import SharedTaskRegistryError
 from engine.storage.batch_results import BATCH_SCHEMA, item_identity, mapping, value
 
 
+LOGGER = logging.getLogger(__name__)
 BATCH_KIND = "compression_batch"
 DEFAULT_WORKERS = 2
 MAX_WORKERS = 3
@@ -132,6 +134,7 @@ def retained_result_view(record, item):
 class BatchJob:
     def __init__(self, service, batch, item):
         self.service, self.batch, self.item = service, batch, item
+        self._checked_source = None
 
     @property
     def source(self):
@@ -141,17 +144,29 @@ class BatchJob:
             raise ValueError("SOURCE_IDENTITY_MISMATCH")
         return source
 
+    async def checked_source(self):
+        """Verify the saved Source once when this job starts.
+
+        Work, the compression adapter and generate() all need it back to back; later
+        checks that must see fresh bytes (after encoding, after publication) still
+        use .source.
+        """
+        if self._checked_source is None:
+            self._checked_source = await asyncio.to_thread(lambda: self.source)
+        return dict(self._checked_source)
+
     async def generate(self, producer, output_dir):
         """Recover verified bytes, or run the frozen pipeline once in private staging.
 
         The receipt is durable BEFORE any public copy. A crash after that point
         reuses the SHA-bound artifact and reserved identity, never re-encodes it.
         """
-        source = self.source
+        source = await self.checked_source()
         output_dir = Path(output_dir).resolve()
         if output_dir != Path(self.batch["output_directory"]).resolve():
             raise ValueError("BATCH_OUTPUT_DIRECTORY_CHANGED")
         receipt = self.item.get("prepared")
+        verified_private = None
         if receipt is None:
             stage = contained(Path(self.batch["cache_directory"]) / self.item["id"] / uuid.uuid4().hex,
                               self.service.cache_root())
@@ -168,8 +183,9 @@ class BatchJob:
             if generated["public_output_count"]:
                 winner = generated["winner"]
                 private = contained(winner["output_path"], stage)
-                if file_sha(private) != winner["output_sha256"]:
+                if await asyncio.to_thread(file_sha, private) != winner["output_sha256"]:
                     raise ValueError("RESULT_IDENTITY_MISMATCH")
+                verified_private = private
                 # Preserve the optimizer's formal name and the existing _02 style.
                 reserved = self.service.reserved_outputs()
                 target = output_dir / private.name
@@ -181,7 +197,7 @@ class BatchJob:
             self.item["prepared"] = receipt
             self.service.persist(self.batch)
         generated = copy.deepcopy(receipt["generated"])
-        if generated["source"]["sha256"] != self.source["sha256"]:
+        if generated["source"]["sha256"] != (await asyncio.to_thread(lambda: self.source))["sha256"]:
             raise ValueError("SOURCE_IDENTITY_MISMATCH")
         if generated["public_output_count"]:
             winner = generated["winner"]
@@ -190,21 +206,22 @@ class BatchJob:
             if target.parent != output_dir:
                 raise ValueError("BATCH_PUBLIC_PATH_INVALID")
             expected = winner["output_sha256"]
-            if file_sha(private) != expected:
+            # A receipt recovered from an earlier run is re-checked; one this call just
+            # verified above is not hashed again.
+            if private != verified_private and await asyncio.to_thread(file_sha, private) != expected:
                 raise ValueError("RESULT_IDENTITY_MISMATCH")
             newly_published = False
             if target.exists():
-                if file_sha(target) != expected:
+                if await asyncio.to_thread(file_sha, target) != expected:
                     raise ValueError("RESULT_IDENTITY_MISMATCH")
             else:
+                # The publisher re-reads the persisted copy and rejects any SHA mismatch.
                 await asyncio.to_thread(publish_verified_file_copy_no_overwrite, private, [target], expected_sha256=expected)
                 newly_published = True
-            if file_sha(target) != expected:
-                raise ValueError("RESULT_IDENTITY_MISMATCH")
             try:
-                self.source  # Source must also remain bound across the publication.
+                await asyncio.to_thread(lambda: self.source)  # Source must also remain bound across the publication.
             except Exception:
-                if newly_published and file_sha(target) == expected:
+                if newly_published and await asyncio.to_thread(file_sha, target) == expected:
                     target.unlink()  # Only this attempt's just-published, SHA-bound file.
                 raise
             winner["output_path"] = str(target)
@@ -347,10 +364,13 @@ class CompressionBatchService:
 
     async def dispatch(self):
         while not self.closing:
-            for task in self.active:
-                if task.done():
-                    task.result()  # Never silently discard a registry/writer failure.
-            self.active = {task: info for task, info in self.active.items() if not task.done()}
+            for task in [task for task in self.active if task.done()]:
+                batch_id, _pixels, item = self.active.pop(task)
+                failure = asyncio.CancelledError() if task.cancelled() else task.exception()
+                if failure is not None:
+                    # Remove the finished task before handling it: re-raising here would
+                    # leave it in active and kill every later dispatcher run.
+                    self.contain_worker_failure(self.batches[batch_id], item, failure)
             for batch in self.batches.values():
                 for item in batch["items"]:
                     if item["status"] != "QUEUED" or (batch["control"] != "RUNNING" and not item.get("recovery_active")):
@@ -369,10 +389,27 @@ class CompressionBatchService:
                         batch["control"] = "PAUSED"
                         break
                     task = asyncio.create_task(self.work(batch, item))
-                    self.active[task] = (batch["batch_id"], pixels)
+                    self.active[task] = (batch["batch_id"], pixels, item)
             if not self.active:
                 return
             await asyncio.wait(self.active, return_when=asyncio.FIRST_COMPLETED)
+
+    def contain_worker_failure(self, batch, item, failure):
+        """Never silently discard a registry/writer failure, and never let it stop the batch queue."""
+        LOGGER.error(
+            "Compression batch worker failed outside its own recovery: batch_id=%s item_id=%s task_id=%s status=%s; "
+            "batch paused, item kept recoverable from its saved receipt.",
+            batch["batch_id"], item.get("id"), item.get("task_id"), item.get("status"),
+            exc_info=(type(failure), failure, failure.__traceback__),
+        )
+        batch["control"] = "PAUSED"
+        if item["status"] == "PROCESSING":
+            item.update(status="QUEUED", recovery_active=False,
+                        error="该图片状态未能完整保存，批次已暂停；继续时将核对原有凭据，不会重复生成成品。")
+        try:
+            self.persist(batch)
+        except Exception:
+            LOGGER.exception("Compression batch state could not be saved after worker failure: batch_id=%s", batch["batch_id"])
 
     async def work(self, batch, item):
         try:
@@ -381,7 +418,7 @@ class CompressionBatchService:
             if str(Path(self.output_directory()).resolve()) != batch["output_directory"]:
                 raise ValueError("BATCH_OUTPUT_DIRECTORY_CHANGED")
             job = BatchJob(self, batch, item)
-            job.source  # Check the saved Source before using any existing Result.
+            await job.checked_source()  # Check the saved Source before using any existing Result.
             existing = self.registry.get(item["task_id"], {})
             if existing.get("status") != "completed":
                 await self.execute({
@@ -400,6 +437,17 @@ class CompressionBatchService:
                 # or generate a second Winner. Identity mismatches do NOT enter here.
                 batch["control"] = "PAUSED"
                 item.update(status="QUEUED", result_id="", final_bytes=None, output_sha256="", error="登记或文件写入中断；请检查目录后继续，将核对原有凭据而非重新生成成品。")
+            elif self.closing and not isinstance(exc, ValueError):
+                # The app is closing: the launcher stops waiting and the runtime refuses
+                # new thread work, so an encode in progress cannot finish now. That is an
+                # interruption, not a bad image; resume it on the next start (a saved
+                # receipt is reused). Identity/path checks (ValueError) still fail.
+                LOGGER.warning(
+                    "Compression batch item interrupted by shutdown: batch_id=%s item_id=%s task_id=%s reason=%s; kept for recovery.",
+                    batch["batch_id"], item.get("id"), item.get("task_id"), exc,
+                )
+                item.update(status="QUEUED", recovery_active=True, result_id="", final_bytes=None, output_sha256="",
+                            error="应用关闭时处理被中断，下次启动将从已保存的原图或凭据继续。")
             else:
                 item.update(status="FAILED", error=code if re.fullmatch(r"[A-Z0-9_]+", code) else "该图片处理失败，请核对原图；其他图片继续处理。")
         finally:
@@ -509,7 +557,7 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
         for upload, item in zip(files, batch["items"]):
             try:
                 content = await upload.read(MAX_UPLOAD_BYTES + 1)
-                source = intake(content, upload.filename or "")
+                source = await asyncio.to_thread(intake, content, upload.filename or "")
                 del content
                 snapshot = contained(cache / item["id"] / Path(source["path"]).name, cache)
                 snapshot.parent.mkdir(parents=True, exist_ok=True)

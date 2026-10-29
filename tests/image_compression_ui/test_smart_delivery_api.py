@@ -1,5 +1,6 @@
 import hashlib
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -579,6 +580,173 @@ class SmartDeliveryApiTests(unittest.TestCase):
             item.get("status") == "completed"
             for item in self.shared_registry["enhancement_task_005"].get("deliveries", [])
         ))
+
+    def use_failing_registry(self, should_fail):
+        class FailingRegistry(dict):
+            def __setitem__(registry, key, value):
+                if should_fail("set", str(key)):
+                    raise RuntimeError(f"registry write failed for {key}")
+                super().__setitem__(key, value)
+
+            def get(registry, key, default=None):
+                if should_fail("get", str(key)):
+                    raise RuntimeError(f"registry read failed for {key}")
+                return super().get(key, default)
+
+        self.client.close()
+        self.shared_registry = FailingRegistry(self.shared_registry)
+        self.client = self.make_client()
+
+    def execute_with_key(self, result_id, idempotency_key):
+        plan = self.preflight(result_ids=[result_id]).json()["data"]
+        self.assertTrue(plan["ready"], plan)
+        return {"plan_id": plan["plan_id"], "confirmed": True, "idempotency_key": idempotency_key}
+
+    def request_status(self, idempotency_key, result_id):
+        return self.client.get(f"/api/smart-delivery/requests/{idempotency_key}", params={"result_id": result_id})
+
+    def test_registration_failure_after_copy_settles_request_with_real_copy(self):
+        result_id = self.result_ids[0]
+        idempotency_key = f"delivery_request_{'d' * 32}"
+        armed = {"on": False}
+        self.use_failing_registry(lambda op, key: armed["on"] and op == "set" and key.startswith("delivery:"))
+        payload = self.execute_with_key(result_id, idempotency_key)
+        armed["on"] = True
+        with self.assertRaises(RuntimeError):
+            self.client.post("/api/smart-delivery/execute", json=payload)
+        armed["on"] = False
+
+        request_fact = self.shared_registry[f"delivery_request:{idempotency_key}"]
+        self.assertEqual(request_fact["status"], "COMPLETED")
+        status = self.request_status(idempotency_key, result_id)
+        self.assertEqual(status.status_code, 200, status.text)
+        data = status.json()["data"]
+        self.assertTrue(data["idempotent_replay"])
+        self.assertEqual(data["results"][0]["status"], "completed")
+        delivered = self.output_root / "智能交付" / data["results"][0]["delivery_file_name"]
+        self.assertEqual(sha256_file(delivered), data["results"][0]["delivery_sha256"])
+        self.assertEqual(len(list((self.output_root / "智能交付").glob("*.png"))), 1)
+
+    def test_interruption_before_copy_settles_definite_failure_and_allows_new_request(self):
+        result_id = self.result_ids[0]
+        idempotency_key = f"delivery_request_{'e' * 32}"
+        armed = {"on": False}
+        self.use_failing_registry(lambda op, key: armed["on"] and op == "get" and key == "enhancement_task_001")
+        payload = self.execute_with_key(result_id, idempotency_key)
+        with patch.object(image_compression_api_module, "publish_verified_file_copy_no_overwrite",
+                          side_effect=AssertionError("copy must not run")) as copy_mock:
+            armed["on"] = True
+            try:
+                with self.assertRaises(RuntimeError):
+                    self.client.post("/api/smart-delivery/execute", json=payload)
+            finally:
+                armed["on"] = False
+            copy_mock.assert_not_called()
+
+        status = self.request_status(idempotency_key, result_id)
+        self.assertEqual(status.status_code, 409, status.text)
+        self.assertEqual(status.json()["detail"]["code"], "SMART_DELIVERY_INTERRUPTED")
+        self.assertFalse(any((self.output_root / "智能交付").glob("*.png")))
+
+        retry = self.client.post(
+            "/api/smart-delivery/execute",
+            json=self.execute_with_key(result_id, f"delivery_request_{'f' * 32}"),
+        )
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.json()["data"]["success_count"], 1)
+
+    def test_processing_request_left_by_previous_session_is_reported_unconfirmed(self):
+        result_id = self.result_ids[0]
+        idempotency_key = f"delivery_request_{'g' * 32}"
+        self.shared_registry[f"delivery_request:{idempotency_key}"] = {
+            "record_kind": "delivery_request",
+            "idempotency_key": idempotency_key,
+            "result_id": result_id,
+            "delivery_id": "delivery_before_restart",
+            "status": "PROCESSING",
+            "server_session_id": "previous-backend-session",
+            "created_at": "2026-08-01T00:00:00+00:00",
+        }
+        status = self.request_status(idempotency_key, result_id)
+        self.assertEqual(status.status_code, 409, status.text)
+        self.assertEqual(status.json()["detail"]["code"], "SMART_DELIVERY_OUTCOME_UNCONFIRMED")
+        self.assertFalse((self.output_root / "智能交付").exists())
+
+    def test_unreadable_source_blocks_preflight_instead_of_server_error(self):
+        locked = str(self.sources[0].resolve())
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            # Only the plan's own stat after lookup: the file is locked between checks.
+            if str(path) == locked and sys._getframe(1).f_code.co_name == "build_smart_delivery_plan":
+                raise PermissionError("locked by another program")
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat):
+            response = self.preflight(result_ids=[self.result_ids[0]])
+        self.assertEqual(response.status_code, 200, response.text)
+        plan = response.json()["data"]
+        self.assertFalse(plan["ready"])
+        self.assertIn("DELIVERY_SOURCE_UNREADABLE", [issue["code"] for issue in plan["issues"]])
+
+    def test_preflight_for_unregistered_result_id_writes_no_persistent_fact(self):
+        before = set(self.shared_registry)
+        response = self.preflight(result_ids=["result_never_registered_0001"])
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "UNIFIED_RESULT_NOT_FOUND")
+        self.assertEqual(set(self.shared_registry), before)
+
+    def test_content_change_hidden_from_plan_hash_cache_is_still_blocked_at_copy(self):
+        import os
+
+        source = self.sources[0]
+        plan = self.preflight(result_ids=[self.result_ids[0]]).json()["data"]
+        self.assertTrue(plan["ready"], plan)
+        stat = source.stat()
+        data = bytearray(source.read_bytes())
+        data[-20] ^= 0xFF  # Same size, different bytes, mtime restored below.
+        with source.open("r+b") as handle:
+            handle.write(bytes(data))
+        os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(source.stat().st_mtime_ns, stat.st_mtime_ns)
+
+        execution = self.client.post(
+            "/api/smart-delivery/execute",
+            json={"plan_id": plan["plan_id"], "confirmed": True},
+        )
+        self.assertEqual(execution.status_code, 409, execution.text)
+        self.assertEqual(execution.json()["detail"]["code"], RESULT_IDENTITY_MISMATCH)
+        self.assertFalse(any((self.output_root / "智能交付").glob("*.png")))
+
+    def deliver_one(self, result_id):
+        plan = self.preflight(result_ids=[result_id]).json()["data"]
+        response = self.client.post("/api/smart-delivery/execute", json={"plan_id": plan["plan_id"], "confirmed": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["data"]
+
+    def test_delivery_run_can_be_opened_after_restart(self):
+        delivery = self.deliver_one(self.result_ids[0])
+        item = delivery["results"][0]
+        self.client.close()
+        self.client = self.make_client()  # Same registry, empty in-memory run cache.
+        delivery_root = (self.output_root / "智能交付").resolve()
+        folder = self.client.post(f"/api/smart-delivery/runs/{delivery['delivery_id']}/open-folder")
+        file = self.client.post(f"/api/smart-delivery/runs/{delivery['delivery_id']}/items/{item['delivery_item_id']}/open")
+        self.assertEqual((folder.status_code, file.status_code), (200, 200), (folder.text, file.text))
+        self.assertEqual(self.opened[-2:], [str(delivery_root), str(delivery_root / item["delivery_file_name"])])
+        unknown = self.client.post("/api/smart-delivery/runs/delivery_unknown_run/open-folder")
+        self.assertEqual(unknown.status_code, 404)
+
+    def test_run_cache_is_bounded_and_evicted_runs_reopen_from_fact(self):
+        with patch.object(image_compression_api_module, "SMART_DELIVERY_RUN_CACHE_SIZE", 1):
+            first = self.deliver_one(self.result_ids[0])
+            self.deliver_one(self.result_ids[1])
+            state = self.client.app.state.image_compression_api_state
+            self.assertEqual(len(state["smart_delivery_run_registry"]), 1)
+            reopened = self.client.post(
+                f"/api/smart-delivery/runs/{first['delivery_id']}/items/{first['results'][0]['delivery_item_id']}/open"
+            )
+        self.assertEqual(reopened.status_code, 200, reopened.text)
 
 
 if __name__ == "__main__":

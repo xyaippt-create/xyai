@@ -66,6 +66,7 @@ from engine.image_compression.delivery_options import (
 )
 
 
+logger = logging.getLogger(__name__)
 IMAGE_FILE_CONTRACTS = {
     ".png": {"pil_format": "PNG", "media_type": "image/png", "thumbnail_suffix": ".png"},
     ".jpg": {"pil_format": "JPEG", "media_type": "image/jpeg", "thumbnail_suffix": ".jpg"},
@@ -100,6 +101,10 @@ WINDOWS_SAFE_PATH_UTF16_UNITS = 240
 SMART_DELIVERY_PLAN_TTL_SECONDS = 30 * 60
 SMART_DELIVERY_REQUEST_FACT_PREFIX = "delivery_request:"
 SMART_DELIVERY_ELIGIBILITY_FACT_PREFIX = "delivery_eligibility:"
+# A PROCESSING request left by another backend session (crash/restart) is treated as
+# interrupted after this long; the copy of one Result never takes minutes.
+SMART_DELIVERY_PROCESSING_STALE_SECONDS = 10 * 60
+SMART_DELIVERY_RUN_CACHE_SIZE = 64
 SMART_DELIVERY_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^delivery_request_[A-Za-z0-9_-]{16,96}$")
 SMART_DELIVERY_ELIGIBILITY_INVALIDATING_CODES = frozenset({
     "RESULT_IDENTITY_MISMATCH",
@@ -591,6 +596,8 @@ def register_image_compression_routes(
     smart_delivery_eligibility_registry: dict[str, dict[str, Any]] = {}
     smart_delivery_request_lock = threading.RLock()
     smart_delivery_eligibility_lock = threading.RLock()
+    smart_delivery_hash_cache: dict[tuple[str, int, int, int], str] = {}
+    smart_delivery_executing_plans: set[str] = set()
 
     def emit_runtime_event(event: str, **fields: Any) -> None:
         if runtime_event_logger is None:
@@ -1893,6 +1900,32 @@ def register_image_compression_routes(
     def windows_filename_key(value: str) -> str:
         return unicodedata.normalize("NFC", str(value or "")).casefold()
 
+    def result_id_is_registered(result_id: str) -> bool:
+        if load_delivery_eligibility(result_id) is not None:
+            return True
+        records = shared_task_registry if shared_task_registry is not None else task_registry
+        return any(
+            isinstance(record, Mapping) and str(record.get("result_id") or "") == result_id
+            for record in list(records.values())
+        )
+
+    def cached_output_sha256(path: Path) -> str:
+        """Reuse a plan hash while the file's stat identity is unchanged.
+
+        Preflight and the execute-time refresh hash the same files back to back. The
+        delivery copy re-verifies the real bytes against the registered SHA, so a
+        cached plan hash can never let changed content reach a Delivery.
+        """
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ino)
+        digest = smart_delivery_hash_cache.get(key)
+        if digest is None:
+            digest = _sha256_file(path)
+            smart_delivery_hash_cache[key] = digest
+            while len(smart_delivery_hash_cache) > 512:
+                smart_delivery_hash_cache.pop(next(iter(smart_delivery_hash_cache)))
+        return digest
+
     def source_still_matches(path: Path, expected_sha256: str) -> bool:
         try:
             return path.is_file() and _sha256_file(path) == expected_sha256
@@ -1975,10 +2008,21 @@ def register_image_compression_routes(
 
         rules = normalize_smart_delivery_rules(raw_rules)
         snapshot = build_output_center_snapshot()
-        snapshot_by_id = {item["id"]: item for item in snapshot["items"]}
+        snapshot_items = [
+            *snapshot["items"],
+            # Batch Results are nested under their batch card. Only a child whose file
+            # is present and SHA-bound to its Result is a real output item.
+            *(
+                child
+                for item in snapshot["items"]
+                for child in (item.get("items") or [])
+                if child.get("available") and child.get("id") in output_center_index
+            ),
+        ]
+        snapshot_by_id = {item["id"]: item for item in snapshot_items}
         snapshot_by_result_id = {
             item["result_id"]: item
-            for item in snapshot["items"]
+            for item in snapshot_items
             if item.get("unified_result") and item.get("result_id")
         }
         if result_mode:
@@ -1986,12 +2030,15 @@ def register_image_compression_routes(
             for result_id in selection_ids:
                 public_item = snapshot_by_result_id.get(result_id)
                 if public_item is None:
-                    persist_delivery_eligibility(
-                        result_id,
-                        eligible=False,
-                        code="UNIFIED_RESULT_NOT_FOUND",
-                        reason="正式结果不存在或不满足统一结果合同。",
-                    )
+                    if result_id_is_registered(result_id):
+                        # Only a real Result loses eligibility; arbitrary request ids
+                        # must not create persistent facts from a read-only check.
+                        persist_delivery_eligibility(
+                            result_id,
+                            eligible=False,
+                            code="UNIFIED_RESULT_NOT_FOUND",
+                            reason="正式结果不存在或不满足统一结果合同。",
+                        )
                     raise HTTPException(
                         status_code=404,
                         detail={"code": "UNIFIED_RESULT_NOT_FOUND", "message": "正式结果不存在或不满足统一结果合同。"},
@@ -2068,10 +2115,22 @@ def register_image_compression_routes(
                 })
 
             source_path = Path(indexed["output_path"]).resolve()
-            source_stat = source_path.stat()
+            try:
+                source_stat = source_path.stat()
+                source_size, source_mtime_ns = int(source_stat.st_size), int(source_stat.st_mtime_ns)
+            except OSError:
+                # Locked, permission-denied or removed after lookup: block, never 500.
+                source_size, source_mtime_ns = 0, 0
+                issues.append({
+                    "code": "DELIVERY_SOURCE_UNREADABLE",
+                    "item_id": item_id,
+                    "result_id": source_result_id,
+                    "file_name": source_path.name,
+                    "message": "源成品文件当前无法读取，请确认文件未被占用或移动后重新检查。",
+                })
             registered_output_sha256 = str(indexed.get("registered_output_sha256") or "").lower()
             try:
-                current_output_sha256 = _sha256_file(source_path).lower()
+                current_output_sha256 = cached_output_sha256(source_path).lower()
             except OSError:
                 current_output_sha256 = ""
             if source_result_id and (
@@ -2157,8 +2216,8 @@ def register_image_compression_routes(
                 "preview_url": public_item["preview_url"],
                 "_source_path": source_path,
                 "_destination_path": destination_path,
-                "_source_size": int(source_stat.st_size),
-                "_source_mtime_ns": int(source_stat.st_mtime_ns),
+                "_source_size": source_size,
+                "_source_mtime_ns": source_mtime_ns,
                 "_registered_output_sha256": registered_output_sha256,
                 "_current_output_sha256": current_output_sha256,
             })
@@ -4585,7 +4644,8 @@ def register_image_compression_routes(
     @app.post("/api/image-compression/intake")
     async def image_compression_intake(file: UploadFile = File(...)):
         content = await file.read(MAX_UPLOAD_BYTES + 1)
-        data = create_compression_intake(content, str(file.filename or ""))
+        # Full decode + hashing of up to 50 MB must not stall other requests.
+        data = await asyncio.to_thread(create_compression_intake, content, str(file.filename or ""))
         return {"code": 200, "status": "success", "success": True, "data": data}
 
     def create_reusable_result_intake(result_id: str) -> dict[str, Any]:
@@ -4623,7 +4683,7 @@ def register_image_compression_routes(
                 status_code=400,
                 detail={"code": "RESULT_REUSE_REQUEST_INVALID", "message": "继续处理请求字段不正确。"},
             )
-        data = create_reusable_result_intake(str(payload.get("result_id") or ""))
+        data = await asyncio.to_thread(create_reusable_result_intake, str(payload.get("result_id") or ""))
         return {"code": 200, "status": "success", "success": True, "data": data}
 
     @app.post("/api/image-processing/preflight")
@@ -4911,7 +4971,7 @@ def register_image_compression_routes(
     async def execute_compression(payload: dict, *, batch_job=None):
         user_dirs = require_compression_directory()
         token = str(payload.get("source_token") or "")
-        source = batch_job.source if batch_job is not None else require_token(token, role="source")
+        source = await batch_job.checked_source() if batch_job is not None else require_token(token, role="source")
         source_lineage = result_lineage_fields(source)
         if batch_job is not None:
             source_lineage.update(item_identity(batch_job.batch["batch_id"], batch_job.item["id"], "image_compression", batch_job.item.get("source_id", "")))
@@ -5144,19 +5204,15 @@ def register_image_compression_routes(
             if result.output_created:
                 if output_path is None or not output_path.is_file() or output_path.stat().st_size <= 0:
                     raise RuntimeError("压缩输出验证失败：输出文件不存在或为空。")
-                verified = read_image_info(output_path, allow_webp=True)
-                expected_dimensions = result.output_dimensions or {}
-                if (
-                    verified["format"] != result.output_format
-                    or verified["dimensions"] != expected_dimensions
-                ):
-                    raise RuntimeError("压缩输出验证失败：输出格式或尺寸与任务结果不一致。")
                 output_metadata = dict((result.metadata_details or {}).get("hdde_output_metadata") or {})
                 if not output_metadata.get("written"):
                     raise RuntimeError("压缩输出缺少发布前统一元数据验证。")
-                verified = read_image_info(output_path, allow_webp=True)
+                # Metadata is written during publication, so one full decode of the
+                # published file verifies the final bytes; keep it off the event loop.
+                verified = await asyncio.to_thread(read_image_info, output_path, allow_webp=True)
+                expected_dimensions = result.output_dimensions or {}
                 if verified["format"] != result.output_format or verified["dimensions"] != expected_dimensions:
-                    raise RuntimeError("压缩元数据写入后验证失败：输出格式或尺寸发生变化。")
+                    raise RuntimeError("压缩输出验证失败：输出格式或尺寸与任务结果不一致。")
                 result.output_sha256 = verified["sha256"]
                 result.output_size_bytes = verified["size_bytes"]
                 if result.source_size_bytes is not None:
@@ -6577,8 +6633,17 @@ def register_image_compression_routes(
         record: Any = None
         if shared_task_registry is not None:
             record = shared_task_registry.get(delivery_request_fact_key(idempotency_key))
+        memory_record = smart_delivery_request_registry.get(idempotency_key)
         if not isinstance(record, Mapping):
-            record = smart_delivery_request_registry.get(idempotency_key)
+            record = memory_record
+        elif (
+            isinstance(memory_record, Mapping)
+            and str(record.get("status") or "").upper() == "PROCESSING"
+            and str(memory_record.get("status") or "").upper() != "PROCESSING"
+            and memory_record.get("delivery_id") == record.get("delivery_id")
+        ):
+            # This process settled the request but the registry rejected the overwrite.
+            record = memory_record
         if not isinstance(record, Mapping) or str(record.get("record_kind") or "") != "delivery_request":
             return None
         return dict(record)
@@ -6593,8 +6658,27 @@ def register_image_compression_routes(
         smart_delivery_request_registry[idempotency_key] = normalized
         return normalized
 
+    def processing_request_is_stale(record: Mapping[str, Any]) -> bool:
+        if str(record.get("server_session_id") or "") == server_session_id:
+            return False  # Execution of this process settles its own requests.
+        try:
+            created = datetime.fromisoformat(str(record.get("created_at") or "")).timestamp()
+        except ValueError:
+            return False  # Unknown age: never declare another process's work dead.
+        return now_provider() - created > SMART_DELIVERY_PROCESSING_STALE_SECONDS
+
     def replay_delivery_request(record: Mapping[str, Any]) -> dict[str, Any]:
         status = str(record.get("status") or "").upper()
+        if status == "PROCESSING" and processing_request_is_stale(record):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SMART_DELIVERY_OUTCOME_UNCONFIRMED",
+                    "message": "上次交付在服务重启前中断，结果无法确认；请到智能交付目录核对后再重新交付。",
+                    "delivery_id": str(record.get("delivery_id") or ""),
+                    "idempotent_replay": True,
+                },
+            )
         if status == "PROCESSING":
             return {
                 "code": 200,
@@ -6685,8 +6769,82 @@ def register_image_compression_routes(
             return ""
         return str(latest_attempt.get("delivery_id") or "")
 
+    def settle_interrupted_delivery_request(
+        record: Mapping[str, Any],
+        results: list[dict[str, Any]],
+        response_data: Mapping[str, Any] | None,
+        exc: BaseException,
+    ) -> None:
+        """Never leave a request PROCESSING after its execution stopped in this process."""
+        current = load_delivery_request(str(record.get("idempotency_key") or ""))
+        if current is not None and str(current.get("status") or "").upper() != "PROCESSING":
+            return  # Already settled with a definite outcome before the exception.
+        updated_at = datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat()
+        if response_data is not None:
+            # Copies finished and were verified; only the later registration failed.
+            failed = int(response_data.get("failure_count") or 0)
+            settled = {
+                **record,
+                "status": "COMPLETED" if failed == 0 else "FAILED_DEFINITE",
+                "delivery_sha256": next(
+                    (str(item.get("delivery_sha256") or "") for item in response_data.get("results") or []
+                     if item.get("status") == "completed"),
+                    "",
+                ),
+                "http_status": 200,
+                "response_data": dict(response_data),
+                "registration_error": exc.__class__.__name__,
+            }
+        elif any(item.get("status") == "completed" for item in results):
+            settled = {
+                **record,
+                "status": "FAILED_UNCONFIRMED",
+                "http_status": 409,
+                "error_detail": {
+                    "code": "SMART_DELIVERY_OUTCOME_UNCONFIRMED",
+                    "message": "交付副本可能已生成，但交付记录未能完成；请到智能交付目录核对后再重新交付。",
+                },
+            }
+        else:
+            detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, Mapping) else {}
+            settled = {
+                **record,
+                "status": "FAILED_DEFINITE",
+                "http_status": 409,
+                "error_detail": {
+                    "code": str(detail.get("code") or "SMART_DELIVERY_INTERRUPTED"),
+                    "message": str(detail.get("message") or "交付在生成副本前中断，未生成交付文件，可以重新交付。"),
+                },
+            }
+        settled["updated_at"] = updated_at
+        try:
+            persist_delivery_request(settled)
+        except Exception:
+            # Keep the definite outcome for this process; load_delivery_request prefers it
+            # over the PROCESSING fact the registry could not overwrite.
+            smart_delivery_request_registry[str(settled["idempotency_key"])] = settled
+            logger.exception(
+                "Smart delivery request could not be settled in the shared registry: delivery_id=%s status=%s",
+                settled.get("delivery_id"), settled["status"],
+            )
+
     @app.post("/api/smart-delivery/execute")
     async def smart_delivery_execute(payload: dict = Body(default_factory=dict)):
+        # Copies now run off the event loop, so the same plan could be submitted twice
+        # while its first run is still copying; never run one plan concurrently.
+        plan_id = str(payload.get("plan_id") or "")
+        if plan_id in smart_delivery_executing_plans:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "SMART_DELIVERY_IN_PROGRESS", "message": "该交付清单正在生成副本，请等待完成。"},
+            )
+        smart_delivery_executing_plans.add(plan_id)
+        try:
+            return await execute_smart_delivery_plan(payload)
+        finally:
+            smart_delivery_executing_plans.discard(plan_id)
+
+    async def execute_smart_delivery_plan(payload: dict) -> dict[str, Any]:
         prune_smart_delivery_plans()
         plan_id = str(payload.get("plan_id") or "")
         plan = smart_delivery_plan_registry.get(plan_id)
@@ -6778,6 +6936,7 @@ def register_image_compression_routes(
                 "status": "PROCESSING",
                 "delivery_sha256": "",
                 "plan_signature": str(refreshed.get("signature") or ""),
+                "server_session_id": server_session_id,
                 "created_at": request_now,
                 "updated_at": request_now,
             }
@@ -6794,388 +6953,427 @@ def register_image_compression_routes(
                         )
                     return replay_delivery_request(concurrent_request)
                 persist_delivery_request(delivery_request_record)
-        delivery_root = smart_delivery_root()
-        try:
-            delivery_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            emit_runtime_event(
-                "DELIVERY_FAILED",
-                level=logging.ERROR,
-                stage="delivery_directory",
-                result="failed",
-                delivery_id=delivery_id,
-                reason=str(exc) or exc.__class__.__name__,
-                impact="delivery_copy_unavailable",
-                **delivery_operation,
-            )
-            failure_detail = {"code": "SMART_DELIVERY_DIRECTORY_UNAVAILABLE", "message": "正式智能交付目录不可用。"}
-            if delivery_request_record is not None:
-                persist_delivery_request({
-                    **delivery_request_record,
-                    "status": "FAILED_DEFINITE",
-                    "http_status": 400,
-                    "error_detail": failure_detail,
-                    "updated_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
-                })
-            raise HTTPException(
-                status_code=400,
-                detail=failure_detail,
-            ) from exc
-
         results: list[dict[str, Any]] = []
-        for entry in refreshed["entries"]:
-            delivery_item_id = uuid.uuid4().hex[:16]
-            result_id = entry["source_result_id"] or delivery_item_id
-            source_path = Path(entry["_source_path"]).resolve()
-            destination_path = Path(entry["_destination_path"]).resolve()
-            retry_of_delivery_id = latest_failed_delivery_for_entry(entry)
-            correlation_fields = {
-                "source_feature_key": entry["source_feature_key"] or "",
-                "source_module_id": entry["source_module_id"] or "",
-                "parent_operation_id": entry["source_operation_id"] or "",
-                "parent_trace_id": entry["source_trace_id"] or "",
-                "retry_of_delivery_id": retry_of_delivery_id,
-            }
-            emit_runtime_event(
-                "DELIVERY_CREATED",
-                stage="delivery_registry",
-                result="created",
-                task_id=entry["source_task_id"],
-                result_id=entry["source_result_id"],
-                delivery_id=delivery_id,
-                impact="delivery_identity_registered",
-                **correlation_fields,
-                **delivery_operation,
-            )
-            if retry_of_delivery_id:
+        response_data: dict[str, Any] | None = None
+        try:
+            delivery_root = smart_delivery_root()
+            try:
+                delivery_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
                 emit_runtime_event(
-                    "DELIVERY_RETRY_STARTED",
+                    "DELIVERY_FAILED",
+                    level=logging.ERROR,
+                    stage="delivery_directory",
+                    result="failed",
+                    delivery_id=delivery_id,
+                    reason=str(exc) or exc.__class__.__name__,
+                    impact="delivery_copy_unavailable",
+                    **delivery_operation,
+                )
+                failure_detail = {"code": "SMART_DELIVERY_DIRECTORY_UNAVAILABLE", "message": "正式智能交付目录不可用。"}
+                if delivery_request_record is not None:
+                    persist_delivery_request({
+                        **delivery_request_record,
+                        "status": "FAILED_DEFINITE",
+                        "http_status": 400,
+                        "error_detail": failure_detail,
+                        "updated_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
+                    })
+                raise HTTPException(
+                    status_code=400,
+                    detail=failure_detail,
+                ) from exc
+
+            for entry in refreshed["entries"]:
+                delivery_item_id = uuid.uuid4().hex[:16]
+                result_id = entry["source_result_id"] or delivery_item_id
+                source_path = Path(entry["_source_path"]).resolve()
+                destination_path = Path(entry["_destination_path"]).resolve()
+                retry_of_delivery_id = latest_failed_delivery_for_entry(entry)
+                correlation_fields = {
+                    "source_feature_key": entry["source_feature_key"] or "",
+                    "source_module_id": entry["source_module_id"] or "",
+                    "parent_operation_id": entry["source_operation_id"] or "",
+                    "parent_trace_id": entry["source_trace_id"] or "",
+                    "retry_of_delivery_id": retry_of_delivery_id,
+                }
+                emit_runtime_event(
+                    "DELIVERY_CREATED",
+                    stage="delivery_registry",
+                    result="created",
+                    task_id=entry["source_task_id"],
+                    result_id=entry["source_result_id"],
+                    delivery_id=delivery_id,
+                    impact="delivery_identity_registered",
+                    **correlation_fields,
+                    **delivery_operation,
+                )
+                if retry_of_delivery_id:
+                    emit_runtime_event(
+                        "DELIVERY_RETRY_STARTED",
+                        stage="delivery_copy",
+                        result="started",
+                        task_id=entry["source_task_id"],
+                        result_id=entry["source_result_id"],
+                        delivery_id=delivery_id,
+                        impact="delivery_retry_running",
+                        **correlation_fields,
+                        **delivery_operation,
+                    )
+                emit_runtime_event(
+                    "DELIVERY_STARTED",
                     stage="delivery_copy",
                     result="started",
                     task_id=entry["source_task_id"],
                     result_id=entry["source_result_id"],
                     delivery_id=delivery_id,
-                    impact="delivery_retry_running",
+                    impact="delivery_copy_running",
                     **correlation_fields,
                     **delivery_operation,
                 )
-            emit_runtime_event(
-                "DELIVERY_STARTED",
-                stage="delivery_copy",
-                result="started",
-                task_id=entry["source_task_id"],
-                result_id=entry["source_result_id"],
-                delivery_id=delivery_id,
-                impact="delivery_copy_running",
-                **correlation_fields,
-                **delivery_operation,
-            )
-            try:
-                copied = copy_delivery_item(
-                    source_path,
-                    destination_path,
-                    registered_output_sha256=entry["_registered_output_sha256"],
-                )
-                results.append({
-                    "result_id": result_id,
-                    "delivery_item_id": delivery_item_id,
-                    "delivery_id": delivery_id,
-                    "item_id": entry["item_id"],
-                    "source_result_id": entry["source_result_id"],
-                    "task_id": entry["source_task_id"],
-                    "feature_key": entry["source_feature_key"],
-                    "module_id": entry["source_module_id"],
-                    "operation_id": entry["source_operation_id"],
-                    "trace_id": entry["source_trace_id"],
-                    "parent_operation_id": entry["source_operation_id"],
-                    "parent_trace_id": entry["source_trace_id"],
-                    "retry_of_delivery_id": retry_of_delivery_id,
-                    "source_processing_type": entry["source_processing_type"],
-                    "source_file_name": entry["source_file_name"],
-                    "source_filename": entry["source_filename"],
-                    "suggested_filename": entry["suggested_filename"],
-                    "final_filename": entry["final_filename"],
-                    "naming_source": entry["naming_source"],
-                    "naming_evidence": entry["naming_evidence"],
-                    "delivery_file_name": entry["delivery_file_name"],
-                    "content_name": entry["content_name"],
-                    "content_name_source": entry["content_name_source"],
-                    "status": "completed",
-                    "failure_reason": "",
-                    **copied,
-                    "_destination_path": destination_path,
-                    "_delivery_path": str(destination_path),
-                })
-                emit_runtime_event(
-                    "DELIVERY_SUCCEEDED",
-                    stage="delivery_copy",
-                    result="success",
-                    task_id=entry["source_task_id"],
-                    result_id=entry["source_result_id"],
-                    delivery_id=delivery_id,
-                    impact="delivery_copy_available",
-                    **correlation_fields,
-                    **delivery_operation,
-                )
-            except Exception as exc:
-                failure_code = (
-                    RESULT_IDENTITY_MISMATCH
-                    if isinstance(exc, OutputIdentityMismatchError)
-                    else "SMART_DELIVERY_COPY_FAILED"
-                )
-                if failure_code == RESULT_IDENTITY_MISMATCH:
-                    persist_delivery_eligibility(
-                        str(entry.get("source_result_id") or ""),
-                        eligible=False,
-                        code=RESULT_IDENTITY_MISMATCH,
-                        reason="实际复制字节与 Result 登记身份不一致，未发布 Delivery。",
-                        registered_output_sha256=str(entry.get("_registered_output_sha256") or ""),
+                try:
+                    copied = await asyncio.to_thread(
+                        copy_delivery_item,
+                        source_path,
+                        destination_path,
+                        registered_output_sha256=entry["_registered_output_sha256"],
                     )
-                diagnostics = build_exception_diagnostics(
-                    exc,
-                    error_category="ENVIRONMENT_ERROR" if isinstance(exc, OSError) else "PRODUCT_ERROR",
-                    error_stage="delivery_copy",
-                    trace_id=delivery_operation["trace_id"],
-                )
-                results.append({
-                    "result_id": result_id,
-                    "delivery_item_id": delivery_item_id,
-                    "delivery_id": delivery_id,
-                    "item_id": entry["item_id"],
-                    "source_result_id": entry["source_result_id"],
-                    "task_id": entry["source_task_id"],
-                    "feature_key": entry["source_feature_key"],
-                    "module_id": entry["source_module_id"],
-                    "operation_id": entry["source_operation_id"],
-                    "trace_id": entry["source_trace_id"],
-                    "parent_operation_id": entry["source_operation_id"],
-                    "parent_trace_id": entry["source_trace_id"],
-                    "retry_of_delivery_id": retry_of_delivery_id,
-                    "source_processing_type": entry["source_processing_type"],
-                    "source_file_name": entry["source_file_name"],
-                    "source_filename": entry["source_filename"],
-                    "suggested_filename": entry["suggested_filename"],
-                    "final_filename": entry["final_filename"],
-                    "naming_source": entry["naming_source"],
-                    "naming_evidence": entry["naming_evidence"],
-                    "delivery_file_name": entry["delivery_file_name"],
-                    "content_name": entry["content_name"],
-                    "content_name_source": entry["content_name_source"],
-                    "status": "failed",
-                    "failure_code": failure_code,
-                    "failure_reason": str(exc) or "生成交付副本失败。",
-                    "source_sha256": "",
-                    "delivery_sha256": "",
-                    "source_unchanged": False,
-                    "size_bytes": 0,
-                    "_destination_path": None,
-                    "_delivery_path": "",
-                    "_error_context": diagnostics,
-                })
-                emit_runtime_event(
-                    "DELIVERY_FAILED",
-                    level=logging.ERROR,
-                    stage="delivery_copy",
-                    result="failed",
-                    task_id=entry["source_task_id"],
-                    result_id=entry["source_result_id"],
-                    delivery_id=delivery_id,
-                    impact="delivery_copy_unavailable",
-                    **correlation_fields,
-                    **{**delivery_operation, **diagnostics},
-                )
+                    results.append({
+                        "result_id": result_id,
+                        "delivery_item_id": delivery_item_id,
+                        "delivery_id": delivery_id,
+                        "item_id": entry["item_id"],
+                        "source_result_id": entry["source_result_id"],
+                        "task_id": entry["source_task_id"],
+                        "feature_key": entry["source_feature_key"],
+                        "module_id": entry["source_module_id"],
+                        "operation_id": entry["source_operation_id"],
+                        "trace_id": entry["source_trace_id"],
+                        "parent_operation_id": entry["source_operation_id"],
+                        "parent_trace_id": entry["source_trace_id"],
+                        "retry_of_delivery_id": retry_of_delivery_id,
+                        "source_processing_type": entry["source_processing_type"],
+                        "source_file_name": entry["source_file_name"],
+                        "source_filename": entry["source_filename"],
+                        "suggested_filename": entry["suggested_filename"],
+                        "final_filename": entry["final_filename"],
+                        "naming_source": entry["naming_source"],
+                        "naming_evidence": entry["naming_evidence"],
+                        "delivery_file_name": entry["delivery_file_name"],
+                        "content_name": entry["content_name"],
+                        "content_name_source": entry["content_name_source"],
+                        "status": "completed",
+                        "failure_reason": "",
+                        **copied,
+                        "_destination_path": destination_path,
+                        "_delivery_path": str(destination_path),
+                    })
+                    emit_runtime_event(
+                        "DELIVERY_SUCCEEDED",
+                        stage="delivery_copy",
+                        result="success",
+                        task_id=entry["source_task_id"],
+                        result_id=entry["source_result_id"],
+                        delivery_id=delivery_id,
+                        impact="delivery_copy_available",
+                        **correlation_fields,
+                        **delivery_operation,
+                    )
+                except Exception as exc:
+                    failure_code = (
+                        RESULT_IDENTITY_MISMATCH
+                        if isinstance(exc, OutputIdentityMismatchError)
+                        else "SMART_DELIVERY_COPY_FAILED"
+                    )
+                    if failure_code == RESULT_IDENTITY_MISMATCH:
+                        persist_delivery_eligibility(
+                            str(entry.get("source_result_id") or ""),
+                            eligible=False,
+                            code=RESULT_IDENTITY_MISMATCH,
+                            reason="实际复制字节与 Result 登记身份不一致，未发布 Delivery。",
+                            registered_output_sha256=str(entry.get("_registered_output_sha256") or ""),
+                        )
+                    diagnostics = build_exception_diagnostics(
+                        exc,
+                        error_category="ENVIRONMENT_ERROR" if isinstance(exc, OSError) else "PRODUCT_ERROR",
+                        error_stage="delivery_copy",
+                        trace_id=delivery_operation["trace_id"],
+                    )
+                    results.append({
+                        "result_id": result_id,
+                        "delivery_item_id": delivery_item_id,
+                        "delivery_id": delivery_id,
+                        "item_id": entry["item_id"],
+                        "source_result_id": entry["source_result_id"],
+                        "task_id": entry["source_task_id"],
+                        "feature_key": entry["source_feature_key"],
+                        "module_id": entry["source_module_id"],
+                        "operation_id": entry["source_operation_id"],
+                        "trace_id": entry["source_trace_id"],
+                        "parent_operation_id": entry["source_operation_id"],
+                        "parent_trace_id": entry["source_trace_id"],
+                        "retry_of_delivery_id": retry_of_delivery_id,
+                        "source_processing_type": entry["source_processing_type"],
+                        "source_file_name": entry["source_file_name"],
+                        "source_filename": entry["source_filename"],
+                        "suggested_filename": entry["suggested_filename"],
+                        "final_filename": entry["final_filename"],
+                        "naming_source": entry["naming_source"],
+                        "naming_evidence": entry["naming_evidence"],
+                        "delivery_file_name": entry["delivery_file_name"],
+                        "content_name": entry["content_name"],
+                        "content_name_source": entry["content_name_source"],
+                        "status": "failed",
+                        "failure_code": failure_code,
+                        "failure_reason": str(exc) or "生成交付副本失败。",
+                        "source_sha256": "",
+                        "delivery_sha256": "",
+                        "source_unchanged": False,
+                        "size_bytes": 0,
+                        "_destination_path": None,
+                        "_delivery_path": "",
+                        "_error_context": diagnostics,
+                    })
+                    emit_runtime_event(
+                        "DELIVERY_FAILED",
+                        level=logging.ERROR,
+                        stage="delivery_copy",
+                        result="failed",
+                        task_id=entry["source_task_id"],
+                        result_id=entry["source_result_id"],
+                        delivery_id=delivery_id,
+                        impact="delivery_copy_unavailable",
+                        **correlation_fields,
+                        **{**delivery_operation, **diagnostics},
+                    )
 
-        succeeded = sum(1 for result in results if result["status"] == "completed")
-        failed = len(results) - succeeded
-        run = {
-            **delivery_operation,
-            "delivery_id": delivery_id,
-            "idempotency_key": idempotency_key,
-            "status": "completed" if failed == 0 else ("partial" if succeeded else "failed"),
-            "success_count": succeeded,
-            "failure_count": failed,
-            "delivery_location_label": "正式目录 / 输出 / 智能交付",
-            "delivery_root": delivery_root,
-            "results": results,
-        }
-        smart_delivery_run_registry[delivery_id] = run
-        if shared_task_registry is not None:
-            first_error = next(
-                (dict(item.get("_error_context") or {}) for item in results if item.get("_error_context")),
-                {},
-            )
-            delivery_fact = {
-                "record_kind": "delivery",
+            succeeded = sum(1 for result in results if result["status"] == "completed")
+            failed = len(results) - succeeded
+            run = {
                 **delivery_operation,
                 "delivery_id": delivery_id,
                 "idempotency_key": idempotency_key,
-                "status": run["status"],
-                "processing_stage": "delivery_copy",
+                "status": "completed" if failed == 0 else ("partial" if succeeded else "failed"),
                 "success_count": succeeded,
                 "failure_count": failed,
-                "error_code": next(
-                    (str(item.get("failure_code") or "SMART_DELIVERY_COPY_FAILED") for item in results if item.get("status") == "failed"),
-                    "",
-                ),
-                "error_context": first_error,
-                "created_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
-                "completed_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
-                "task_context": {
-                    **delivery_operation,
-                    "purpose": "SMART_DELIVERY",
-                    "route": "/smart-delivery",
-                    "route_family": "smart_delivery",
-                },
-                "result_ids": [str(item.get("source_result_id") or "") for item in results if item.get("source_result_id")],
-                "source_task_ids": [str(item.get("task_id") or "") for item in results if item.get("task_id")],
-                "naming_items": [
-                    {
-                        "source_result_id": str(item.get("source_result_id") or ""),
-                        "source_filename": str(item.get("source_filename") or item.get("source_file_name") or ""),
-                        "suggested_filename": str(item.get("suggested_filename") or ""),
-                        "final_filename": str(item.get("final_filename") or item.get("delivery_file_name") or ""),
-                        "naming_source": str(item.get("naming_source") or ""),
-                        "naming_evidence": list(item.get("naming_evidence") or []),
-                        "delivery_id": delivery_id,
-                        "delivery_path": str(item.get("_delivery_path") or ""),
-                        "trace_id": delivery_operation["trace_id"],
-                        "parent_operation_id": str(item.get("parent_operation_id") or ""),
-                        "parent_trace_id": str(item.get("parent_trace_id") or ""),
-                        "retry_of_delivery_id": str(item.get("retry_of_delivery_id") or ""),
-                        "status": str(item.get("status") or ""),
-                        "error": {
-                            "code": str(item.get("failure_code") or "") if item.get("status") == "failed" else "",
-                            "message": str(item.get("failure_reason") or ""),
-                            "error_id": str((item.get("_error_context") or {}).get("error_id") or ""),
-                        },
-                    }
-                    for item in results
-                ],
+                "delivery_location_label": "正式目录 / 输出 / 智能交付",
+                "delivery_root": delivery_root,
+                "results": results,
             }
-            shared_task_registry[batch_naming_delivery_fact_key(delivery_id)] = delivery_fact
-        for result in results:
-            source_task_id = str(result.get("task_id") or "")
-            task_record_key = source_task_id
-            task_record = task_registry.get(source_task_id)
-            if not isinstance(task_record, dict) and shared_task_registry is not None:
-                task_record = shared_task_registry.get(source_task_id)
-            if not isinstance(task_record, dict) and shared_task_registry is not None:
-                result_reference_for_task = getattr(shared_task_registry, "result_reference_for_task", None)
-                if callable(result_reference_for_task):
-                    task_record = result_reference_for_task(source_task_id)
-                    task_record_key = str((task_record or {}).get("result_id") or "")
-            if not isinstance(task_record, dict):
-                continue
-            delivery_trace = {
-                **delivery_operation,
-                "delivery_id": delivery_id,
-                "idempotency_key": idempotency_key,
-                "delivery_item_id": result["delivery_item_id"],
-                "result_id": result.get("source_result_id") or result.get("result_id") or "",
-                "source_filename": result.get("source_filename") or result.get("source_file_name") or "",
-                "suggested_filename": result.get("suggested_filename") or "",
-                "final_filename": result.get("final_filename") or result.get("delivery_file_name") or "",
-                "naming_source": result.get("naming_source") or "",
-                "naming_evidence": list(result.get("naming_evidence") or []),
-                "delivery_file": result.get("_delivery_path") or "",
-                "delivery_path": result.get("_delivery_path") or "",
-                "content_name": result.get("content_name") or "",
-                "content_name_source": result.get("content_name_source") or "",
-                "parent_operation_id": result.get("parent_operation_id") or "",
-                "parent_trace_id": result.get("parent_trace_id") or "",
-                "retry_of_delivery_id": result.get("retry_of_delivery_id") or "",
-                "status": str(result.get("status") or ""),
-                "error": {
-                    "code": str(result.get("failure_code") or "") if result.get("status") == "failed" else "",
-                    "message": str(result.get("failure_reason") or ""),
-                    "error_id": str((result.get("_error_context") or {}).get("error_id") or ""),
-                },
-            }
-            task_record["delivery_id"] = delivery_id
-            task_record.setdefault("deliveries", []).append(delivery_trace)
-            task_result = task_record.get("task_result")
-            if isinstance(task_result, dict):
-                task_result["delivery_id"] = delivery_id
-            if source_task_id in task_registry:
-                task_registry[source_task_id] = task_record
-            if shared_task_registry is not None and task_record_key:
-                shared_task_registry[task_record_key] = task_record
-        public_results = [
-            {key: value for key, value in result.items() if not key.startswith("_")}
-            for result in results
-        ]
-        current_result_context = None
-        if len(public_results) == 1:
-            item = public_results[0]
-            current_result_context = {
-                "feature_key": item.get("feature_key") or "",
-                "module_id": item.get("module_id") or "",
-                "operation_id": item.get("operation_id") or "",
-                "trace_id": item.get("trace_id") or "",
-                "task_id": item.get("task_id") or "",
-                "result_id": item.get("source_result_id") or item.get("result_id") or "",
-                "delivery_id": delivery_id,
-            }
-        response_data = {
-            "delivery_id": delivery_id,
-            "idempotency_key": idempotency_key,
-            "idempotent_replay": False,
-            "operation_id": delivery_operation["operation_id"],
-            "trace_id": delivery_operation["trace_id"],
-            "delivery_operation_id": delivery_operation["operation_id"],
-            "delivery_trace_id": delivery_operation["trace_id"],
-            "current_result_context": current_result_context,
-            "status": run["status"],
-            "success_count": succeeded,
-            "failure_count": failed,
-            "delivery_location_label": run["delivery_location_label"],
-            "results": public_results,
-        }
-        if any(result.get("failure_code") == RESULT_IDENTITY_MISMATCH for result in results):
-            failure_detail = {
-                "code": RESULT_IDENTITY_MISMATCH,
-                "message": "实际复制字节与 Result 登记身份不一致，交付文件未发布。",
+            # Built before any registry write so an interrupted registration can still
+            # settle the request with the copies that really exist.
+            public_results = [
+                {key: value for key, value in result.items() if not key.startswith("_")}
+                for result in results
+            ]
+            current_result_context = None
+            if len(public_results) == 1:
+                item = public_results[0]
+                current_result_context = {
+                    "feature_key": item.get("feature_key") or "",
+                    "module_id": item.get("module_id") or "",
+                    "operation_id": item.get("operation_id") or "",
+                    "trace_id": item.get("trace_id") or "",
+                    "task_id": item.get("task_id") or "",
+                    "result_id": item.get("source_result_id") or item.get("result_id") or "",
+                    "delivery_id": delivery_id,
+                }
+            response_data = {
                 "delivery_id": delivery_id,
                 "idempotency_key": idempotency_key,
                 "idempotent_replay": False,
+                "operation_id": delivery_operation["operation_id"],
+                "trace_id": delivery_operation["trace_id"],
+                "delivery_operation_id": delivery_operation["operation_id"],
+                "delivery_trace_id": delivery_operation["trace_id"],
+                "current_result_context": current_result_context,
                 "status": run["status"],
                 "success_count": succeeded,
                 "failure_count": failed,
+                "delivery_location_label": run["delivery_location_label"],
+                "results": public_results,
             }
+            smart_delivery_run_registry[delivery_id] = run
+            # Recent runs only: older ones are rebuilt from their persisted delivery fact.
+            while len(smart_delivery_run_registry) > SMART_DELIVERY_RUN_CACHE_SIZE:
+                smart_delivery_run_registry.pop(next(iter(smart_delivery_run_registry)))
+            if shared_task_registry is not None:
+                first_error = next(
+                    (dict(item.get("_error_context") or {}) for item in results if item.get("_error_context")),
+                    {},
+                )
+                delivery_fact = {
+                    "record_kind": "delivery",
+                    **delivery_operation,
+                    "delivery_id": delivery_id,
+                    "idempotency_key": idempotency_key,
+                    "status": run["status"],
+                    "processing_stage": "delivery_copy",
+                    "success_count": succeeded,
+                    "failure_count": failed,
+                    "error_code": next(
+                        (str(item.get("failure_code") or "SMART_DELIVERY_COPY_FAILED") for item in results if item.get("status") == "failed"),
+                        "",
+                    ),
+                    "error_context": first_error,
+                    "created_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
+                    "completed_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
+                    "task_context": {
+                        **delivery_operation,
+                        "purpose": "SMART_DELIVERY",
+                        "route": "/smart-delivery",
+                        "route_family": "smart_delivery",
+                    },
+                    "result_ids": [str(item.get("source_result_id") or "") for item in results if item.get("source_result_id")],
+                    "source_task_ids": [str(item.get("task_id") or "") for item in results if item.get("task_id")],
+                    "naming_items": [
+                        {
+                            "source_result_id": str(item.get("source_result_id") or ""),
+                            "source_filename": str(item.get("source_filename") or item.get("source_file_name") or ""),
+                            "suggested_filename": str(item.get("suggested_filename") or ""),
+                            "final_filename": str(item.get("final_filename") or item.get("delivery_file_name") or ""),
+                            "naming_source": str(item.get("naming_source") or ""),
+                            "naming_evidence": list(item.get("naming_evidence") or []),
+                            "delivery_id": delivery_id,
+                            "delivery_item_id": str(item.get("delivery_item_id") or ""),
+                            "delivery_path": str(item.get("_delivery_path") or ""),
+                            "trace_id": delivery_operation["trace_id"],
+                            "parent_operation_id": str(item.get("parent_operation_id") or ""),
+                            "parent_trace_id": str(item.get("parent_trace_id") or ""),
+                            "retry_of_delivery_id": str(item.get("retry_of_delivery_id") or ""),
+                            "status": str(item.get("status") or ""),
+                            "error": {
+                                "code": str(item.get("failure_code") or "") if item.get("status") == "failed" else "",
+                                "message": str(item.get("failure_reason") or ""),
+                                "error_id": str((item.get("_error_context") or {}).get("error_id") or ""),
+                            },
+                        }
+                        for item in results
+                    ],
+                }
+                shared_task_registry[batch_naming_delivery_fact_key(delivery_id)] = delivery_fact
+            for result in results:
+                source_task_id = str(result.get("task_id") or "")
+                task_record_key = source_task_id
+                task_record = task_registry.get(source_task_id)
+                if not isinstance(task_record, dict) and shared_task_registry is not None:
+                    task_record = shared_task_registry.get(source_task_id)
+                if not isinstance(task_record, dict) and shared_task_registry is not None:
+                    result_reference_for_task = getattr(shared_task_registry, "result_reference_for_task", None)
+                    if callable(result_reference_for_task):
+                        task_record = result_reference_for_task(source_task_id)
+                        task_record_key = str((task_record or {}).get("result_id") or "")
+                if not isinstance(task_record, dict):
+                    continue
+                delivery_trace = {
+                    **delivery_operation,
+                    "delivery_id": delivery_id,
+                    "idempotency_key": idempotency_key,
+                    "delivery_item_id": result["delivery_item_id"],
+                    "result_id": result.get("source_result_id") or result.get("result_id") or "",
+                    "source_filename": result.get("source_filename") or result.get("source_file_name") or "",
+                    "suggested_filename": result.get("suggested_filename") or "",
+                    "final_filename": result.get("final_filename") or result.get("delivery_file_name") or "",
+                    "naming_source": result.get("naming_source") or "",
+                    "naming_evidence": list(result.get("naming_evidence") or []),
+                    "delivery_file": result.get("_delivery_path") or "",
+                    "delivery_path": result.get("_delivery_path") or "",
+                    "content_name": result.get("content_name") or "",
+                    "content_name_source": result.get("content_name_source") or "",
+                    "parent_operation_id": result.get("parent_operation_id") or "",
+                    "parent_trace_id": result.get("parent_trace_id") or "",
+                    "retry_of_delivery_id": result.get("retry_of_delivery_id") or "",
+                    "status": str(result.get("status") or ""),
+                    "error": {
+                        "code": str(result.get("failure_code") or "") if result.get("status") == "failed" else "",
+                        "message": str(result.get("failure_reason") or ""),
+                        "error_id": str((result.get("_error_context") or {}).get("error_id") or ""),
+                    },
+                }
+                task_record["delivery_id"] = delivery_id
+                task_record.setdefault("deliveries", []).append(delivery_trace)
+                task_result = task_record.get("task_result")
+                if isinstance(task_result, dict):
+                    task_result["delivery_id"] = delivery_id
+                if source_task_id in task_registry:
+                    task_registry[source_task_id] = task_record
+                if shared_task_registry is not None and task_record_key:
+                    shared_task_registry[task_record_key] = task_record
+            if any(result.get("failure_code") == RESULT_IDENTITY_MISMATCH for result in results):
+                failure_detail = {
+                    "code": RESULT_IDENTITY_MISMATCH,
+                    "message": "实际复制字节与 Result 登记身份不一致，交付文件未发布。",
+                    "delivery_id": delivery_id,
+                    "idempotency_key": idempotency_key,
+                    "idempotent_replay": False,
+                    "status": run["status"],
+                    "success_count": succeeded,
+                    "failure_count": failed,
+                }
+                if delivery_request_record is not None:
+                    persist_delivery_request({
+                        **delivery_request_record,
+                        "status": "FAILED_DEFINITE",
+                        "http_status": 409,
+                        "error_detail": failure_detail,
+                        "updated_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
+                    })
+                raise HTTPException(
+                    status_code=409,
+                    detail=failure_detail,
+                )
             if delivery_request_record is not None:
+                delivery_sha256 = next(
+                    (str(result.get("delivery_sha256") or "") for result in public_results if result.get("status") == "completed"),
+                    "",
+                )
                 persist_delivery_request({
                     **delivery_request_record,
-                    "status": "FAILED_DEFINITE",
-                    "http_status": 409,
-                    "error_detail": failure_detail,
+                    "status": "COMPLETED" if failed == 0 else "FAILED_DEFINITE",
+                    "delivery_sha256": delivery_sha256,
+                    "http_status": 200,
+                    "response_data": response_data,
                     "updated_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
                 })
-            raise HTTPException(
-                status_code=409,
-                detail=failure_detail,
-            )
-        if delivery_request_record is not None:
-            delivery_sha256 = next(
-                (str(result.get("delivery_sha256") or "") for result in public_results if result.get("status") == "completed"),
-                "",
-            )
-            persist_delivery_request({
-                **delivery_request_record,
-                "status": "COMPLETED" if failed == 0 else "FAILED_DEFINITE",
-                "delivery_sha256": delivery_sha256,
-                "http_status": 200,
-                "response_data": response_data,
-                "updated_at": datetime.fromtimestamp(now_provider(), tz=timezone.utc).isoformat(),
-            })
+            return {
+                "code": 200,
+                "status": "success",
+                "success": True,
+                "data": response_data,
+            }
+        except Exception as exc:
+            if delivery_request_record is not None:
+                settle_interrupted_delivery_request(delivery_request_record, results, response_data, exc)
+            raise
+
+    def run_from_delivery_fact(delivery_id: str) -> dict[str, Any] | None:
+        """Rebuild an open-able run after a restart or cache eviction.
+
+        Only paths recorded in the delivery fact are used; open_smart_delivery_target
+        still requires them to sit directly in the formal smart-delivery directory.
+        """
+        if shared_task_registry is None or not delivery_id:
+            return None
+        fact = shared_task_registry.get(batch_naming_delivery_fact_key(delivery_id))
+        if not isinstance(fact, Mapping) or fact.get("record_kind") != "delivery" or fact.get("delivery_id") != delivery_id:
+            return None
         return {
-            "code": 200,
-            "status": "success",
-            "success": True,
-            "data": response_data,
+            "delivery_id": delivery_id,
+            "delivery_root": smart_delivery_root(),
+            "results": [
+                {
+                    "result_id": str(item.get("source_result_id") or item.get("delivery_item_id") or ""),
+                    "delivery_item_id": str(item.get("delivery_item_id") or ""),
+                    "status": str(item.get("status") or ""),
+                    "_destination_path": Path(str(item["delivery_path"])) if item.get("delivery_path") else None,
+                }
+                for item in list(fact.get("naming_items") or [])
+                if isinstance(item, Mapping)
+            ],
         }
 
     def require_smart_delivery_run(delivery_id: str) -> dict[str, Any]:
-        run = smart_delivery_run_registry.get(str(delivery_id or ""))
+        run = smart_delivery_run_registry.get(str(delivery_id or "")) or run_from_delivery_fact(str(delivery_id or ""))
         if not run:
             raise HTTPException(
                 status_code=404,
@@ -7317,6 +7515,9 @@ def register_image_compression_routes(
             if _sha256_file(path) != source_sha256:
                 return ""
             token = issue_token(path, role="source_preview", filename=filename)
+            # Forget entries whose authorization has already been pruned.
+            for stale_key in [k for k, v in batch_preview_tokens.items() if v not in token_registry]:
+                batch_preview_tokens.pop(stale_key, None)
             batch_preview_tokens[key] = token
         return preview_url(token)
 
@@ -7335,6 +7536,7 @@ def register_image_compression_routes(
         "color_level_preview_sessions": color_level_preview_sessions,
         "color_batch_queue": color_batch_queue,
         "output_center_index": output_center_index,
+        "smart_delivery_run_registry": smart_delivery_run_registry,
         "server_session_id": server_session_id,
         "remove_task_runtime_references": remove_task_runtime_references,
     }

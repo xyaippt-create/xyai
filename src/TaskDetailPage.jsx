@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { createDeliveryRequestId, executeSingleResultDelivery } from "./batchDelivery.js";
 import { resolveDeliveryStatus } from "./deliveryStatus.js";
 import { getFileDisplayName } from "./fileDisplayName.js";
 import { HddeTechnicalDetails } from "./HddeUI.jsx";
@@ -39,6 +40,8 @@ async function requestDeliveryJson(path, options = {}) {
     const detail = payload?.detail;
     const error = new Error(detail?.message || payload?.message || "正式交付暂时无法完成。");
     error.payload = payload;
+    error.status = response.status;
+    error.code = detail?.code || "";
     throw error;
   }
   return payload;
@@ -254,6 +257,7 @@ export default function TaskDetailPage({
   const [deliveryRun, setDeliveryRun] = useState(null);
   const [deliveryError, setDeliveryError] = useState("");
   const [deliveryNotice, setDeliveryNotice] = useState("");
+  const [deliveryRequestKey, setDeliveryRequestKey] = useState(() => createDeliveryRequestId());
   const [sessionReviewConfirmed, setSessionReviewConfirmed] = useState(false);
   const protectionBlocked = isColorCorrection && (
     (taskConfig?.d3_status || result?.d3_status) === "PROTECTION_BLOCKED"
@@ -494,6 +498,7 @@ export default function TaskDetailPage({
     setDeliveryError("");
     setDeliveryNotice("");
     setSessionReviewConfirmed(false);
+    setDeliveryRequestKey(createDeliveryRequestId());
   }, [resultId]);
 
   const facts = [
@@ -541,12 +546,21 @@ export default function TaskDetailPage({
       }
 
       setDeliveryPhase("delivering");
-      const deliveryPayload = await requestDeliveryJson("/api/smart-delivery/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan_id: preflight.plan_id, confirmed: true }),
+      const outcome = await executeSingleResultDelivery({
+        planId: preflight.plan_id,
+        resultId,
+        idempotencyKey: deliveryRequestKey,
+        request: requestDeliveryJson,
       });
-      const completedDelivery = deliveryPayload.data;
+      if (outcome.outcome !== "settled") {
+        // Keep the same request key: confirming again replays this request, never a second copy.
+        setDeliveryError(outcome.outcome === "pending"
+          ? "交付结果正在确认，请稍后再次确认交付；不会重复生成副本。"
+          : "交付请求没有到达服务端，可以再次确认交付。");
+        setDeliveryPhase("failed");
+        return;
+      }
+      const completedDelivery = outcome.data;
       const failedItem = completedDelivery?.results?.find((item) => item.status !== "completed");
       if (!completedDelivery || completedDelivery.failure_count > 0 || completedDelivery.success_count !== 1) {
         setDeliveryRun(completedDelivery || null);
@@ -558,6 +572,7 @@ export default function TaskDetailPage({
       setDeliveryPhase("saved");
       onDeliveryCompleted?.(completedDelivery);
     } catch (reason) {
+      setDeliveryRequestKey(createDeliveryRequestId());
       const refreshed = reason.payload?.detail?.preflight;
       setDeliveryError(refreshed?.issues?.[0]?.message || reason.message || "正式交付失败。");
       setDeliveryPhase("failed");

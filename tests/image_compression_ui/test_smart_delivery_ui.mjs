@@ -46,7 +46,8 @@ test("compatibility delivery page uses fixed source filenames and one public pre
 test("task detail owns the real Result to Delivery confirmation path", () => {
   assert.match(taskDetail, /requestDeliveryJson\("\/api\/smart-delivery\/preflight"/);
   assert.match(taskDetail, /JSON\.stringify\(\{ result_ids: \[resultId\], rules: \{\} \}\)/);
-  assert.match(taskDetail, /requestDeliveryJson\("\/api\/smart-delivery\/execute"/);
+  // Execute goes through the shared idempotent single-Result helper.
+  assert.match(taskDetail, /executeSingleResultDelivery\(\{\s*planId: preflight\.plan_id,\s*resultId,\s*idempotencyKey: deliveryRequestKey,\s*request: requestDeliveryJson,/);
   assert.match(taskDetail, /handleOpenDeliveryFolder/);
   assert.doesNotMatch(taskDetail, /openAdvancedDelivery|onOpenAdvancedDelivery/);
   assert.doesNotMatch(app, /onOpenAdvancedDelivery/);
