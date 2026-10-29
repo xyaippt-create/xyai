@@ -1,5 +1,10 @@
 # Codex Changelog
 
+## 2026-10-29 - V0.6.1-dev 4K SR v3 in-app acceptance (on behalf of product owner)
+
+- Ran committed v3 (`1b50364`) through the real UI on an isolated backend (127.0.0.1:8797, formal root `D:\影界文件`; 8787 untouched): reported yangrou poster, S07 text poster and S03 portrait. All three `completed`, route `REALESRGAN_X4PLUS_FIDELITY_FUSION`, `DETAIL_ENHANCEMENT_COMPLETED`, `source_hash_unchanged=true`, 74–80s, outputs 2880×3840 / 3073×3840, pixel-identical to the v3 prototype; progress tracked real SR progress and the result page showed correct sizes and copy.
+- Visual check of the app outputs: slogan strokes clean without halos; faces and hair sharp and natural; tiny text "锦江流韵 / 烟火日常" continuous and close to source glyphs; S03 hair without wiry lines, forehead without SR crosshatch. Technical and visual acceptance PASS on behalf of the product owner, who remains the final image-quality judge. Evidence: `artifacts/4k_v2_testset/evidence/acceptance_v3_app_*.png`. Three acceptance outputs remain in `D:\影界文件\输出\4K画质增强\accept_*`. No code change, no Git write.
+
 ## 2026-10-29 - Image delivery redundancy cleanup (behaviour unchanged)
 
 - SHA256: `backend/image_compression_api._sha256_file` and `backend/batch_compression_api.file_sha` are now the shared `engine.image_compression.common.sha256_file`; the module names stay because tests patch them.
