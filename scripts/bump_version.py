@@ -33,7 +33,8 @@ EXCLUDED_ROOT_DIRECTORIES = {
     "tmp",
 }
 EXCLUDED_DIRECTORY_NAMES = {"__pycache__", ".pytest_cache"}
-EXCLUDED_FILE_NAMES = {"package-lock.json"}
+# releaseNotes.js is the user-facing version history: it must keep earlier versions by design.
+EXCLUDED_FILE_NAMES = {"package-lock.json", "releaseNotes.js"}
 
 
 def _load_manage_version():

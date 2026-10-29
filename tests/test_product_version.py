@@ -226,6 +226,9 @@ class ProductVersionTests(unittest.TestCase):
                 dry_run=True,
             )
 
+    def test_release_notes_history_is_not_an_old_version_residual(self):
+        self.assertIn("releaseNotes.js", BUMP_VERSION.EXCLUDED_FILE_NAMES)
+
     def test_one_sentence_entry_blocks_old_version_in_active_source_before_write(self):
         payload = json.loads(VERSION_PATH.read_text(encoding="utf-8"))
         target_semantic = MANAGE_VERSION.bump_version(payload["version"], "patch")
