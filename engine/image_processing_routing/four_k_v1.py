@@ -22,7 +22,7 @@ from engine.output.publish_safety import OutputMetadataStageError, publish_image
 from runtime.system_info import resource_root
 
 
-FOUR_K_V1_CONTRACT_VERSION = "4k_v1_contract_2.0"
+FOUR_K_V1_CONTRACT_VERSION = "4k_v1_contract_2.1"
 FOUR_K_V1_ROUTE = "REALESRGAN_X4PLUS_FIDELITY_FUSION"
 FOUR_K_V1_MODE = "4k_v1"
 FOUR_K_V1_OUTPUT_PROFILE = "delivery_4k_v1"
@@ -32,37 +32,45 @@ FOUR_K_V1_OUTPUT_FORMAT = "PNG"
 FOUR_K_V1_OUTPUT_DIRECTORY = "输出/4K画质增强"
 FOUR_K_V1_QUALITY_CAPABILITY_BOUNDARY = "SR_DETAIL_ENHANCEMENT_WITH_SOURCE_FIDELITY_GUARD"
 FOUR_K_V1_COMPLETED_CONCLUSION = "DETAIL_ENHANCEMENT_COMPLETED"
-FOUR_K_V1_SR_MODEL = "realesrgan-x4plus"
-FOUR_K_V1_SR_SCALE = 4
+# Route identifier kept for compatibility with already registered results; the
+# model actually used is FOUR_K_V1_SR_MODEL (reported in the contract).
+FOUR_K_V1_SR_MODEL = "realesr-animevideov3-x3"
+FOUR_K_V1_SR_SCALE = 3
 FOUR_K_V1_SR_TIMEOUT_SECONDS = 1500
-# Fidelity fusion: low frequencies come from the LANCZOS upscale of the original
-# (no color / tone drift), high frequencies from the SR result, plus a share of
-# the original texture the SR flattened, then a halo-clamped fine-detail lift.
-FOUR_K_V1_FUSION_SIGMA = 2.0
-FOUR_K_V1_TEXTURE_RESTORE = 0.35
-FOUR_K_V1_FINE_DETAIL_GAIN = 0.6
-FOUR_K_V1_HALO_CLAMP = 0.01
-# Region-aware strength (measured on the source): flat areas such as skin get less
-# SR high-frequency and fine lift (no SR grain), hard contours such as hair get a
-# soft cap on SR high-frequency and a reduced lift (no wiry hard lines).
+# Fidelity fusion (v4), luminance only; chroma is the LANCZOS upscale of the original,
+# so the SR can never shift colour. Band limits are in source pixels.
+FOUR_K_V1_FINE_SIGMA = 0.5
+FOUR_K_V1_MID_SIGMA = 2.0
+FOUR_K_V1_STRUCT_SIGMA = 4.0
+# Mid band (the scale that reads as sharpness at viewing size) follows the SR, but the
+# SR may only move it by a fraction of the local source structure amplitude, so it
+# sharpens existing transitions and cannot draw new lines (knit, fabric).
+FOUR_K_V1_MID_SR_FOLLOW = 0.9
+FOUR_K_V1_MID_SR_CAP = 0.25
+FOUR_K_V1_MID_GAIN = 2.2
+FOUR_K_V1_STRUCT_GAIN = 1.2
+# Fine band from the SR, bounded by the local source structure amplitude; weaker on
+# flat areas (measured on the source) and skin, where part of the source micro-texture
+# is kept instead. No SR on tiny strokes.
 FOUR_K_V1_FLAT_STD_RANGE = (0.015, 0.07)
-FOUR_K_V1_FLAT_SR_GAIN = 0.45
-FOUR_K_V1_FLAT_DETAIL_GAIN = 0.15
-FOUR_K_V1_HF_SOFT_CAP = 0.30
+FOUR_K_V1_FINE_GAIN = 1.0
+FOUR_K_V1_FINE_FLAT_SHARE = 0.4
+FOUR_K_V1_MID_FLAT_SHARE = 0.6
+FOUR_K_V1_SKIN_FINE_DAMP = 0.4
+FOUR_K_V1_SKIN_SOURCE_FINE = 0.5
+FOUR_K_V1_HALO_CLAMP = 0.012
+# Tiny text: dense clusters of thin high-contrast strokes. They come from the clean
+# LANCZOS base only, sharpened at stroke scale within the base's local range, so
+# strokes are never thinned, broken or outlined by the SR.
 FOUR_K_V1_EDGE_RANGE = (0.18, 0.45)
-FOUR_K_V1_EDGE_DETAIL_GAIN = 0.40
-# Tiny text: dense clusters of thin high-contrast strokes. They are lightly smoothed
-# so stroke pieces join and source jaggies are not emphasised, then re-sharpened
-# with a wider, locally bounded unsharp mask.
 FOUR_K_V1_STROKE_HAT = 0.20
 FOUR_K_V1_STROKE_DENSITY_RANGE = (0.18, 0.30)
-FOUR_K_V1_STROKE_SMOOTH_SIGMA = 0.6
-FOUR_K_V1_STROKE_SHARPEN = 1.0
-FOUR_K_V1_STROKE_SHARPEN_SIGMA = 1.6
-# Back-projection: the fused result is iteratively corrected so that, scaled back
-# to the source grid, it matches the original. This pulls SR-distorted small-text
-# strokes back to the source glyph structure and removes residual tone drift.
-FOUR_K_V1_BACK_PROJECTION_ITERATIONS = 4
+FOUR_K_V1_STROKE_SHARPEN = 1.2
+FOUR_K_V1_STROKE_SHARPEN_SIGMA = 0.6
+# Back-projection: only the low band of the result must match the original when
+# scaled back (tone lock). Sharpening inside the source band is allowed.
+FOUR_K_V1_BACK_PROJECTION_SIGMA = 2.5
+FOUR_K_V1_BACK_PROJECTION_ITERATIONS = 2
 
 
 _FOUR_K_V1_CONTRACT: dict[str, Any] = {
@@ -131,21 +139,24 @@ _FOUR_K_V1_CONTRACT: dict[str, Any] = {
             "engine": "realesrgan-ncnn-vulkan",
             "model": FOUR_K_V1_SR_MODEL,
             "native_scale": FOUR_K_V1_SR_SCALE,
-            "to_target": "OpenCV.INTER_AREA",
+            "to_target": "OpenCV.INTER_AREA_OR_CUBIC",
             "failure_policy": "FAIL_TASK_NO_LANCZOS_FALLBACK",
         },
         "fidelity_fusion": {
+            "version": "v4",
             "low_frequency_source": "Pillow.Image.Resampling.LANCZOS(original)",
-            "gaussian_sigma": FOUR_K_V1_FUSION_SIGMA,
-            "texture_restore": FOUR_K_V1_TEXTURE_RESTORE,
-            "fine_detail_gain": FOUR_K_V1_FINE_DETAIL_GAIN,
+            "chroma_source": "Pillow.Image.Resampling.LANCZOS(original)",
+            "band_sigmas_source_px": [FOUR_K_V1_FINE_SIGMA, FOUR_K_V1_MID_SIGMA, FOUR_K_V1_STRUCT_SIGMA],
+            "mid_sr_follow": FOUR_K_V1_MID_SR_FOLLOW,
+            "mid_sr_cap": FOUR_K_V1_MID_SR_CAP,
+            "mid_gain": FOUR_K_V1_MID_GAIN,
+            "struct_gain": FOUR_K_V1_STRUCT_GAIN,
+            "fine_gain": FOUR_K_V1_FINE_GAIN,
+            "skin_fine_damp": FOUR_K_V1_SKIN_FINE_DAMP,
             "halo_clamp": FOUR_K_V1_HALO_CLAMP,
-            "flat_sr_gain": FOUR_K_V1_FLAT_SR_GAIN,
-            "flat_detail_gain": FOUR_K_V1_FLAT_DETAIL_GAIN,
-            "hf_soft_cap": FOUR_K_V1_HF_SOFT_CAP,
-            "edge_detail_gain": FOUR_K_V1_EDGE_DETAIL_GAIN,
-            "tiny_stroke_smooth_sigma": FOUR_K_V1_STROKE_SMOOTH_SIGMA,
+            "tiny_stroke_source": "LANCZOS_BASE_ONLY",
             "tiny_stroke_sharpen": FOUR_K_V1_STROKE_SHARPEN,
+            "back_projection_sigma_source_px": FOUR_K_V1_BACK_PROJECTION_SIGMA,
             "back_projection_iterations": FOUR_K_V1_BACK_PROJECTION_ITERATIONS,
         },
         "resample": "Pillow.Image.Resampling.LANCZOS",
@@ -370,7 +381,7 @@ def _sr_tool_dir() -> Path:
 
 
 def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None) -> np.ndarray:
-    """Run Real-ESRGAN x4plus on an RGB image and return the native x4 result as uint8 RGB."""
+    """Run the bundled Real-ESRGAN model on an RGB image and return its native-scale result as uint8 RGB."""
 
     tool_dir = _sr_tool_dir()
     exe = tool_dir / "realesrgan-ncnn-vulkan.exe"
@@ -478,75 +489,94 @@ def _structure_maps(rgb: Image.Image, target_size: tuple[int, int]) -> tuple[np.
     return texture, edge, stroke
 
 
+def _blur(values: np.ndarray, sigma: float) -> np.ndarray:
+    return cv2.GaussianBlur(values, (0, 0), sigma)
+
+
+def _skin_mask(ycc: np.ndarray) -> np.ndarray:
+    cr = ycc[..., 1] * 255.0
+    cb = ycc[..., 2] * 255.0
+    mask = _ramp(cr, (133, 140)) * (1.0 - _ramp(cr, (170, 178))) * _ramp(cb, (80, 87)) * (1.0 - _ramp(cb, (128, 135)))
+    return _blur(mask.astype(np.float32), 3.0)
+
+
 def _fuse_detail(
-    sr_x4: np.ndarray,
+    sr_native: np.ndarray,
     rgb: Image.Image,
     target_size: tuple[int, int],
     maps: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> np.ndarray:
-    """Fuse SR detail onto the LANCZOS base of the original; returns float RGB at target size."""
+    """Fuse SR luminance detail onto the LANCZOS base of the original; returns uint8 RGB at target size."""
 
-    texture, edge, stroke = maps
-    base = np.asarray(rgb.resize(target_size, Image.Resampling.LANCZOS), dtype=np.float32) / 255.0
-    sr = cv2.resize(sr_x4, target_size, interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-    sigma = FOUR_K_V1_FUSION_SIGMA
-    base_low = cv2.GaussianBlur(base, (0, 0), sigma)
-    sr_high = sr - cv2.GaussianBlur(sr, (0, 0), sigma)
-    del sr
-    base_high = base - base_low
-    del base
-    # Original texture the SR flattened (fabric, food, skin) is partially restored.
-    lost = np.clip(np.abs(base_high) - np.abs(sr_high), 0.0, None) * np.sign(base_high)
-    sr_high = FOUR_K_V1_HF_SOFT_CAP * np.tanh(sr_high / FOUR_K_V1_HF_SOFT_CAP)
-    sr_gain = (FOUR_K_V1_FLAT_SR_GAIN + (1.0 - FOUR_K_V1_FLAT_SR_GAIN) * texture)[..., None]
-    fused = np.clip(base_low + sr_gain * sr_high + FOUR_K_V1_TEXTURE_RESTORE * lost, 0.0, 1.0)
-    del base_low, sr_high, base_high, lost, sr_gain
+    texture, _edge, stroke = maps
+    scale = target_size[0] / rgb.width
+    fine_sigma = FOUR_K_V1_FINE_SIGMA * scale
+    mid_sigma = FOUR_K_V1_MID_SIGMA * scale
+    struct_sigma = FOUR_K_V1_STRUCT_SIGMA * scale
+    base = cv2.cvtColor(
+        np.asarray(rgb.resize(target_size, Image.Resampling.LANCZOS), dtype=np.float32) / 255.0,
+        cv2.COLOR_RGB2YCrCb,
+    )
+    shrink = sr_native.shape[1] >= target_size[0]
+    sr_luma = _luma(
+        cv2.resize(sr_native, target_size, interpolation=cv2.INTER_AREA if shrink else cv2.INTER_CUBIC).astype(np.float32)
+        / 255.0
+    )
+    base_luma = base[..., 0].copy()
+    skin = _skin_mask(base)
+    keep = 1.0 - stroke
 
-    stroke3 = stroke[..., None]
-    soft = cv2.GaussianBlur(fused, (0, 0), FOUR_K_V1_STROKE_SMOOTH_SIGMA)
-    soft_luma = _luma(soft)
+    base_fine, base_mid = _blur(base_luma, fine_sigma), _blur(base_luma, mid_sigma)
+    sr_fine, sr_mid = _blur(sr_luma, fine_sigma), _blur(sr_luma, mid_sigma)
+    base_struct = _blur(base_luma, struct_sigma)
+    mid_base = base_fine - base_mid
+    cap = np.sqrt(_blur(mid_base * mid_base, struct_sigma)) * FOUR_K_V1_MID_SR_CAP + 1e-4
+    delta = cap * np.tanh(((sr_fine - sr_mid) - mid_base) / cap)
+    mid = mid_base + FOUR_K_V1_MID_SR_FOLLOW * keep * (1.0 - 0.5 * skin) * delta
+    mid *= 1.0 + (FOUR_K_V1_MID_GAIN - 1.0) * (FOUR_K_V1_MID_FLAT_SHARE + (1.0 - FOUR_K_V1_MID_FLAT_SHARE) * texture) * keep
+    struct = (base_mid - base_struct) * (1.0 + (FOUR_K_V1_STRUCT_GAIN - 1.0) * keep)
+    envelope = np.sqrt(_blur(mid_base * mid_base, mid_sigma)) + 1e-4
+    fine = envelope * np.tanh((sr_luma - sr_fine) / envelope)
+    fine *= (
+        FOUR_K_V1_FINE_GAIN
+        * (FOUR_K_V1_FINE_FLAT_SHARE + (1.0 - FOUR_K_V1_FINE_FLAT_SHARE) * texture)
+        * (1.0 - FOUR_K_V1_SKIN_FINE_DAMP * skin)
+        * keep
+    )
+    fine += FOUR_K_V1_SKIN_SOURCE_FINE * skin * keep * (base_luma - base_fine)
+    luma = base_struct + struct + mid + fine
+    del mid_base, cap, delta, mid, struct, envelope, fine, base_fine, base_mid, sr_fine, sr_mid, base_struct, skin
+
     k5 = np.ones((5, 5), np.uint8)
-    sharpened = np.clip(
-        soft_luma + FOUR_K_V1_STROKE_SHARPEN * (soft_luma - cv2.GaussianBlur(soft_luma, (0, 0), FOUR_K_V1_STROKE_SHARPEN_SIGMA)),
-        cv2.erode(soft_luma, k5),
-        cv2.dilate(soft_luma, k5),
+    strokes = np.clip(
+        base_luma + FOUR_K_V1_STROKE_SHARPEN * (base_luma - _blur(base_luma, FOUR_K_V1_STROKE_SHARPEN_SIGMA * scale)),
+        cv2.erode(base_luma, k5),
+        cv2.dilate(base_luma, k5),
     )
-    strokes = np.clip(soft + (sharpened - soft_luma)[..., None], 0.0, 1.0)
-    fused = stroke3 * strokes + (1.0 - stroke3) * fused
-    del soft, soft_luma, sharpened, strokes
-
-    # Fine-scale luminance lift, weaker on flat areas and hard contours, off on tiny
-    # strokes, and clamped to the local 3x3 range so it cannot create halos or ringing.
-    ycc = cv2.cvtColor(fused, cv2.COLOR_RGB2YCrCb)
-    luma = ycc[..., 0]
-    gain = FOUR_K_V1_FLAT_DETAIL_GAIN + (FOUR_K_V1_FINE_DETAIL_GAIN - FOUR_K_V1_FLAT_DETAIL_GAIN) * texture
-    gain = gain * (1.0 - (1.0 - FOUR_K_V1_EDGE_DETAIL_GAIN / FOUR_K_V1_FINE_DETAIL_GAIN) * edge) * (1.0 - stroke)
-    lifted = luma + gain * (luma - cv2.GaussianBlur(luma, (0, 0), 0.9))
-    kernel = np.ones((3, 3), np.uint8)
-    ycc[..., 0] = np.clip(
-        lifted,
-        cv2.erode(luma, kernel) - FOUR_K_V1_HALO_CLAMP,
-        cv2.dilate(luma, kernel) + FOUR_K_V1_HALO_CLAMP,
+    luma = stroke * strokes + keep * luma
+    del strokes
+    # Halo clamp: stay within the local range of the base and the SR.
+    luma = np.clip(
+        luma,
+        np.minimum(cv2.erode(base_luma, k5), cv2.erode(sr_luma, k5)) - FOUR_K_V1_HALO_CLAMP,
+        np.maximum(cv2.dilate(base_luma, k5), cv2.dilate(sr_luma, k5)) + FOUR_K_V1_HALO_CLAMP,
     )
-    return np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0.0, 1.0)
+    del sr_luma, base_luma
+
+    base[..., 0] = np.clip(_back_project(luma, rgb), 0.0, 1.0)
+    return (np.clip(cv2.cvtColor(base, cv2.COLOR_YCrCb2RGB), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
-def _back_project(fused: np.ndarray, rgb: Image.Image, stroke: np.ndarray) -> np.ndarray:
-    """Make the fused result consistent with the original when scaled back to it.
+def _back_project(luma: np.ndarray, rgb: Image.Image) -> np.ndarray:
+    """Lock the low band of the fused luminance to the original (no tone drift)."""
 
-    On tiny strokes the correction is smoothed, so glyph structure is restored
-    without re-imposing the source's pixel-level jaggies."""
-
-    source = np.asarray(rgb, dtype=np.float32) / 255.0
-    out = fused
-    source_size = (source.shape[1], source.shape[0])
-    target_size = (out.shape[1], out.shape[0])
-    stroke3 = stroke[..., None]
+    source = _luma(np.asarray(rgb, dtype=np.float32) / 255.0)
+    source_size = (rgb.width, rgb.height)
+    target_size = (luma.shape[1], luma.shape[0])
     for _ in range(FOUR_K_V1_BACK_PROJECTION_ITERATIONS):
-        residual = cv2.resize(source - cv2.resize(out, source_size, interpolation=cv2.INTER_AREA), target_size, interpolation=cv2.INTER_LINEAR)
-        smoothed = cv2.GaussianBlur(residual, (0, 0), 1.0)
-        out = np.clip(out + stroke3 * smoothed + (1.0 - stroke3) * residual, 0.0, 1.0)
-    return (out * 255.0 + 0.5).astype(np.uint8)
+        residual = _blur(source - cv2.resize(luma, source_size, interpolation=cv2.INTER_AREA), FOUR_K_V1_BACK_PROJECTION_SIGMA)
+        luma = luma + cv2.resize(residual, target_size, interpolation=cv2.INTER_LINEAR)
+    return luma
 
 
 def build_4k_v1_output_path(
@@ -617,7 +647,7 @@ def process_4k_v1_image(
     output_path: str | Path | None = None,
     stage_callback=None,
 ) -> dict[str, Any]:
-    """Execute the 4K route: Real-ESRGAN x4 detail reconstruction with source-fidelity fusion."""
+    """Execute the 4K route: Real-ESRGAN detail reconstruction with source-fidelity fusion."""
 
     source = Path(source_path)
     root = Path(formal_root).expanduser().resolve()
@@ -683,11 +713,11 @@ def process_4k_v1_image(
         target_size = (source_meta["target_width"], source_meta["target_height"])
         rgb = image.convert("RGB")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        sr_x4 = _run_super_resolution(rgb, destination.parent, stage_callback)
+        sr_native = _run_super_resolution(rgb, destination.parent, stage_callback)
         _emit_stage(stage_callback, "image_processing", 78, "正在进行原图保真融合与细节校准")
         maps = _structure_maps(rgb, target_size)
-        resized = Image.fromarray(_back_project(_fuse_detail(sr_x4, rgb, target_size, maps), rgb, maps[2]), "RGB")
-        del sr_x4
+        resized = Image.fromarray(_fuse_detail(sr_native, rgb, target_size, maps), "RGB")
+        del sr_native
         if source_meta["has_alpha"]:
             # Alpha is never generated by SR; it is upscaled with LANCZOS from the original.
             alpha = image.convert("RGBA").getchannel("A").resize(target_size, Image.Resampling.LANCZOS)

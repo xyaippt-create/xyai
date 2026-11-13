@@ -1643,3 +1643,34 @@ S68 耗时复测补记（同日）：机器空闲时单独复测，每例 5 次�
 ## 2026-10-29｜V0.6.1 颜色校正收口
 
 执行者：Claude。负责人裁定：S66-C 签收冻结（PASS_AND_FROZEN）并纳入 V0.6.1；S67（自动挑档）与 S68（参考图明暗与饱和度对齐）顺延到下一版本，草稿与 PoC 成果保留。V0.6.1 颜色范围：S64 挑档校色、S66-A/B 参考图挑档、S66-C 提示方向与建议档位。按 CLAUDE.md 第 6 条，在 src/releaseNotes.js 的 0.6.1 颜色校正下补一条 S66-C 通俗说明（该文件为另一会话新增、尚未提交，只加了一行）。经负责人授权，逐文件提交颜色相关文件。
+
+## 2026-11-13｜4K v4 候选隔离样张（未接入正式流程）
+
+执行者：Claude。负责人反馈 4K 成品尺寸达标但画质无可感提升。用真实原图与真实成品实测定位：v3 的 4 次回投把成品锁回原图（缩回后平均误差 0.375/255），原图分辨率内的清晰度提升被抹掉；保留下来的细纹多为皮肤颗粒与毛衣假线；小字笔画变细断开，比直接放大更差。
+
+新增隔离脚本 `tools/experiments/e4k_v4_candidate_poc.py`（只读复用 four_k_v1 内部函数）：回投只锁低频明暗、色度取原图放大；中频跟随超分并限幅提升，超分改动受原图局部结构幅度约束；细纹取消纹理回补、肤色降权；小字区不用超分。在 P1（负责人样本）与 S01/S03/S05/S07 上出 LANCZOS / v3 / v4a / v4b 对比。结果：v4 小字干净完整、平坦区颗粒低于 v3（如 P1 0.607→0.431/0.527）、体积小 9–22%；屏幕观看尺寸清晰度 v4a 略低于 v3，v4b 高 3–9%，提升幅度有限。YR 海报原图未找到，换模型对比未做，未在软件内运行。
+
+4K v3 仍为 PASS_AND_FROZEN，正式代码、合同、Settings 与 `D:\影界文件` 未改；5 张原图 SHA 不变；staging 未触碰，无 Git 写操作。待负责人目视裁定。报告：`artifacts/e4k_v4_poc/REPORT.md`。
+
+## 2026-11-13｜4K v4 候选换模型对比（隔离，未接入正式流程）
+
+执行者：Claude。新增隔离脚本 `tools/experiments/e4k_v4_model_compare.py`，用自带的 realesrgan-x4plus、realesr-animevideov3-x3、realesrgan-x4plus-anime 在 P1 与 S01/S03/S05/S07 上各出模型原始输出与 v4b 融合结果。三个模型原始风格差别大，但经 v4b 保真融合后屏幕观看尺寸清晰度几乎一致（同一样本相差 ≤0.1，整体 1.20–1.42×），目视难分；换自带模型不能再提高清晰度。animevideov3-x3 超分约 3.4 s（x4plus 约 62 s），融合后结果相当；真实人像 S03 上 anime 类模型皮肤纹路略平。
+
+4K v3 仍为 PASS_AND_FROZEN，正式代码与 `D:\影界文件` 未改；5 张原图 SHA 不变；staging 未触碰，无 Git 写操作。未在软件内运行，待负责人裁定。报告：`artifacts/e4k_v4_poc/REPORT.md` 补充章节。
+
+
+## 2026-11-13｜4K v4 接入正式流程（待负责人画质裁定，未冻结）
+
+执行者：Claude。负责人同意按建议重开已冻结的 4K v3。HDDE Skill 在本会话未注册、`.claude/skills/hdde/` 不存在，调用失败后完整读取 `.agents/skills/hdde/SKILL.md` 执行。
+
+`engine/image_processing_routing/four_k_v1.py`：超分模型由 realesrgan-x4plus 改为自带的 realesr-animevideov3-x3；融合改为 v4（亮度分频：反投影只锁低频明暗、2 轮；中频跟随超分并限幅提升，超分改动上限为原图局部结构幅度的 0.25 倍；细纹受原图结构约束、肤色降权、取消纹理回补；极小字只用原图放大底图锐化；色度取原图放大）；超分原生尺寸小于目标时改用三次插值放大。合同版本 2.1。路线标识 `REALESRGAN_X4PLUS_FIDELITY_FUSION` 沿用，以兼容已登记成品与前端合同校验，实际模型写在合同 `super_resolution.model`。接口、页面、输出目录与文件命名未改。
+
+验证：正式融合与隔离原型逐像素一致（P1/S03/S07，最大差值 0）；`process_4k_v1_image` 在临时正式根真实运行 P1/S03/S05/S08，6.4–8.6 s/张（v3 约 72–79 s），成品与原型一致，S08 透明通道等于原图 LANCZOS 放大；真实应用后端在隔离根上传→任务→RESULT_REGISTERED→result-file 200，8.7 s，3073×3840；`tests/image_processing_routing` 129 项通过 127，失败 2 项（test_real_app 的正式目录消失与目录失败分类用例）失败点在 SharedTaskRegistry 与正式根探测，不经过 4K 代码，未用改动前代码复现对照。新增 `tools/experiments/e4k_v4_real_photo_check.py`：3 张真实照片上新模型与 x4plus 融合后清晰度相差 ≤0.05，目视相当。
+
+未完成：负责人画质裁定；桌面界面内目视验收；运行中的 8787 后端仍是旧代码，需重启。`src/releaseNotes.js` 待负责人认可后再补。`D:\影界文件` 与 Settings 未写入，staging 未触碰，无 Git 写操作。
+
+## 2026-11-13｜4K v4 PASS_AND_FROZEN（产品负责人认可）
+
+执行者：Claude。产品负责人查看正式代码产出的对比样张（原图直接放大 / v3 / v4）后回复“认可，冻结 v4”。`docs/03_CURRENT_STATUS_V0.4.5.1.md` 登记 `4K_V4: PASS_AND_FROZEN`（合同 `4k_v1_contract_2.1`，模型 realesr-animevideov3-x3，融合 v4），4K v3 冻结记录改为历史。`src/releaseNotes.js` 在 V0.6.9 开发版下新增“4K 画质增强”3 条。代码无新增改动。
+
+如实记录：Claude 未在桌面界面内做目视验收，冻结依据为负责人对样张的认可与此前的技术验证；真实人像特写未专项测试；运行中的后端需重启才用上 v4；`dist/` 未重新构建，软件内更新日志需重建前端后才显示新条目。未提交，staging 未触碰，无 Git 写操作。
