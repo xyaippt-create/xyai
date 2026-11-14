@@ -376,6 +376,19 @@ class LevelPickApiTests(unittest.TestCase):
         self.assertNotIn(grey["measurement"]["category"].split("+")[0], {"YELLOW", "BLUE", "TINT"})
         self.assertEqual(grey["measurement"]["recommended_level"], "original")
 
+    def test_design_tone_notice_only_accompanies_a_measured_cast(self):
+        # A dark black-and-white frame carries a LOW_KEY hint but no cast: no design-tone caution.
+        dark = (cast_scene(cast=(0, 0, 0)).astype(np.float32) * 0.25).astype(np.uint8)
+        grey = Image.fromarray(dark).convert("L")
+        measured = self.preview(self.intake_bytes(self.encoded(grey), "dark_grey.png"))["measurement"]
+        self.assertIn("LOW_KEY", measured["intent_hints"])
+        self.assertEqual(measured["notice"], "")
+        # A named cast with a hint keeps the caution.
+        cast = self.preview(self.intake())["measurement"]
+        self.assertIn("偏黄", cast["summary"])
+        self.assertTrue(cast["intent_hints"])
+        self.assertIn("可能是有意的设计色调", cast["notice"])
+
     def test_refused_formats_explain_the_specific_reason(self):
         import cv2
         cmyk = self.encoded(Image.new("CMYK", (96, 96), (10, 20, 30, 4)), "JPEG")

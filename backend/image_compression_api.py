@@ -3302,6 +3302,9 @@ def register_image_compression_routes(
         hints = list(analysis.get("intent_hints") or [])
         labels = {"YELLOW": "画面偏黄", "BLUE": "画面偏蓝", "TINT": "画面偏绿或偏品红", "GREY": "画面发灰"}
         parts = [labels[tag] for tag in category.split("+") if tag in labels]
+        # The design-tone caution only makes sense next to a named cast; a frame with no cast is
+        # already recommended as the original, whatever its brightness or saturation.
+        colour_cast = any(tag in ("YELLOW", "BLUE", "TINT") for tag in category.split("+"))
         return {
             "category": category,
             "summary": "、".join(parts) if parts else "未测到明显偏色",
@@ -3310,7 +3313,7 @@ def register_image_compression_routes(
             "recommended_label": LEVEL_LABELS.get(str(analysis.get("recommended_level") or "original"), "原图"),
             "intent_hints": hints,
             "possible_design_colour": bool(hints) or category == "NO_CAST",
-            "notice": "可能是有意的设计色调，建议先看原图；最终由你选择。" if hints else "",
+            "notice": "可能是有意的设计色调，建议先看原图；最终由你选择。" if hints and colour_cast else "",
         }
 
     def remove_level_preview_files(preview_id: str, directory: Path) -> None:
