@@ -179,6 +179,7 @@ S69_COLOR_FULL_SCAN: COMPLETE（2026-11-13，只读；报告 artifacts/s69_color
 S69_A_LEVEL_PICK_MEASUREMENT: PASS_AND_FROZEN（2026-11-14 负责人签字；门禁 1、2 只考核 ΔE≥4 样本；建议档位封顶为“轻”；13 张对照图复验通过；未做正式部署）
 S69_D_COLOR_INPUT_FORMAT: PASS_AND_FROZEN（2026-11-14；调色板、灰度、灰度加透明、1/2/4 位 PNG 与灰度 JPEG 无损展开后可校色；CMYK、16 位等保持拒绝并给出具体原因；未做正式部署、未在桌面软件内实测）
 S69_E_COLOR_LEVEL_PICK_SPEED: PASS_AND_FROZEN（2026-11-14；4K 参考图预览 8.2→4.7 s，选档出成品挑档 8.9→5.3 s、参考图 8.1→3.8 s；像素不变，PNG 成品体积约 +10%；未做正式部署、未在桌面软件内实测）
+S69_F_COLOR_KEEP_ORIGINAL_DISPLAY: PASS（2026-11-14；仅前端：自动校色保留原图显示“已保留原图”与说明，不显示进度和红色错误；后端 D61-02 合同不变；桌面实测 2 张通过；未部署）
 LEVEL_PICK_VERSION: hdde.color-level-pick.v2（S69-A 冻结）
 LEVEL_PICK_CONTRACT: docs/contracts/HDDE_COLOR_LEVEL_PICK_SUPPLEMENT_V1.md
 ```

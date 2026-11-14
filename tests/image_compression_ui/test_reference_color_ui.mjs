@@ -77,3 +77,20 @@ test("unified Result page recognizes reference mode without replacing delivery a
   assert.match(detail, /result_ids: \[resultId\]/);
   assert.doesNotMatch(detail, /result_ids:.*reference/);
 });
+
+test("automatic keep-original is shown as a normal outcome, not an unfinished task", () => {
+  const context = vm.createContext({ API_BASE: "" });
+  const start = page.indexOf("const COLOR_PROTECTION_TITLE");
+  vm.runInContext(page.slice(start, page.indexOf("function formatBytes", start)), context);
+  const kept = { status: "failed", progress: 12, result_action: "ACCEPT_ORIGINAL", output_selected: "ORIGINAL", d3_status: "AUDIT_NOT_APPLICABLE",
+    failure_reason: "本次保留原图，未生成新颜色校正文件；可更换图片或参考图后再次处理。" };
+  assert.equal(context.isColorOriginalKept(kept), true);
+  assert.match(context.colorFailureMessage(kept, null), /已保留原图，没有生成新文件/);
+  // A protection block and an ordinary failure keep their own wording.
+  assert.equal(context.isColorOriginalKept({ ...kept, d3_status: "PROTECTION_BLOCKED" }), false);
+  assert.equal(context.isColorOriginalKept({ ...kept, result_action: "REVIEW_REQUIRED" }), false);
+  assert.equal(context.colorFailureMessage({ status: "failed", failure_reason: "解码失败" }, null), "解码失败");
+  assert.match(page, /originalKept \? "original_kept" : failed \? "failed"/);
+  assert.match(page, /task\?\.progress != null && !originalKept/);
+  assert.match(page, /if \(isColorOriginalKept\(reason\.taskData\?\.task\)\) setNotice/);
+});

@@ -83,10 +83,21 @@ function isColorProtectionBlocked(task, result) {
     || (task?.output_selected || result?.output_selected) === "NONE";
 }
 
+// Keeping the original is a normal verdict. The API still ends the task as
+// failed with no Result (D61-02), so the page explains it instead of erroring.
+function isColorOriginalKept(task) {
+  return task?.status === "failed" && task?.result_action === "ACCEPT_ORIGINAL"
+    && task?.output_selected === "ORIGINAL" && !isColorProtectionBlocked(task);
+}
+
+const COLOR_ORIGINAL_KEPT_TITLE = "已保留原图";
+const COLOR_ORIGINAL_KEPT_MESSAGE = "原图颜色已经合适，或自动调整不如原图可靠，已保留原图，没有生成新文件。";
+
 function colorFailureMessage(task, result, fallback = "颜色校正未完成。") {
   if (isColorProtectionBlocked(task, result)) {
     return `${COLOR_PROTECTION_TITLE}。${COLOR_PROTECTION_DESCRIPTION}`;
   }
+  if (isColorOriginalKept(task)) return COLOR_ORIGINAL_KEPT_MESSAGE;
   return task?.failure_reason || fallback;
 }
 
@@ -342,6 +353,7 @@ export default function ColorCorrectionPage({
   const completed = task?.status === "completed" && Boolean(originalSelected || (result && outputPreview));
   const failed = task?.status === "failed";
   const protectionBlocked = isColorProtectionBlocked(task, decision);
+  const originalKept = isColorOriginalKept(task);
   const resultSummary = referenceResult
     ? referenceResultSummary(decision, ui?.reference_match_status)
     : referenceLevelResult
@@ -529,7 +541,9 @@ export default function ColorCorrectionPage({
           taskConfig: payload.data.task,
           taskResult: payload.data.result || {},
         });
-        if (payload.data?.task?.status === "failed") {
+        if (isColorOriginalKept(payload.data?.task)) {
+          setNotice(colorFailureMessage(payload.data.task, payload.data.result));
+        } else if (payload.data?.task?.status === "failed") {
           setError(colorFailureMessage(payload.data.task, payload.data.result));
         } else if (payload.data?.task?.status === "completed" && payload.data?.task?.task_id && typeof onResultReady === "function") {
           onResultReady(payload.data.task.task_id);
@@ -544,7 +558,8 @@ export default function ColorCorrectionPage({
         taskResult: reason.taskData.result || {},
       });
       setBatchData(null);
-      setError(reason.message);
+      if (isColorOriginalKept(reason.taskData?.task)) setNotice(colorFailureMessage(reason.taskData.task, null));
+      else setError(reason.message);
     } finally {
       setBusy(false);
     }
@@ -678,7 +693,7 @@ export default function ColorCorrectionPage({
     : completed
       ? referenceResult ? resultConclusion.label : "自动校正已完成"
       : failed
-        ? protectionBlocked ? COLOR_PROTECTION_TITLE : "自动校正未完成"
+        ? protectionBlocked ? COLOR_PROTECTION_TITLE : originalKept ? COLOR_ORIGINAL_KEPT_TITLE : "自动校正未完成"
         : batchData
           ? "批量任务已进入队列"
           : selectedItems.length
@@ -705,7 +720,7 @@ export default function ColorCorrectionPage({
 
         {!completed ? (
           <section className="hdde-color-card hdde-color-review-empty" aria-live="polite">
-            <strong>{busy ? "正在读取真实处理结果…" : failed ? "当前任务没有可复核成品" : "结果尚未准备完成"}</strong>
+            <strong>{busy ? "正在读取真实处理结果…" : originalKept ? "已保留原图，没有可复核成品" : failed ? "当前任务没有可复核成品" : "结果尚未准备完成"}</strong>
             <p>{failed ? colorFailureMessage(task, result, "请返回批次查看失败原因。") : "只有完成且可读取的真实结果才能进入人工确认。"}</p>
             <button type="button" className="hdde-secondary-action" onClick={() => onBackToProcessing?.(batchId)}>{reviewReturnLabel}</button>
           </section>
@@ -844,8 +859,8 @@ export default function ColorCorrectionPage({
           </button> : <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-run" onClick={runCorrection} disabled={busy || !selectedItems.length || !outputSettings}>
             {busy ? "正在创建处理任务…" : selectedItems.length > 1 ? `开始处理 ${selectedItems.length} 张图片` : "开始自动校正"}
           </button>}
-          <p className="hdde-color-task-state" data-status={failed ? "failed" : completed ? "completed" : task?.status || "idle"} role="status">
-            {taskLabel}{task?.progress != null ? ` · ${task.progress}%` : ""}
+          <p className="hdde-color-task-state" data-status={originalKept ? "original_kept" : failed ? "failed" : completed ? "completed" : task?.status || "idle"} role="status">
+            {taskLabel}{task?.progress != null && !originalKept ? ` · ${task.progress}%` : ""}
           </p>
         </section>
       </div>
