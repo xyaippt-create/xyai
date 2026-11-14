@@ -257,5 +257,14 @@ class ReferenceLevelPickApiTests(unittest.TestCase):
         self.assertEqual(self.state["color_level_preview_sessions"], {})
 
 
+    def test_level_run_reuses_and_releases_the_preview_measurement(self):
+        target, reference = self.intake(with_cast(clean_scene()), "target.png"), self.intake(clean_scene(), "reference.png")
+        data = self.preview(target, reference)
+        session = self.state["color_level_preview_sessions"][data["preview_id"]]
+        self.assertIsNotNone(session.get("measurement_cache"))
+        response = self.run_level(data, "medium")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("measurement_cache", session)
+
 if __name__ == "__main__":
     unittest.main()

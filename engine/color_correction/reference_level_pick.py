@@ -13,6 +13,7 @@ pixel's luminance. The reference contributes nothing else: no colours, no tone, 
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -276,8 +277,17 @@ def build_reference_level_pick_preview(target_path: str | Path, reference_path: 
     target = load_color_managed_source(target_path)
     reference = load_color_managed_source(reference_path)
     plan = plan_reference(target.pixels, reference.pixels)
-    levels = {name: render_reference_level(target.pixels, plan, name) for name in LEVELS}
-    safety = {name: level_safety(target.pixels, candidate, plan.target) for name, candidate in levels.items()}
+
+    def one(name: str) -> tuple[np.ndarray, dict[str, Any]]:
+        candidate = render_reference_level(target.pixels, plan, name)
+        return candidate, level_safety(target.pixels, candidate, plan.target)
+
+    # S69-E: the levels are independent, so they render in parallel like the level pick. Every
+    # matrix product on this path is einsum or element-wise, never BLAS (see build_level_pick_preview).
+    with ThreadPoolExecutor(max_workers=len(LEVELS)) as pool:
+        rendered = dict(zip(LEVELS, pool.map(one, LEVELS)))
+    levels = {name: item[0] for name, item in rendered.items()}
+    safety = {name: item[1] for name, item in rendered.items()}
     return ReferenceLevelPickPreview(
         source=target,
         analysis=plan.target,

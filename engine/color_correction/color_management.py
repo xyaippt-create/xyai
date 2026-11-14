@@ -1098,11 +1098,12 @@ def encode_color_managed_candidate(
             **resolution_options,
         )
     else:
+        # S69-E: standard zlib effort. The maximum effort with optimize took 4-6 s per 4K image
+        # for 6-10% smaller files; the pixels are identical either way.
         image.save(
             stream,
             format="PNG",
-            optimize=True,
-            compress_level=7,
+            compress_level=6,
             icc_profile=source.output_icc_profile,
             **resolution_options,
         )

@@ -517,6 +517,7 @@ def register_image_compression_routes(
         LEVEL_LABELS,
         LEVEL_PICK_VERSION,
         LEVELS,
+        LevelPickAnalysis,
         analyze_level_pick,
         build_level_pick_preview,
         level_safety,
@@ -525,6 +526,7 @@ def register_image_compression_routes(
     )
     from engine.color_correction.reference_level_pick import (
         REFERENCE_LEVEL_PICK_VERSION,
+        ReferencePlan,
         build_reference_level_pick_preview,
         plan_reference,
         render_reference_level,
@@ -3379,17 +3381,25 @@ def register_image_compression_routes(
                 raise RuntimeError("原图内容已变化，预览已失效，请重新生成预览。")
             managed = load_color_managed_source(source_path)
             reference_source = record["level_pick"].get("reference")
+            # The source (and reference) were just re-hashed against the preview, so the cached
+            # measurement still describes them; rendering below still starts from the source and
+            # must reproduce the previewed pixels exactly (S69-E).
+            cached = session.pop("measurement_cache", None)
             if reference_source:
                 reference_path = Path(str(reference_source["path"])).resolve()
                 if _sha256_file(reference_path) != session["reference_sha256"]:
                     raise RuntimeError("参考图内容已变化，预览已失效，请重新生成预览。")
-                reference_plan = plan_reference(managed.pixels, load_color_managed_source(reference_path).pixels)
+                reference_plan = cached if isinstance(cached, ReferencePlan) and cached.target.source_shape == tuple(managed.pixels.shape) else None
+                if reference_plan is None:
+                    reference_plan = plan_reference(managed.pixels, load_color_managed_source(reference_path).pixels)
                 if not reference_plan.usable:
                     raise RuntimeError("参考图没有可用的中性区域，不能生成结果。")
                 analysis = reference_plan.target
                 candidate = render_reference_level(managed.pixels, reference_plan, level)
             else:
-                analysis = analyze_level_pick(managed.pixels)
+                analysis = cached if isinstance(cached, LevelPickAnalysis) and cached.source_shape == tuple(managed.pixels.shape) else None
+                if analysis is None:
+                    analysis = analyze_level_pick(managed.pixels)
                 candidate = render_level(managed.pixels, analysis, level)
             if pixel_sha256(candidate) != session["levels"][level]["pixel_sha256"]:
                 raise RuntimeError("正式结果与所选预览不一致，任务已阻断。")
@@ -5827,6 +5837,9 @@ def register_image_compression_routes(
             "directory": str(directory),
             "levels": levels,
             "analysis": analysis_record,
+            # S69-E: the measurement behind these previews, reused when the user picks a level.
+            # In memory only; dropped when the session is used or expires.
+            "measurement_cache": preview.plan if reference_source is not None else preview.analysis,
             "expires_at": expires_at,
             "running_task_id": None,
             "used_by_task_id": None,
