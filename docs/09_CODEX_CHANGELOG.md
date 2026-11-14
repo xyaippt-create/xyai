@@ -1934,3 +1934,12 @@ S68 耗时复测补记（同日）：机器空闲时单独复测，每例 5 次�
 - 测试：test_level_pick_color_api.py +1，覆盖暗调黑白图无提醒、偏黄图保留提醒。颜色接口 4 组 91 项全部通过。
 - 桌面实测：8797 端口，8787 未触碰。挑档校色下，grey.jpg 显示“未测到明显偏色”、无提醒；target_4k_warm.png 显示“画面偏黄 … 可能是有意的设计色调”。窗口经 request_shutdown 关闭。证据在 output/s69_desktop_acceptance/（09-notice-grey.png、10-notice-warm.png、results_notice.json）。
 - 更新日志页补一条。未提交，staging 为空，无 Git 写操作。
+
+## 2026-11-14｜V0.7.0 开发收口，进入 V0.7.1 开发版
+
+执行者：Claude。负责人指示“0.7 版本开发收口，接下来进入下一个版本开发”。
+- 收口：V0.7.0 的用户可见改进以软件内 V0.7.0 更新日志为准（版本更新、4K 画质增强、颜色校正、输出中心等）。本会话负责的颜色校正：S69-A/D/E/F/G 已完成并提交（d8706e9、ba2de21、0a5aa07、cc78d51）；S69-B 去灰 v3、S71 除雾 PoC 为 BLOCKED，除雾已暂停。其他模块的未决事项以各自记录为准。收口不代表冻结，也不代表正式部署。
+- 升版：用 tools/manage_version.py --set 0.7.1-dev --expect-current 0.7.0-dev，先试运行，再写入。`--bump patch` 会丢掉 `-dev` 后缀，所以未用。活动源码（src、backend、engine、runtime、main.py、packaging）无写死的旧版本号。显示名称为“V0.7.1 开发版”，渠道 DEVELOPMENT。
+- 软件内更新日志：src/releaseNotes.js 顶部新增 V0.7.1 开发版条目，保留 V0.7.0 及更早历史。
+- 验证：产品版本测试 20 项、系统设置测试 24 项全部通过。隔离构建 output/version_v071/dist 成功，产物含“V0.7.1 开发版”，构建号 V0.7.1-dev+cc78d51。正式 dist、正式运行实例和安装包均未更新。
+- 工作区其他会话的未提交成果原样保留。未提交，无 Git 写操作。
