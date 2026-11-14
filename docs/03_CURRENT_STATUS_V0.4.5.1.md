@@ -172,10 +172,13 @@ S66_REFERENCE_LEVEL_PICK_DECISION: APPROVED（方案 A：升级“参考图校�
 S66_A_BACKEND_API: PASS_AND_FROZEN（预览耗时：负责人接受空闲达标、降频或负载下变慢）
 S66_B_PAGE: PASS_AND_FROZEN（参考图页签已改为四档挑选；真实桌面 4 组通过；负责人 2026-10-28 签收）
 S66_C_REFERENCE_ADVICE: PASS_AND_FROZEN（提示改为说明结果方向；目标已正常且参考偏色时建议原图；像素 99/99 不变；负责人 2026-10-29 签收，纳入 V0.6.1）
-S67_AUTOCOLOR_POC: APPROVED，DEFERRED_TO_NEXT_VERSION（负责人 2026-10-29 裁定顺延，不纳入 V0.6.1；待 C 组对照图）
+S67_AUTOCOLOR_POC: POC_VALUE_NOT_PROVEN（负责人 2026-11-14 裁定；新规则安全但很少触发：26 张已知偏色修正 4 张、15 张真实图 0 张；路线停止，不集成，自动校色保持现状）
 S68_REFTONE_POC: BLOCKED，DEFERRED_TO_NEXT_VERSION（第二轮技术门禁全部通过，G 组强档 ΔE 降幅中位 78.5%，耗时 ≤0.83 s；缺 S 组同系列样本；负责人 2026-10-29 裁定顺延，不纳入 V0.6.1）
 V0_6_1_COLOR_SCOPE: CLOSED（纳入：S64 挑档校色、S66-A/B 参考图挑档、S66-C 提示方向与建议档位，均为 PASS_AND_FROZEN；顺延：S67、S68）
-LEVEL_PICK_VERSION: hdde.color-level-pick.v1
+S69_COLOR_FULL_SCAN: COMPLETE（2026-11-13，只读；报告 artifacts/s69_color_full_scan/REPORT.md）
+S69_A_LEVEL_PICK_MEASUREMENT: PASS_AND_FROZEN（2026-11-14 负责人签字；门禁 1、2 只考核 ΔE≥4 样本；建议档位封顶为“轻”；13 张对照图复验通过；未做正式部署）
+S69_D_COLOR_INPUT_FORMAT: PASS_AND_FROZEN（2026-11-14；调色板、灰度、灰度加透明、1/2/4 位 PNG 与灰度 JPEG 无损展开后可校色；CMYK、16 位等保持拒绝并给出具体原因；未做正式部署、未在桌面软件内实测）
+LEVEL_PICK_VERSION: hdde.color-level-pick.v2（S69-A 冻结）
 LEVEL_PICK_CONTRACT: docs/contracts/HDDE_COLOR_LEVEL_PICK_SUPPLEMENT_V1.md
 ```
 

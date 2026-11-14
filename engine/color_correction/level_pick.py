@@ -3,7 +3,8 @@
 The user is the acceptance authority: this module measures the cast, renders
 light / medium / strong candidates and checks their safety, but never decides
 whether an image should be corrected.  The method and constants are the ones
-frozen by S63-AICOLOR-POC (artifacts/s63_aicolor_poc/REPORT.md).
+frozen by S63-AICOLOR-POC (artifacts/s63_aicolor_poc/REPORT.md); S69-A replaced the
+cast measurement with the cross-checked estimate of _estimate_cast.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import numpy as np
 from .color_management import ManagedColorSource, load_color_managed_source
 
 
-LEVEL_PICK_VERSION = "hdde.color-level-pick.v1"
+LEVEL_PICK_VERSION = "hdde.color-level-pick.v2"  # S69-A: cross-checked cast measurement
 LEVELS: dict[str, float] = {"light": 0.4, "medium": 0.7, "strong": 1.0}
 LEVEL_LABELS = {"original": "原图", "light": "轻", "medium": "中", "strong": "强"}
 
@@ -35,7 +36,14 @@ NEUTRAL_MIN_CELLS = 4
 TONE_BANDS = ((15, 35), (35, 55), (55, 70), (70, 82), (82, 92), (92, 99))
 BAND_RADIUS = 9.0
 
-CAST_MIN_AB = 6.0
+
+# S69-A: the cast is the median of independent illuminant estimates in log-chromaticity
+# (log R/G, log B/G of linear RGB), reported as the a*/b* of the white that illuminant renders.
+ESTIMATE_SMALL = 0.08          # log units (~8% channel ratio): below this an estimate says "no cast"
+ESTIMATE_AGREE_COS = 0.5       # an estimate agrees when it points the same way as the median
+ESTIMATE_SPREAD_REL = 0.75     # ... and lies within this share of the median's size
+FLAT_CURVE_KNOTS = (25.0, 45.0, 62.5, 76.0, 87.0, 95.5)
+CAST_MIN_WHITE = 10.0          # a cast is named and recommended from this white-point offset on
 HAZE_MIN = 0.06
 VEIL_MAX_CHROMA = 12.0
 
@@ -103,6 +111,22 @@ def _adaptation_matrix(src_ab: tuple[float, float], dst_ab: tuple[float, float])
     ws, wd = ws / ws[1], wd / wd[1]
     cone = np.diag((_BRADFORD @ wd) / (_BRADFORD @ ws))
     return (_XYZ_TO_SRGB @ np.linalg.inv(_BRADFORD) @ cone @ _BRADFORD @ _SRGB_TO_XYZ).astype(np.float32)
+
+
+def _gain_matrix(src_ab: tuple[float, float], dst_ab: tuple[float, float]) -> np.ndarray:
+    """Linear-sRGB channel gains moving a white of chromaticity src_ab to dst_ab, grey luminance kept.
+
+    S69-A renders the measured cast with per-channel gains, like the reference level pick. The
+    full-size cast the cross-checked measurement reports, applied as a Bradford matrix, pushed
+    the small channel of saturated colours below zero and failed the clipping gate.
+    """
+
+    def white(ab: tuple[float, float]) -> np.ndarray:
+        xyz = _lab_to_xyz(100.0, *ab)
+        return np.clip(_XYZ_TO_SRGB @ (xyz / xyz[1]), 1e-4, None)
+
+    gains = white(dst_ab) / white(src_ab)
+    return np.diag(gains / float(_Y_ROW @ gains)).astype(np.float32)
 
 
 def _gamut_pull(lin: np.ndarray) -> np.ndarray:
@@ -265,6 +289,85 @@ def _estimate_haze(view: np.ndarray, visible: np.ndarray) -> dict[str, float]:
     return {"black": round(lo, 4), "white": round(hi, 4), "lift": round(lift, 4), "headroom": round(headroom, 4), "haze": round(lift + headroom, 4)}
 
 
+def _log_chroma_of(rgb_linear: np.ndarray) -> np.ndarray:
+    lin = rgb_linear + 1e-4
+    return np.stack((np.log(lin[..., 0] / lin[..., 1]), np.log(lin[..., 2] / lin[..., 1])), axis=-1)
+
+
+def _shift_to_white_ab(shift: np.ndarray) -> tuple[float, float]:
+    """Lab a*, b* of the white an illuminant with this log-chroma shift renders (inverse of _lab_to_xyz)."""
+
+    xyz = _SRGB_TO_XYZ @ np.array([np.exp(shift[0]), 1.0, np.exp(shift[1])])
+    xyz = xyz / xyz[1] / _D65
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+
+    fx, fy, fz = (f(float(v)) for v in xyz)
+    return 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _estimate_cast(view: np.ndarray, visible: np.ndarray) -> dict[str, Any]:
+    """Median of three independent illuminant estimates, and whether they agree (S69-A).
+
+    Gray edge, shades of gray and the mass mode of log-chromaticity fail on different images
+    (a large saturated field, a coloured backdrop, few edges). The neutral cluster alone picked
+    the wrong surface whenever the whole frame was cast, so the median of the three is the
+    measurement and it is trusted only when none of them contradicts it.
+    """
+
+    none = {"trusted": False, "opposed": False, "shift": [0.0, 0.0], "ab": [0.0, 0.0], "estimates": []}
+    lin = _LINEAR_LUT[view].astype(np.float32)
+    unclipped = visible & (view.max(axis=-1) < 250) & (view.min(axis=-1) > 3)
+    if unclipped.sum() < 200:
+        return none
+
+    def ratio(e: np.ndarray) -> np.ndarray:
+        return np.log(np.array([e[0] / e[1], e[2] / e[1]], np.float64))
+
+    blurred = cv2.GaussianBlur(lin, (0, 0), 1.0)
+    edge = np.hypot(cv2.Sobel(blurred, cv2.CV_32F, 1, 0), cv2.Sobel(blurred, cv2.CV_32F, 0, 1))
+    estimates = [
+        ratio((edge[unclipped].astype(np.float64) ** 6).mean(axis=0) ** (1 / 6) + 1e-9),
+        ratio((lin[unclipped].astype(np.float64) ** 6).mean(axis=0) ** (1 / 6) + 1e-9),
+    ]
+    lab = _lab(view)
+    uv = _log_chroma_of(lin)
+    mode_mask = (visible & (view.max(axis=-1) < 254) & (view.min(axis=-1) > 1)
+                 & (lab[..., 0] > 20) & (lab[..., 0] < 97) & (np.abs(uv).max(axis=-1) < 0.5))
+    if mode_mask.sum() >= 200:
+        edges = np.arange(-0.5, 0.501, 0.01)
+        hist, _, _ = np.histogram2d(uv[mode_mask][:, 0], uv[mode_mask][:, 1], bins=[edges, edges], weights=lab[..., 0][mode_mask])
+        hist = cv2.GaussianBlur(np.sqrt(hist).astype(np.float32), (0, 0), 2.0)
+        i, j = np.unravel_index(int(hist.argmax()), hist.shape)
+        estimates.append(np.array([edges[i] + 0.005, edges[j] + 0.005]))
+
+    arr = np.array(estimates)
+    med = np.median(arr, axis=0)
+    mag = float(np.linalg.norm(med))
+    norms = np.linalg.norm(arr, axis=1)
+    cos = (arr @ med) / np.maximum(norms * max(mag, 1e-9), 1e-9)
+    near = np.linalg.norm(arr - med, axis=1) <= max(ESTIMATE_SMALL, ESTIMATE_SPREAD_REL * mag)
+    agree = ((cos >= ESTIMATE_AGREE_COS) & near) | ((norms < ESTIMATE_SMALL) & (mag < ESTIMATE_SMALL))
+    opposed = bool(((cos < 0) & (norms >= ESTIMATE_SMALL)).any()) and mag >= ESTIMATE_SMALL
+    return {
+        "trusted": bool(agree.all() and not opposed),
+        "opposed": opposed,
+        "shift": [round(float(med[0]), 4), round(float(med[1]), 4)],
+        "ab": [round(v, 2) for v in _shift_to_white_ab(med)],
+        "estimates": [[round(float(u), 4), round(float(v), 4)] for u, v in arr],
+    }
+
+
+def _cast_curve(cast: dict[str, Any]) -> list[list[float]]:
+    """[L*, a*, b*] knots the renderer adapts: the measured white at every tone, pure white pinned."""
+
+    if not cast["estimates"]:
+        return []
+    a, b = cast["ab"]
+    return [[0.0, a, b], *[[knot, a, b] for knot in FLAT_CURVE_KNOTS], [100.0, 0.0, 0.0]]
+
+
 def _intent_hints(view: np.ndarray, visible: np.ndarray) -> list[str]:
     lab = _lab(view)
     l, chroma = lab[..., 0][visible], np.hypot(lab[..., 1], lab[..., 2])[visible]
@@ -324,6 +427,8 @@ class LevelPickAnalysis:
     recommended_level: str
     neutral_mask_view: np.ndarray = field(repr=False)
     skin: np.ndarray | None = field(default=None, repr=False)
+    tone_curve: list[list[float]] = field(default_factory=list)
+    cast: dict[str, Any] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -333,17 +438,17 @@ class LevelPickAnalysis:
             "recommended_level": self.recommended_level,
             "intent_hints": list(self.intent_hints),
             "neutral": dict(self.neutral),
+            "cast": dict(self.cast),
             "haze": dict(self.haze),
             "faces": len(self.face_boxes),
         }
 
 
-def _classify(neutral: dict[str, Any], haze: dict[str, float]) -> tuple[str, float]:
-    inner = neutral.get("tone_curve", [])[1:-1]
-    offset = round(float(np.mean([np.hypot(k[1], k[2]) for k in inner])), 2) if neutral["reliable"] and inner else 0.0
+def _classify(cast: dict[str, Any], haze: dict[str, float]) -> tuple[str, float]:
+    a, b = cast["ab"]
+    offset = round(float(np.hypot(a, b)), 2)
     tags = []
-    if offset >= CAST_MIN_AB:
-        a, b = neutral["ab"]
+    if offset >= CAST_MIN_WHITE:
         if abs(b) >= abs(a):
             tags.append("YELLOW" if b > 0 else "BLUE")
         else:
@@ -362,9 +467,17 @@ def analyze_level_pick(pixels: np.ndarray) -> LevelPickAnalysis:
     neutral = _estimate_neutral(view, visible_view)
     haze = _estimate_haze(view, visible_view)
     hints = _intent_hints(view, visible_view)
-    category, offset = _classify(neutral, haze)
-    # Recommendation only: a measured problem gets a level, deliberate-looking colour a gentler one.
-    recommended = "original" if category == "NO_CAST" else ("light" if hints else "medium")
+    cast = _estimate_cast(view, visible_view)
+    category, offset = _classify(cast, haze)
+    colour_cast = category.split("+")[0] in ("YELLOW", "BLUE", "TINT")
+    if colour_cast and not cast["trusted"]:
+        hints.append("MEASUREMENT_UNCERTAIN")
+    # Recommendation only. A cast the independent estimates confirm gets the light level and no
+    # more (owner ruling 2026-11-14): a single image cannot tell a cast from a uniformly warm or
+    # cool design, so medium and strong stay the user's own choice. A small or contradicted
+    # cast keeps the original. Haze alone is not recommended either: S69 measured the haze
+    # path worsening 8 of 9 hazy samples.
+    recommended = "light" if colour_cast and cast["trusted"] else "original"
     lab = _lab(view)
     near = (
         visible_view
@@ -382,6 +495,10 @@ def analyze_level_pick(pixels: np.ndarray) -> LevelPickAnalysis:
         category=category,
         measured_offset=offset,
         recommended_level=recommended,
+        # A hazy frame without a named cast is only de-hazed: removing its small measured tint
+        # on top made every hazy sample worse (S69-A).
+        tone_curve=[] if "GREY" in category and not colour_cast else _cast_curve(cast),
+        cast=cast,
         neutral_mask_view=near,
         skin=_skin_weight(rgb, face_boxes),
     )
@@ -405,7 +522,7 @@ def _prepare_render(pixels: np.ndarray, analysis: LevelPickAnalysis) -> _RenderB
     if tuple(pixels.shape) != analysis.source_shape:
         raise LevelPickError("LEVEL_PICK_ANALYSIS_SOURCE_MISMATCH")
     src = pixels[..., :3].astype(np.float32) / 255.0
-    curve = analysis.neutral.get("tone_curve") or []
+    curve = analysis.tone_curve
     if not (analysis.neutral["reliable"] and len(curve) > 2):
         return _RenderBase(pixels, src, [], None)
     knots = np.array(curve, dtype=np.float64)
@@ -438,7 +555,7 @@ def _render_prepared(base: _RenderBase, analysis: LevelPickAnalysis, level: str)
     if base.knots is not None:
         out = np.zeros((src.shape[0] * src.shape[1], 3), np.float32)
         for (kl, ka, kb), (idx, w, lin) in zip(base.knots, base.knot_pixels):
-            m = _adaptation_matrix((ka, kb), (ka * (1 - strength), kb * (1 - strength)))
+            m = _gain_matrix((ka, kb), (ka * (1 - strength), kb * (1 - strength)))
             out[idx] += w * np.einsum("ij,kj->ik", lin, m)
         img = _to_srgb(_gamut_pull(out.reshape(src.shape)))
     if analysis.haze["haze"] >= HAZE_MIN:

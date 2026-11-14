@@ -15,7 +15,9 @@ from PIL import ExifTags, Image, ImageCms, PngImagePlugin
 
 from engine.color_correction import run_formal_color_runtime
 from engine.color_correction.color_management import (
+    GENERIC_REJECTION_MESSAGE,
     ColorManagementError,
+    color_input_rejection_message,
     encode_color_managed_candidate,
     load_color_managed_source,
     srgb_profile_bytes,
@@ -700,6 +702,91 @@ class ColorManagementFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(ColorManagementError, "FORMAL_COLOR_MULTIFRAME_UNSUPPORTED"):
             load_color_managed_source(animated)
 
+
+    # ---- S69-D: palette / greyscale sources expand losslessly ----
+
+    def _gradient(self) -> np.ndarray:
+        y, x = np.mgrid[0:48, 0:64]
+        return np.stack(((x * 4) % 256, (y * 5) % 256, ((x + y) * 3) % 256), axis=-1).astype(np.uint8)
+
+    def test_palette_png_expands_to_exact_palette_colours(self) -> None:
+        for colours, depth in ((200, 8), (16, 4), (2, 1)):
+            with self.subTest(colours=colours):
+                source = self.root / f"palette_{colours}.png"
+                Image.fromarray(self._gradient()).quantize(colours).save(source, bits=depth)
+                with Image.open(source) as reopened:
+                    self.assertEqual(reopened.mode, "P")
+                    palette = np.array(reopened.getpalette(), dtype=np.uint8).reshape(-1, 3)
+                    expected = palette[np.asarray(reopened)]
+                managed = load_color_managed_source(source)
+                self.assertEqual(managed.source_mode, "RGB")
+                self.assertTrue(np.array_equal(managed.pixels, expected))
+                output = self.root / f"palette_{colours}_out.png"
+                output.write_bytes(encode_color_managed_candidate(managed.pixels, managed))
+                with Image.open(output) as written:
+                    self.assertEqual((written.format, written.mode), ("PNG", "RGB"))
+                    self.assertTrue(np.array_equal(np.asarray(written), expected))
+                    self.assertEqual(written.info.get("icc_profile"), srgb_profile_bytes())
+
+    def test_palette_png_with_transparency_keeps_alpha_exactly(self) -> None:
+        source = self.root / "palette_alpha.png"
+        alpha_table = bytes((index * 8) % 256 for index in range(32))
+        Image.fromarray(self._gradient()).quantize(32).save(source, transparency=alpha_table)
+        with Image.open(source) as reopened:
+            indices = np.asarray(reopened)
+            palette = np.array(reopened.getpalette(), dtype=np.uint8).reshape(-1, 3)
+        managed = load_color_managed_source(source)
+        self.assertEqual(managed.source_mode, "RGBA")
+        self.assertTrue(np.array_equal(managed.pixels[..., :3], palette[indices]))
+        self.assertTrue(np.array_equal(managed.pixels[..., 3], np.frombuffer(alpha_table, np.uint8)[indices]))
+
+    def test_greyscale_sources_expand_to_equal_channels(self) -> None:
+        grey = self._gradient()[..., 0]
+        alpha = self._gradient()[..., 1]
+        cases = {
+            "grey.png": (Image.fromarray(grey), {}),
+            "grey_alpha.png": (Image.fromarray(np.dstack((grey, alpha)), mode="LA"), {}),
+            "grey.jpg": (Image.fromarray(grey), {"quality": 95}),
+        }
+        for name, (image, options) in cases.items():
+            with self.subTest(name=name):
+                source = self.root / name
+                image.save(source, **options)
+                with Image.open(source) as reopened:
+                    self.assertIn(reopened.mode, {"L", "LA"})
+                    expected = np.asarray(reopened.convert("L"))
+                managed = load_color_managed_source(source)
+                rgb = managed.pixels[..., :3]
+                self.assertTrue(np.array_equal(rgb[..., 0], expected))
+                self.assertTrue(np.array_equal(rgb[..., 0], rgb[..., 1]) and np.array_equal(rgb[..., 1], rgb[..., 2]))
+                if name == "grey_alpha.png":
+                    self.assertEqual(managed.source_mode, "RGBA")
+                    self.assertTrue(np.array_equal(managed.pixels[..., 3], alpha))
+                else:
+                    self.assertEqual(managed.pixels.shape[2], 3)
+
+    def test_refused_sources_each_explain_their_own_reason(self) -> None:
+        cmyk = self.root / "cmyk_reason.jpg"
+        Image.new("CMYK", (64, 64), (10, 20, 30, 4)).save(cmyk)
+        deep = self.root / "deep.png"
+        ok, encoded = cv2.imencode(".png", np.full((32, 32, 3), 30000, np.uint16))
+        self.assertTrue(ok)
+        deep.write_bytes(encoded.tobytes())
+        animated = self.root / "animated_reason.png"
+        Image.new("RGB", (32, 32)).save(animated, save_all=True, append_images=[Image.new("RGB", (32, 32), (9, 9, 9))])
+        adobe = self.root / "lab_profile_reason.png"
+        Image.new("RGB", (32, 32), (90, 120, 150)).save(
+            adobe, icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes())
+        webp = self.root / "other.webp"
+        Image.new("RGB", (32, 32)).save(webp)
+        messages = {}
+        for path, word in ((cmyk, "CMYK"), (deep, "16 位"), (animated, "多帧"), (adobe, "色彩配置"), (webp, "JPG 和 PNG")):
+            with self.assertRaises(ColorManagementError) as raised:
+                load_color_managed_source(path)
+            messages[path.name] = color_input_rejection_message(raised.exception)
+            self.assertIn(word, messages[path.name])
+        self.assertEqual(len(set(messages.values())), len(messages))
+        self.assertEqual(color_input_rejection_message("SOMETHING_ELSE"), GENERIC_REJECTION_MESSAGE)
 
 if __name__ == "__main__":
     unittest.main()

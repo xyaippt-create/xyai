@@ -31,6 +31,32 @@ MANAGED_COLOR_SOURCE_PROVENANCE_VERSION = (
 WORKING_COLOR_SPACE = "sRGB IEC61966-2.1"
 SUPPORTED_FORMATS = frozenset({"JPEG", "PNG"})
 SUPPORTED_MODES = frozenset({"RGB", "RGBA"})
+# S69-D: palette and greyscale sources expand losslessly into the RGB(A) working domain.
+EXPANDABLE_MODES = frozenset({"P", "PA", "L", "LA", "1"})
+SUPPORTED_PNG_BIT_DEPTHS = frozenset({1, 2, 4, 8})
+
+# Why a source was refused, in the user's words. Codes not listed keep the generic sentence.
+_REJECTION_MESSAGES = {
+    "FORMAL_COLOR_RUNTIME_SUPPORTS_JPEG_AND_PNG_ONLY": "颜色校正只支持 JPG 和 PNG 图片，请先转换格式。",
+    "FORMAL_COLOR_MULTIFRAME_UNSUPPORTED": "这是多帧或动图，颜色校正只能处理单张图片。",
+    "FORMAL_COLOR_16BIT_AUTO_SUPPORT_SAFE_BLOCKED": "这是 16 位 PNG，颜色校正暂只支持 8 位图片，请先导出为 8 位。",
+    "FORMAL_COLOR_PNG_BIT_DEPTH_UNSUPPORTED": "这张 PNG 的位深不受支持，请先导出为 8 位 PNG。",
+    "FORMAL_COLOR_MODE_UNSUPPORTED_CMYK": "这是印刷用的 CMYK 图片，颜色校正只支持 RGB，请先转换为 RGB（sRGB）再试。",
+    "FORMAL_COLOR_MODE_UNSUPPORTED": "这张图片的色彩模式不受支持，请先导出为 8 位 RGB 的 JPG 或 PNG。",
+    "FORMAL_COLOR_NON_SRGB_PROFILE_SAFE_BLOCKED": "图片内嵌的色彩配置不受支持，请先转换为 sRGB 再试。",
+    "FORMAL_COLOR_ICC_INVALID": "图片内嵌的色彩配置已损坏，请重新导出图片。",
+    "FORMAL_COLOR_ICC_CONVERSION_FAILED": "图片的色彩配置无法转换到 sRGB，请先转换为 sRGB 再试。",
+    "FORMAL_COLOR_METADATA_CONFLICT": "图片里的色彩信息互相矛盾，无法确定真实颜色，请重新导出为 sRGB 图片。",
+    "FORMAL_COLOR_SOURCE_DECODE_FAILED": "图片无法读取，文件可能已损坏。",
+    "FORMAL_COLOR_PNG_HEADER_INVALID": "图片无法读取，文件可能已损坏。",
+}
+GENERIC_REJECTION_MESSAGE = "图片的格式或色彩信息不受支持，请选择合法 PNG 或 JPEG 图片。"
+
+
+def color_input_rejection_message(error: BaseException | str) -> str:
+    """The specific reason a colour-management refusal should show to the user."""
+
+    return _REJECTION_MESSAGES.get(str(error), GENERIC_REJECTION_MESSAGE)
 _SRGB_PNG_GAMMA = 0.45455
 _SRGB_PNG_CHROMATICITY = (0.3127, 0.3290, 0.6400, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600)
 _PNG_METADATA_TOLERANCE = 0.00005
@@ -944,8 +970,11 @@ def load_color_managed_source(path: str | Path) -> ManagedColorSource:
             native_depth = _native_png_depth(source)
             if native_depth == 16:
                 raise ColorManagementError("FORMAL_COLOR_16BIT_AUTO_SUPPORT_SAFE_BLOCKED")
-            if native_depth != 8:
+            if native_depth not in SUPPORTED_PNG_BIT_DEPTHS:
                 raise ColorManagementError("FORMAL_COLOR_PNG_BIT_DEPTH_UNSUPPORTED")
+        if str(opened.mode or "").upper() in {"CMYK", "YCCK"}:
+            # Named before the profile check, which would otherwise report the CMYK profile.
+            raise ColorManagementError("FORMAL_COLOR_MODE_UNSUPPORTED_CMYK")
 
         opened.load()
         source_dpi, source_resolution_exif, output_resolution_exif = (
@@ -976,6 +1005,11 @@ def load_color_managed_source(path: str | Path) -> ManagedColorSource:
         )
         oriented = ImageOps.exif_transpose(opened)
         source_mode = str(oriented.mode or "").upper()
+        if source_mode in EXPANDABLE_MODES:
+            # Lossless: every palette index / grey level maps to exactly one 8-bit RGB(A) value.
+            has_alpha = source_mode in {"PA", "LA"} or "transparency" in oriented.info
+            oriented = oriented.convert("RGBA" if has_alpha else "RGB")
+            source_mode = oriented.mode
         if source_mode not in SUPPORTED_MODES:
             raise ColorManagementError("FORMAL_COLOR_MODE_UNSUPPORTED")
 
@@ -1132,6 +1166,7 @@ __all__ = [
     "MANAGED_COLOR_SOURCE_PROVENANCE_VERSION",
     "WORKING_COLOR_SPACE",
     "ColorManagementError",
+    "color_input_rejection_message",
     "ManagedColorSource",
     "ManagedColorSourceProvenanceValidation",
     "ManagedColorSourceSnapshotAcquisition",

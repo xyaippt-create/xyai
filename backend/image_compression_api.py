@@ -509,7 +509,9 @@ def register_image_compression_routes(
         VisualReviewStatus,
     )
     from engine.color_correction import FORMAL_COLOR_RUNTIME_VERSION, run_formal_color_runtime
-    from engine.color_correction.color_management import ColorManagementError, load_color_managed_source, srgb_profile_bytes
+    from engine.color_correction.color_management import (
+        ColorManagementError, color_input_rejection_message, load_color_managed_source, srgb_profile_bytes,
+    )
     from engine.color_correction.formal_runtime import _write_verified_candidate
     from engine.color_correction.level_pick import (
         LEVEL_LABELS,
@@ -3280,8 +3282,10 @@ def register_image_compression_routes(
         record["output_preview_token"] = None
         record["preview_output_url"] = ""
         if record.get("status") == "processing":
+            # A refused input is explained in the user's words; the code stays in error_context.
+            reason = color_input_rejection_message(exc) if isinstance(exc, ColorManagementError) else str(exc)
             try:
-                transition_task(record, "failed", record["progress"], failure_reason=str(exc) or exc.__class__.__name__)
+                transition_task(record, "failed", record["progress"], failure_reason=reason or exc.__class__.__name__)
             except Exception as registration_error:
                 emit_runtime_event(
                     "COLOR_CORRECTION_TASK_FAILED", level=logging.ERROR,
@@ -5737,7 +5741,7 @@ def register_image_compression_routes(
             try:
                 await asyncio.to_thread(load_color_managed_source, Path(source["path"]))
             except ColorManagementError as exc:
-                raise HTTPException(status_code=415, detail={"code": f"UNSUPPORTED_{role}_FORMAT", "message": f"{label}的格式或色彩信息不受支持，请选择合法 PNG 或 JPEG 图片。"}) from exc
+                raise HTTPException(status_code=415, detail={"code": f"UNSUPPORTED_{role}_FORMAT", "reason": str(exc), "message": f"{label}：{color_input_rejection_message(exc)}"}) from exc
             inputs[role] = source
         output_root = effective_color_output_root(payload)
         record = create_color_task_record(inputs["TARGET"], output_root, reference=inputs["REFERENCE"])
@@ -5781,7 +5785,7 @@ def register_image_compression_routes(
             else:
                 preview = await asyncio.to_thread(build_reference_level_pick_preview, source_path, reference_path)
         except ColorManagementError as exc:
-            raise HTTPException(status_code=415, detail={"code": "UNSUPPORTED_SOURCE_FORMAT", "message": "图片的格式或色彩信息不受支持，请选择合法 PNG 或 JPEG 图片。"}) from exc
+            raise HTTPException(status_code=415, detail={"code": "UNSUPPORTED_SOURCE_FORMAT", "reason": str(exc), "message": color_input_rejection_message(exc)}) from exc
         reference_usable = reference_source is None or bool(preview.plan.usable)
         preview_id = uuid.uuid4().hex
         directory = Path(require_compression_directory()["tmp_dir"]).resolve() / "color-level-preview" / f"preview_{preview_id}"

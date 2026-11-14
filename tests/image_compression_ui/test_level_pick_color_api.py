@@ -342,5 +342,58 @@ class LevelPickApiTests(unittest.TestCase):
         self.assertEqual(self.state["color_level_preview_sessions"], {})
 
 
+    # ---- S69-D: input formats ----
+
+    def intake_bytes(self, payload, name):
+        mime = "image/jpeg" if name.endswith(".jpg") else "image/png"
+        response = self.client.post("/api/image-compression/intake", files={"file": (name, payload, mime)})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["data"]
+
+    def encoded(self, image, fmt="PNG", **options):
+        stream = io.BytesIO()
+        image.save(stream, format=fmt, **options)
+        return stream.getvalue()
+
+    def test_palette_and_greyscale_sources_reach_preview_and_result(self):
+        scene = Image.fromarray(cast_scene())
+        sources = {
+            "palette.png": self.encoded(scene.quantize(64)),
+            "grey.png": self.encoded(scene.convert("L")),
+            "grey.jpg": self.encoded(scene.convert("L"), "JPEG", quality=95),
+        }
+        for name, payload in sources.items():
+            with self.subTest(name=name):
+                data = self.preview(self.intake_bytes(payload, name))
+                self.assertEqual([item["level"] for item in data["levels"]], ["original", "light", "medium", "strong"])
+                response = self.run_level(data, "light")
+                self.assertEqual(response.status_code, 200, response.text)
+                output = Path(response.json()["data"]["result"]["output_path"])
+                with Image.open(output) as written:
+                    self.assertEqual(written.mode, "RGB")
+                    self.assertEqual(written.format, "JPEG" if name.endswith(".jpg") else "PNG")
+        grey = self.preview(self.intake_bytes(sources["grey.png"], "grey2.png"))
+        self.assertNotIn(grey["measurement"]["category"].split("+")[0], {"YELLOW", "BLUE", "TINT"})
+        self.assertEqual(grey["measurement"]["recommended_level"], "original")
+
+    def test_refused_formats_explain_the_specific_reason(self):
+        import cv2
+        cmyk = self.encoded(Image.new("CMYK", (96, 96), (10, 20, 30, 4)), "JPEG")
+        ok, deep = cv2.imencode(".png", np.full((96, 96, 3), 30000, np.uint16))
+        self.assertTrue(ok)
+        for name, payload, word in (("cmyk.jpg", cmyk, "CMYK"), ("deep.png", deep.tobytes(), "16 位")):
+            with self.subTest(name=name):
+                source = self.intake_bytes(payload, name)
+                response = self.client.post("/api/color-correction/level-preview", json={"source_token": source["source_token"]})
+                self.assertEqual(response.status_code, 415, response.text)
+                detail = response.json()["detail"]
+                self.assertEqual(detail["code"], "UNSUPPORTED_SOURCE_FORMAT")
+                self.assertIn(word, detail["message"])
+                run = self.client.post("/api/color-correction/run", json={"source_token": source["source_token"], "current_task_output_root": str(self.output_root)})
+                task = run.json()["data"]["task"]
+                self.assertEqual(task["status"], "failed")
+                self.assertIn(word, task["failure_reason"])
+                self.assertNotIn("FORMAL_COLOR", task["failure_reason"])
+
 if __name__ == "__main__":
     unittest.main()
