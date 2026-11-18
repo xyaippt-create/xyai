@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { HddePageHeader, HddeStatusPill } from "./HddeUI.jsx";
-import { appendPrintSource, planPrintSize } from "./printPreflight.js";
+import { appendPrintSource, detailEstimate, planPrintSize } from "./printPreflight.js";
 import PrintLayerEditor from "./PrintLayerEditor.jsx";
 import "./ColorCorrectionReference.css";
 import "./printPreflight.css";
@@ -66,16 +66,57 @@ function PrintSizeSummary({ result, custom }) {
       <div><dt>喷绘尺寸</dt><dd>{display(result.cmWidth)} × {display(result.cmHeight)} cm</dd></div>
       <div><dt>原图有效精度</dt><dd>{display(result.effectivePpi)} PPI</dd></div>
       <div><dt>缩放倍数</dt><dd>{scale} 倍</dd></div>
-      {!custom && up && <>
+      {up && <>
         <div><dt>标称精度</dt><dd>{display(result.nominalPpi)} PPI</dd></div>
         <div><dt>{result.reconstructed ? "超清后有效精度" : "出图有效精度"}</dt><dd>约 {display(result.detailPpi)} PPI</dd></div>
       </>}
     </dl>
-    {!custom && up && <p className="print-detail-note" data-soft={result.soft}>
+    {up && <p className="print-detail-note" data-soft={result.soft}>
       {result.reconstructed ? "出图时先用 4K 超清重建细节（最多 3 倍），再补到目标像素。" : "原图超过 400 万像素，将直接插值放大。"}
       {result.soft && ` 仍需插值放大约 ${display(result.interpolation)} 倍，细节会偏软，建议降低 PPI、缩小喷绘尺寸或换更大的原图。`}
     </p>}
   </div>;
+}
+
+const ZOOM_STEPS = [1, 1/2, 1/4, 1/8, 1/16];
+const MIN_ZOOM = 1/32;
+
+function zoomLabel(zoom) {
+  const ratio = 1 / zoom;
+  return `1:${ratio >= 10 ? Math.round(ratio) : Number(ratio.toFixed(1))}`;
+}
+
+function defaultZoom(windowWidth, windowHeight, outputWidth, outputHeight) {
+  // A box of about 6% of the print area, no side longer than 60% of the print.
+  const lower = Math.max(windowWidth / (0.6 * outputWidth), windowHeight / (0.6 * outputHeight));
+  const target = Math.max(lower, Math.sqrt(windowWidth * windowHeight / (0.06 * outputWidth * outputHeight)));
+  const pick = ZOOM_STEPS.find(step => step <= target) || ZOOM_STEPS[ZOOM_STEPS.length - 1];
+  return pick >= lower ? pick : [...ZOOM_STEPS].reverse().find(step => step >= lower) || 1;
+}
+
+function busiestPoint(image, boxWidth, boxHeight) {
+  // Gradient energy on a small thumbnail; return the centre of the box holding the most of it.
+  const w = 96, h = Math.max(1, Math.round(96 * image.naturalHeight / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(image, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const luma = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) luma[i] = 0.299*data[4*i] + 0.587*data[4*i+1] + 0.114*data[4*i+2];
+  const energy = new Float32Array((w + 1) * (h + 1));  // summed-area table
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    const g = x + 1 < w && y + 1 < h ? Math.abs(luma[i+1]-luma[i]) + Math.abs(luma[i+w]-luma[i]) : 0;
+    energy[(y+1)*(w+1)+x+1] = g + energy[y*(w+1)+x+1] + energy[(y+1)*(w+1)+x] - energy[y*(w+1)+x];
+  }
+  const bw = Math.max(1, Math.min(w, Math.round(boxWidth * w))), bh = Math.max(1, Math.min(h, Math.round(boxHeight * h)));
+  let best = -1, at = null;
+  for (let y = 0; y + bh <= h; y++) for (let x = 0; x + bw <= w; x++) {
+    const sum = energy[(y+bh)*(w+1)+x+bw] - energy[y*(w+1)+x+bw] - energy[(y+bh)*(w+1)+x] + energy[y*(w+1)+x];
+    if (sum > best) { best = sum; at = [(x + bw/2) / w, (y + bh/2) / h]; }
+  }
+  return at;
 }
 
 function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, layered, unavailable, actionHost, pickerRef }) {
@@ -88,14 +129,26 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
   const [detailSize, setDetailSize] = useState({ width: 0, height: 0 });
   const [showEditor, setShowEditor] = useState(false);
   const [point, setPoint] = useState([0.5,0.5]);
+  // Comparison-window pixels per output pixel; null until the window size is known.
+  const [zoom, setZoom] = useState(null);
+  // A dragged area in output pixels; shown exactly, fitted into the comparison window.
+  const [dragBox, setDragBox] = useState(null);
+  const [draft, setDraft] = useState(null);
   const previewSection = useRef(null);
   const detailWindow = useRef(null);
   const submitting = useRef(false);
   const decodedImages = useRef(null);
-  const { width: cropWidth, height: cropHeight } = detailSize;
+  const dragStart = useRef(null);
+  const pointMoved = useRef(false);
+  const stepScale = zoom || 1;
+  const cropWidth = !output ? 0 : Math.min(output.width, Math.max(1, Math.round(dragBox ? dragBox.width : detailSize.width / stepScale)));
+  const cropHeight = !output ? 0 : Math.min(output.height, Math.max(1, Math.round(dragBox ? dragBox.height : detailSize.height / stepScale)));
+  // Window pixels per output pixel; never above 1, so the comparison never enlarges the print.
+  const scale = !output || !zoom || !detailSize.width ? null :
+    dragBox ? Math.min(1, detailSize.width / cropWidth, detailSize.height / cropHeight) : zoom;
   const cropX = output ? Math.min(output.width - cropWidth, Math.max(0, Math.round(point[0] * output.width - cropWidth/2))) : 0;
   const cropY = output ? Math.min(output.height - cropHeight, Math.max(0, Math.round(point[1] * output.height - cropHeight/2))) : 0;
-  const currentDetail = detail?.x === cropX && detail?.y === cropY && detail.size === detailSize ? detail.images : null;
+  const currentDetail = detail?.x === cropX && detail?.y === cropY && detail.size === detailSize && detail.scale === scale && detail.w === cropWidth && detail.h === cropHeight ? detail.images : null;
   const reviewed = Boolean(currentDetail && reviewedDetail === currentDetail);
 
   useEffect(() => {
@@ -116,8 +169,28 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
   }, [output]);
 
   useEffect(() => {
-    const { width, height } = detailSize;
-    if (!output || !previewReady || !width || !height) return;
+    // Start with a box that is clearly visible on large prints.
+    if (!output || zoom || !detailSize.width) return;
+    setZoom(defaultZoom(detailSize.width, detailSize.height, output.width, output.height));
+  }, [output, zoom, detailSize.width, detailSize.height]);
+
+  useEffect(() => {
+    // Place the first box where the print has the most detail instead of on flat background.
+    if (!output || !previewReady || !zoom || pointMoved.current || !cropWidth) return;
+    let active = true;
+    const image = new Image();
+    image.src = output.preview_url;
+    image.decode().then(() => {
+      if (!active || pointMoved.current) return;
+      const busiest = busiestPoint(image, cropWidth / output.width, cropHeight / output.height);
+      if (busiest) setPoint(busiest);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [output, previewReady, zoom, cropWidth, cropHeight]);
+
+  useEffect(() => {
+    if (!output || !previewReady || !scale || !cropWidth || !cropHeight) return;
+    const width = Math.max(1, Math.round(cropWidth * scale)), height = Math.max(1, Math.round(cropHeight * scale));
     let active = true;
     if (!decodedImages.current) {
       const original = new Image(), finished = new Image();
@@ -126,8 +199,9 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
     }
     decodedImages.current.then(([original, finished]) => {
       if (!active) return;
-      const scale = Math.min(output.width/source.width,output.height/source.height);
-      const rw=Math.round(source.width*scale), rh=Math.round(source.height*scale);
+      const fit = Math.min(output.width/source.width,output.height/source.height);
+      const rw=Math.round(source.width*fit), rh=Math.round(source.height*fit);
+      const left=Math.floor((output.width-rw)/2), top=Math.floor((output.height-rh)/2);
       const canvas=document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
@@ -137,14 +211,14 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
         ctx.fillRect(0, 0, width, height);
       }
       ctx.imageSmoothingQuality="high";
-      ctx.drawImage(original,Math.floor((output.width-rw)/2)-cropX,Math.floor((output.height-rh)/2)-cropY,rw,rh);
+      ctx.drawImage(original,(left-cropX)*scale,(top-cropY)*scale,rw*scale,rh*scale);
       const before=canvas.toDataURL();
       ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(finished, cropX, cropY, width, height, 0, 0, width, height);
-      setDetail({ x: cropX, y: cropY, size: detailSize, images: [before, canvas.toDataURL()] });
+      ctx.drawImage(finished, cropX, cropY, cropWidth, cropHeight, 0, 0, width, height);
+      setDetail({ x: cropX, y: cropY, size: detailSize, scale, w: cropWidth, h: cropHeight, images: [before, canvas.toDataURL()] });
     }).catch(()=>{if(active){ decodedImages.current=null; setError("局部对比加载失败，请重新选择检查位置。"); }});
     return ()=>{active=false;};
-  }, [output, layered, layers, previewReady, source, cropX, cropY, detailSize]);
+  }, [output, layered, layers, previewReady, source, cropX, cropY, cropWidth, cropHeight, scale, detailSize]);
 
   async function generate() {
     if (submitting.current || busy || unavailable || output) return;
@@ -175,12 +249,29 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
   }
 
   const description = output ? (layered && !reviewed ? "请先核对成品局部，再另存副本。" : "成品已生成，可另存交付副本。") :
-    busy ? (!layered && plan?.reconstructed ? "已提交，正在超清重建并生成喷绘成品，约需 1 分钟…" : "已提交，正在生成并登记喷绘成品…") :
+    busy ? (plan?.reconstructed ? "已提交，正在超清重建并生成喷绘成品，约需 1 分钟…" : "已提交，正在生成并登记喷绘成品…") :
     unavailable || "规格已就绪，可以提交出图。";
   const saveBlocked = !previewReady || (layered && (!reviewed || !currentDetail));
   function selectPoint(x, y) {
+    pointMoved.current = true;
     setPoint([Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))]);
     setReviewedDetail(null);
+  }
+  function framePoint(event) {
+    const r = event.currentTarget.getBoundingClientRect();
+    return [Math.max(0, Math.min(1, (event.clientX-r.left)/r.width)), Math.max(0, Math.min(1, (event.clientY-r.top)/r.height))];
+  }
+  function finishDrag(event) {
+    const start = dragStart.current;
+    dragStart.current = null;
+    setDraft(null);
+    if (!start || !output) return;
+    const end = framePoint(event);
+    const w = Math.abs(end[0]-start[0]) * output.width, h = Math.abs(end[1]-start[1]) * output.height;
+    if (w < 8 && h < 8) { selectPoint(...end); return; }  // a click moves the box
+    // Keep tiny drags readable: no smaller than 1/32 of the window in either direction.
+    setDragBox({ width: Math.max(w, detailSize.width * MIN_ZOOM), height: Math.max(h, detailSize.height * MIN_ZOOM) });
+    selectPoint((start[0]+end[0])/2, (start[1]+end[1])/2);
   }
 
   return <>
@@ -208,7 +299,7 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
     {output && <section className="hdde-color-card print-panel print-output" data-show-editor={showEditor} ref={previewSection} tabIndex={-1} aria-labelledby="print-output-title">
       <div className="print-panel-heading">
         <div className="hdde-color-section-title"><span aria-hidden="true">3</span><div>
-          <h2 id="print-output-title">喷绘成品预览</h2><p>点击画面或用方向键移动选框，对照同一位置。</p>
+          <h2 id="print-output-title">喷绘成品预览</h2><p>在画面上拖拽框选要核对的区域；点击或用方向键移动选框。</p>
         </div></div>
         <div className="print-actions">
         {layered && <button type="button" className="hdde-secondary-action" aria-expanded={showEditor} aria-controls="print-layer-section" onClick={() => setShowEditor(!showEditor)}>{showEditor ? "收起分层编辑" : "展开分层编辑"}</button>}
@@ -224,10 +315,20 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
               event.preventDefault();
               selectPoint(point[0]+step[0]*cropWidth/output.width/2, point[1]+step[1]*cropHeight/output.height/2);
             }}>
-            <img src={output.preview_url} alt="喷绘成品预览" onClick={event => {
-              const r = event.currentTarget.getBoundingClientRect();
-              selectPoint((event.clientX-r.left)/r.width, (event.clientY-r.top)/r.height);
-            }} onLoad={event => {
+            <img src={output.preview_url} alt="喷绘成品预览" draggable={false}
+              onPointerDown={event => {
+                if (event.button !== 0) return;
+                event.currentTarget.setPointerCapture(event.pointerId);
+                dragStart.current = framePoint(event);
+              }}
+              onPointerMove={event => {
+                if (!dragStart.current) return;
+                const [x, y] = framePoint(event), [sx, sy] = dragStart.current;
+                setDraft({ left: Math.min(x, sx), top: Math.min(y, sy), width: Math.abs(x-sx), height: Math.abs(y-sy) });
+              }}
+              onPointerUp={finishDrag}
+              onPointerCancel={() => { dragStart.current = null; setDraft(null); }}
+              onLoad={event => {
               const image = event.currentTarget;
               if (image.naturalWidth === output.width && image.naturalHeight === output.height) setPreviewReady(true);
               else setError("成品像素与预检不一致，请到输出中心核对。");
@@ -236,11 +337,20 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
               left: `${100*cropX/output.width}%`, top: `${100*cropY/output.height}%`,
               width: `${100*cropWidth/output.width}%`, height: `${100*cropHeight/output.height}%`,
             }}/>}
+            {draft && <span className="print-inspect-box print-inspect-draft" aria-hidden="true" style={{
+              left: `${100*draft.left}%`, top: `${100*draft.top}%`, width: `${100*draft.width}%`, height: `${100*draft.height}%`,
+            }}/>}
+          </div>
+          <div className="print-zoom" role="group" aria-label="对照比例">
+            <span>对照比例</span>
+            {ZOOM_STEPS.map(step => <button type="button" key={step} aria-pressed={!dragBox && zoom === step}
+              onClick={() => { setZoom(step); setDragBox(null); setReviewedDetail(null); }}>{step === 1 ? "1:1 原像素" : `1:${1/step}`}</button>)}
+            {dragBox && scale && <span className="print-zoom-custom">框选区域 {zoomLabel(scale)}</span>}
           </div>
         </div>
         <div className="print-crops">
           <h3 id="print-crop-heading">局部对照</h3>
-          <div className="print-detail-pair">{["原图等比参考","成品原像素"].map((label,i) => <figure key={label}>
+          <div className="print-detail-pair">{["原图等比参考", !scale || scale === 1 ? "成品原像素" : `成品 ${zoomLabel(scale)} 缩小`].map((label,i) => <figure key={i}>
             <figcaption>{label}</figcaption>
             <div className="print-detail-window" ref={i === 0 ? detailWindow : undefined}>
               {currentDetail ? <img src={currentDetail[i]} alt={i ? (layered ? "分层局部" : "成品局部") : "原图参考局部"}/> :
@@ -251,7 +361,7 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
             onChange={e=>setReviewedDetail(e.target.checked ? currentDetail : null)}/>已核对图文和主体细节</label>}
         </div>
       </div>
-      <p className="print-file-row"><strong>输出 / 喷绘出图 / {output.filename}</strong><span>{output.width} × {output.height} px · {display(output.ppi)} PPI{output.upscale?.method === "SR_FUSION" ? " · 已超清重建" : ""}</span></p>
+      <p className="print-file-row"><strong>输出 / 喷绘出图 / {output.filename}</strong><span>{output.width} × {output.height} px · {display(output.ppi)} PPI{(output.upscale || output.layers?.base_upscale)?.method === "SR_FUSION" ? " · 已超清重建" : ""}</span></p>
     </section>}
   </>;
 }
@@ -276,7 +386,8 @@ function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, c
   if (plan && !plan.error && !sizeAllowed) summary = {error:sizeError};
   if (layered && custom && source && sizeAllowed && !plan.error) {
     const fit = Math.min(paper.pixelWidth/source.width, paper.pixelHeight/source.height);
-    summary = {...paper, cmWidth:Number(cw), cmHeight:Number(ch), scale:fit, effectivePpi:ppi/fit};
+    summary = {...paper, cmWidth:Number(cw), cmHeight:Number(ch), scale:fit, effectivePpi:ppi/fit,
+      ...detailEstimate(source, fit, Number(ppi), ppi/fit)};
   }
   return <>
     <HddePageHeader title="喷绘出图" description="按成品尺寸检查原图精度，生成喷绘文件并核对局部细节。"

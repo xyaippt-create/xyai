@@ -43,8 +43,6 @@ export function planPrintSize({ width, height }, { mode, axis, cm, ppi }) {
     return { error: "数值超出可计算范围，请检查尺寸和目标 PPI。" };
   }
   const scale = mode === "8k" ? target / sourceEdge : Math.max(target / sourceEdge, otherTarget / otherEdge);
-  const reconstructed = scale >= SR_MIN_SCALE && width * height <= SR_MAX_SOURCE_PIXELS;
-  const detailScale = reconstructed ? Math.min(scale, SR_NATIVE_SCALE) : Math.min(scale, 1);
   return {
     cmWidth: byWidth ? physical : otherPhysical,
     cmHeight: byWidth ? otherPhysical : physical,
@@ -52,11 +50,20 @@ export function planPrintSize({ width, height }, { mode, axis, cm, ppi }) {
     pixelHeight: byWidth ? otherTarget : target,
     effectivePpi,
     scale,
+    ...detailEstimate({ width, height }, scale, density, effectivePpi),
+  };
+}
+
+// Detail density of the print after 4K reconstruction, never above the requested PPI.
+export function detailEstimate({ width, height }, scale, density, effectivePpi) {
+  const reconstructed = scale >= SR_MIN_SCALE && width * height <= SR_MAX_SOURCE_PIXELS;
+  const detailScale = reconstructed ? Math.min(scale, SR_NATIVE_SCALE) : Math.min(scale, 1);
+  const interpolation = scale / Math.max(detailScale, 1);
+  return {
     nominalPpi: density,
     reconstructed,
-    // Detail density of the print after reconstruction, never above the requested PPI.
     detailPpi: Math.min(density, effectivePpi * detailScale),
-    interpolation: scale / Math.max(detailScale, 1),
-    soft: scale / Math.max(detailScale, 1) > SOFT_INTERPOLATION,
+    interpolation,
+    soft: interpolation > SOFT_INTERPOLATION,
   };
 }

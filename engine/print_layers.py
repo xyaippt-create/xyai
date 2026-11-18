@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageCms, ImageColor, ImageDraw, ImageOps
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from engine.image_processing_routing.four_k_v1 import FourKV1ProcessingError
+from engine.print_upscale import plan_print_upscale, upscale_rgb_for_print
 from runtime.system_info import resource_root
 
 
@@ -230,7 +232,15 @@ def compose(rgb, recipe, size, directory=None, *, overlay=False):
     paper=np.array(ImageColor.getrgb(recipe.paper),np.float32)
     subject=subject_mask(rgb,recipe)
     original=Image.fromarray(rgb)
-    canvas=original.resize((w,h),Image.Resampling.LANCZOS)
+    base_upscale={"method":"LANCZOS","reason":"PREVIEW" if overlay else "NO_WORK_DIR"}
+    if overlay or directory is None:
+        canvas=original.resize((w,h),Image.Resampling.LANCZOS)
+    else:
+        # Unselected logos, small print and backgrounds get the same 4K reconstruction as proportional output.
+        try:
+            canvas,base_upscale=upscale_rgb_for_print(original,(w,h),directory,plan_print_upscale(sw,sh,w,h))
+        except FourKV1ProcessingError as exc:
+            raise LayerError(f"底图超清未完成：{exc}") from exc
     regions=[]
     draw=ImageDraw.Draw(canvas)
     for region in recipe.regions:
@@ -276,5 +286,6 @@ def compose(rgb, recipe, size, directory=None, *, overlay=False):
     page.paste(canvas,((W-w)//2,(H-h)//2))
     info={"contours":path_count,"regions":len(regions),
           "texture_regions":sum(r.kind=="texture" for r in recipe.regions),
-          "subject_pixels":int(np.count_nonzero(subject)), "model":MODEL if np.any(subject) and not overlay else ""}
+          "subject_pixels":int(np.count_nonzero(subject)), "model":MODEL if np.any(subject) and not overlay else "",
+          "base_upscale":base_upscale}
     return page, info

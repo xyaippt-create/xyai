@@ -185,6 +185,8 @@ class PrintOutputTests(unittest.TestCase):
         key = uuid4()
         result = submit(client, data, key, width=400, height=400, layers=layers)
         assert result.status_code == 200, result.text
+        assert result.json()["layers"]["base_upscale"]["method"] == "SR_FUSION"
+        assert preview.json()["base_upscale"]["method"] == "LANCZOS"
         with Image.open(registry[result.json()["task_id"]]["result_file"]) as out:
             assert out.info["srgb"] == 0 and abs(out.info["dpi"][0] - 150) < .013
             assert out.getpixel((50, 100)) == (255, 255, 255)  # erased former location
