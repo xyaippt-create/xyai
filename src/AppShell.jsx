@@ -60,6 +60,7 @@ const NAVIGATION_CONTEXT_BY_ROUTE = Object.freeze({
   "task-report": "processing",
   "color-correction-review": "color-correction",
   "output-compare": "outputs",
+  "release-notes": "settings",
 });
 
 export function useAppTheme() {

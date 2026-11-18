@@ -202,6 +202,17 @@ export const APP_ROUTES = Object.freeze([
     implementationType: "existing",
     plannedCapabilities: ["主题与界面偏好", "本地目录状态", "平台信息"],
   },
+  {
+    key: "release-notes",
+    name: "更新日志",
+    path: "/settings/release-notes",
+    status: FEATURE_STATUSES.ENABLED,
+    pageTitle: "更新日志",
+    description: "各版本面向使用者的主要变化。",
+    implementationType: "existing",
+    plannedCapabilities: ["版本更新内容"],
+    showInNavigation: false,
+  },
 ]);
 
 export const COMPATIBILITY_ROUTES = Object.freeze([

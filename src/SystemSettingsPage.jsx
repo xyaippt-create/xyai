@@ -195,7 +195,7 @@ function RequestState({ status, error, loadingText }) {
   return null;
 }
 
-export default function SystemSettingsPage() {
+export default function SystemSettingsPage({ onNavigate }) {
   const { themeMode, themeModes, selectThemeMode } = useAppTheme();
   const [snapshot, setSnapshot] = useState({
     health: { status: "loading", data: {}, error: "" },
@@ -355,6 +355,23 @@ export default function SystemSettingsPage() {
           <div className="hdde-settings-rows">
             <ReadOnlyRow label="软件名称" value="影界 HDDE" />
             <ReadOnlyRow label="产品版本" value={health.version || PRODUCT_VERSION_LABEL} />
+            <div className="hdde-settings-row">
+              <div className="hdde-settings-row__label">更新日志</div>
+              <div className="hdde-settings-row__value">
+                <a
+                  className="hdde-settings-row__link"
+                  href="/settings/release-notes"
+                  data-testid="settings-release-notes-link"
+                  onClick={(event) => {
+                    if (!onNavigate) return;
+                    event.preventDefault();
+                    onNavigate("/settings/release-notes");
+                  }}
+                >
+                  查看更新日志
+                </a>
+              </div>
+            </div>
             <ReadOnlyRow label="版权信息" value="© 2026 雪原PPT设计·品牌视觉" />
             <ReadOnlyRow label="官方邮箱" value="xueyaippt@outlook.com" />
           </div>

@@ -15,6 +15,7 @@ const Safe1080pBetaPage = React.lazy(() => import("./Safe1080pBetaPage.jsx"));
 const CompressionPage = React.lazy(() => import("./CompressionPage.jsx"));
 const ColorCorrectionPage = React.lazy(() => import("./ColorCorrectionPage.jsx"));
 const SystemSettingsPage = React.lazy(() => import("./SystemSettingsPage.jsx"));
+const ReleaseNotesPage = React.lazy(() => import("./ReleaseNotesPage.jsx"));
 const FourKEnhancementPage = React.lazy(() => import("./FourKEnhancementPage.jsx"));
 const SmartDeliveryPage = React.lazy(() => import("./SmartDeliveryPage.jsx"));
 const LocalRetouchPage = React.lazy(() => import("./LocalRetouchPage.jsx"));
@@ -588,7 +589,9 @@ export default function App() {
   } else if (route.key === "batch-watermark") {
     content = <BatchWatermarkPage continueResultId={continueResultId} onNavigate={navigateTo} />;
   } else if (route.key === "settings") {
-    content = <SystemSettingsPage />;
+    content = <SystemSettingsPage onNavigate={navigateTo} />;
+  } else if (route.key === "release-notes") {
+    content = <ReleaseNotesPage onNavigate={navigateTo} />;
   } else {
     content = <FeaturePlaceholderPage route={route} />;
   }

@@ -383,3 +383,32 @@ test("settings keeps the existing compression-aligned card baseline", () => {
   assert.match(css, /\.hdde-settings-section \{[\s\S]*border-radius: 8px/);
   assert.match(css, /background: var\(--card-background\)/);
 });
+
+test("release notes newest entry matches the product version", async () => {
+  const { RELEASE_NOTES } = await import(new URL("../../src/releaseNotes.js", import.meta.url));
+  assert.ok(RELEASE_NOTES.length > 0);
+  assert.equal(RELEASE_NOTES[0].version, version.version);
+  assert.equal(RELEASE_NOTES[0].label, version.display_version);
+  assert.equal(new Set(RELEASE_NOTES.map((release) => release.version)).size, RELEASE_NOTES.length);
+  for (const release of RELEASE_NOTES) {
+    assert.match(release.date, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(release.groups.length > 0);
+    for (const group of release.groups) assert.ok(group.title && group.items.length > 0);
+  }
+});
+
+test("settings links to a separate release notes page instead of listing it inline", async () => {
+  const releasePage = fs.readFileSync(path.join(root, "src", "ReleaseNotesPage.jsx"), "utf8");
+  const app = fs.readFileSync(path.join(root, "src", "App.jsx"), "utf8");
+  const { APP_ROUTES } = await import(new URL("../../src/appRoutes.js", import.meta.url));
+  assert.match(settings, /data-testid="settings-release-notes-link"/);
+  assert.match(settings, /onNavigate\("\/settings\/release-notes"\)/);
+  assert.doesNotMatch(settings, /RELEASE_NOTES/);
+  const route = APP_ROUTES.find((item) => item.key === "release-notes");
+  assert.equal(route?.path, "/settings/release-notes");
+  assert.equal(route?.showInNavigation, false);
+  assert.match(shell, /"release-notes": "settings"/);
+  assert.match(app, /route\.key === "release-notes"[\s\S]*<ReleaseNotesPage onNavigate=\{navigateTo\} \/>/);
+  assert.match(releasePage, /RELEASE_NOTES\.map/);
+  assert.match(releasePage, /onNavigate\("\/settings"\)/);
+});
