@@ -1347,7 +1347,7 @@ function colorBatchTaskToQueueItem(entry, batch) {
     size: formatBytesToMb(result.source_size_bytes, "-"),
     type: result.source_format || "image",
     status: task.status || "pending",
-    mode: PROCESSING_MODE_COLOR_CORRECTION,
+    mode: task.operation_mode || PROCESSING_MODE_COLOR_CORRECTION,
     taskFamily: "color_correction",
     batchId: batch.batch_id,
     output_format: result.output_format || "",
@@ -3514,7 +3514,9 @@ export default function DashboardPage({
               <div>
                 <p className="hdde-eyebrow">批量颜色校正</p>
                 <h2 id="color-batch-summary-title">{batchStatusLabel}</h2>
-                <p>每张图片独立分析与处理；单张失败不会中断其他图片。</p>
+                <p>{activeColorBatch.level_pick
+                  ? `按代表图选定的“${activeColorBatch.level_pick.label}”档，整组按同样的校正量处理；单张失败不会中断其他图片，除代表图外的结果确认后才能交付。`
+                  : "每张图片独立分析与处理；单张失败不会中断其他图片。"}</p>
               </div>
               <StatusPill status={activeColorBatch.status} />
             </header>

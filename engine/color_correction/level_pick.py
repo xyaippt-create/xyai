@@ -564,6 +564,41 @@ def _analyze_user_point(pixels: np.ndarray, point: Any) -> LevelPickAnalysis:
     )
 
 
+def transfer_level_pick_correction(pixels: np.ndarray, reference: LevelPickAnalysis) -> LevelPickAnalysis:
+    """S75: apply the representative's white-point correction to another image of the group.
+
+    Same lighting, same cast: the representative's tone curve (measured or user-picked white)
+    is reused as is, so every image moves by the same amount. Nothing is re-measured here;
+    skin protection and the safety gates use this image's own pixels. The haze stretch is not
+    transferred: its black and white points belong to one image only.
+    """
+
+    rgb = np.ascontiguousarray(pixels[..., :3])
+    visible = pixels[..., 3] >= VISIBLE_ALPHA_MIN if pixels.shape[2] == 4 else np.ones(rgb.shape[:2], bool)
+    view, visible_view = _analysis_view(rgb, visible)
+    curve = [list(knot) for knot in reference.tone_curve]
+    a, b = (reference.cast.get("ab") or [0.0, 0.0])[:2]
+    lab = _lab(view)
+    near = visible_view & (np.hypot(lab[..., 1] - a, lab[..., 2] - b) <= NEUTRAL_RADIUS) & (np.hypot(lab[..., 1], lab[..., 2]) <= NEUTRAL_MAX_CHROMA)
+    face_boxes = _faces(rgb)
+    no_haze = {"black": 0.0, "white": 1.0, "lift": 0.0, "headroom": 0.0, "haze": 0.0}
+    return LevelPickAnalysis(
+        source_shape=tuple(pixels.shape),
+        neutral={"reliable": len(curve) > 2, "reason": "TRANSFERRED", "ab": [a, b], "share": round(float(near.mean()), 4), "grid_cells": _grid_cells(near, 0.01), "tone_curve": []},
+        haze=no_haze,
+        intent_hints=[],
+        face_boxes=face_boxes,
+        category=reference.category.replace("+GREY", "").replace("GREY", "NO_CAST") or "NO_CAST",
+        measured_offset=reference.measured_offset,
+        recommended_level=reference.recommended_level,
+        tone_curve=curve,
+        cast={**{k: v for k, v in reference.cast.items() if k != "user_point"}, "transferred": True},
+        neutral_mask_view=near,
+        skin=_skin_weight(rgb, face_boxes),
+        user_point=None,
+    )
+
+
 def analyze_level_pick(pixels: np.ndarray, neutral_point: Any = None) -> LevelPickAnalysis:
     """Measure cast, haze and protection regions of an RGB/RGBA uint8 working-domain image.
 
@@ -796,4 +831,5 @@ __all__ = [
     "pixel_sha256",
     "render_level",
     "sample_neutral_point",
+    "transfer_level_pick_correction",
 ]

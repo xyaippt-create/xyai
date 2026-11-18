@@ -532,8 +532,112 @@ class NeutralPointApiTests(LevelPickApiTests):
         self.assertEqual(self.color_dir_files(), [])
 
 
+class BatchLevelPickApiTests(LevelPickApiTests):
+    """S75: one previewed representative decides the level; the group gets its correction."""
+
+    def wait_batch(self, batch_id):
+        import time
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            batch = self.client.get(f"/api/color-correction/batches/{batch_id}").json()["data"]
+            if batch["status"] in {"completed", "failed"}:
+                return batch
+            time.sleep(0.05)
+        self.fail("batch did not finish")
+
+    def group(self, sizes=((240, 180), (300, 200), (260, 190))):
+        return [self.intake(cast_scene(size=size), name=f"g{i}.png") for i, size in enumerate(sizes)]
+
+    def batch(self, sources, preview, level, expect=202):
+        response = self.client.post("/api/color-correction/batches", json={
+            "source_tokens": [item["source_token"] for item in sources],
+            "current_task_output_root": str(self.output_root), "level_pick": {"preview_id": preview["preview_id"], "level": level}})
+        self.assertEqual(response.status_code, expect, response.text)
+        return response.json()
+
+    def test_group_gets_the_representative_correction_and_review_split(self):
+        sources = self.group()
+        rep_preview = self.client.post("/api/color-correction/level-preview", json={"source_token": sources[1]["source_token"], "neutral_point": GREY_POINT}).json()["data"]
+        session = self.state["color_level_preview_sessions"][rep_preview["preview_id"]]
+        with Image.open(session["levels"]["medium"]["path"]) as opened:
+            rep_preview_pixels = np.asarray(opened.convert("RGB"))
+        batch = self.wait_batch(self.batch(sources, rep_preview, "medium")["data"]["batch_id"])
+        self.assertEqual(batch["status"], "completed")
+        self.assertEqual((batch["completed_count"], batch["failed_count"]), (3, 0))
+        self.assertEqual(batch["level_pick"]["level"], "medium")
+        self.assertEqual((batch["confirmed_count"], batch["pending_review_count"]), (1, 2))
+        items = batch["items"]
+        reviews = [item["review"]["status"] for item in items]
+        self.assertEqual(reviews, ["pending", "confirmed", "pending"])
+        outputs = [Path(item["ui"]["output_path"]) for item in items]
+        with Image.open(outputs[1]) as opened:  # the representative reproduces its preview exactly
+            self.assertTrue(np.array_equal(np.asarray(opened.convert("RGB")), rep_preview_pixels))
+        for index in (0, 2):  # the same correction moves the same cast towards neutral
+            with Image.open(outputs[index]) as opened:
+                out = np.asarray(opened.convert("RGB"))
+            self.assertLess(point_chroma(out, GREY_POINT), point_chroma(cast_scene(size=((240, 180), (300, 200), (260, 190))[index]), GREY_POINT) * 0.6)
+            record = self.registry[items[index]["task"]["task_id"]]
+            self.assertFalse(record["delivery_eligible"])
+            self.assertEqual(record["result_file"], "")
+            self.assertFalse(record["level_pick"]["batch"]["representative"])
+        # a pending one becomes deliverable after review, like auto batch candidates
+        task_id = items[0]["task"]["task_id"]
+        reviewed = self.client.post(f"/api/color-correction/tasks/{task_id}/review", json={"status": "confirmed"})
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertTrue(self.registry[task_id]["delivery_eligible"])
+        self.assertEqual(self.client.get(f"/api/color-correction/batches/{batch['batch_id']}").json()["data"]["confirmed_count"], 2)
+        # the preview is consumed by the batch
+        again = self.batch(sources, rep_preview, "medium", expect=409)
+        self.assertEqual(again["detail"]["code"], "LEVEL_PREVIEW_ALREADY_USED")
+
+    def test_one_unsafe_image_keeps_its_original_and_the_rest_continue(self):
+        from unittest import mock
+        import engine.color_correction.level_pick as level_pick_module
+
+        real = level_pick_module.level_safety
+
+        def unsafe_for_one_size(pixels, candidate, analysis):
+            result = real(pixels, candidate, analysis)
+            if pixels.shape[1] == 300:  # forced failure for exactly one image of the group
+                return {**result, "passed": False, "failures": ["CLIPPING_GROWTH"]}
+            return result
+
+        self.client.close()
+        with mock.patch.object(level_pick_module, "level_safety", unsafe_for_one_size):
+            self.client, self.state = self.make_app()
+            sources = self.group()
+            rep_preview = self.client.post("/api/color-correction/level-preview", json={"source_token": sources[0]["source_token"], "neutral_point": GREY_POINT}).json()["data"]
+            batch = self.wait_batch(self.batch(sources, rep_preview, "strong")["data"]["batch_id"])
+        self.assertEqual((batch["completed_count"], batch["failed_count"]), (2, 1))
+        failed = batch["items"][1]
+        self.assertEqual(failed["task"]["status"], "failed")
+        self.assertIn("已保留原图", failed["task"]["failure_reason"])
+        self.assertIn("高光或暗部", failed["task"]["failure_reason"])
+        self.assertIsNone(failed["ui"]["output_path"])
+        self.assertEqual(len(self.color_dir_files()), 2)
+
+    def test_batch_level_pick_requests_are_validated(self):
+        sources = self.group()
+        preview = self.preview(sources[0])
+        outsider = self.preview(self.intake(cast_scene(size=(200, 150)), name="outsider.png"))
+        for level_pick, status, code in (
+            ({"preview_id": preview["preview_id"]}, 400, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            ({"preview_id": preview["preview_id"], "level": "original"}, 400, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            ({"preview_id": "missing", "level": "medium"}, 404, "LEVEL_PREVIEW_NOT_FOUND"),
+            ({"preview_id": outsider["preview_id"], "level": "medium"}, 400, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+        ):
+            response = self.client.post("/api/color-correction/batches", json={
+                "source_tokens": [item["source_token"] for item in sources], "level_pick": level_pick})
+            self.assertEqual(response.status_code, status, level_pick)
+            self.assertEqual(response.json()["detail"]["code"], code)
+        self.assertEqual(self.color_dir_files(), [])
+        self.assertEqual(len(self.state["color_batch_registry"]), 0)
+
+
 for _name in [name for name in vars(LevelPickApiTests) if name.startswith("test_")]:
     setattr(NeutralPointApiTests, _name, None)  # not callable: the loader skips it
+    setattr(BatchLevelPickApiTests, _name, None)
 
 
 if __name__ == "__main__":

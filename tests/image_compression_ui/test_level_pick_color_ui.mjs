@@ -90,3 +90,30 @@ test("S74 click position maps to 0..1 of the displayed image and is clamped", ()
   assert.deepEqual({ ...pick({ currentTarget: target, clientX: 900, clientY: 0 }) }, { x: 1, y: 0 });
   assert.equal(pick({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }) }, clientX: 1, clientY: 1 }), null);
 });
+
+test("S75 group level pick: representative previews, the group runs as one batch", () => {
+  assert.match(page, /const singleSourceMode = referenceMode;/);
+  assert.match(page, /const groupMode = levelMode && selectedItems\.length > 1;/);
+  assert.match(page, /selectedItems\.find\(\(item\) => item\.id === representativeId\) \|\| selectedItems\[0\]/);
+  const run = page.slice(page.indexOf("const runLevelPick"), page.indexOf("const performResultAction"));
+  assert.match(run, /if \(groupMode && chosenLevel !== "original"\)/);
+  assert.match(run, /level_pick: \{ preview_id: levelPreview\.preview_id, level: chosenLevel \}/);
+  assert.match(run, /"\/api\/color-correction\/batches"/);
+  assert.match(run, /onOpenProcessing\(batchPayload\.data\.batch_id\)/);
+  const preview = page.slice(page.indexOf("const createLevelPreview"), page.indexOf("const runLevelPick"));
+  assert.match(preview, /levelMode \? representativeItem/);
+  assert.match(page, /const createPointPreview = async \(point\) => \{\s+const item = representativeItem;/);
+  assert.match(page, /设为代表图/);
+  assert.match(page, /按“\$\{LEVEL_PICK_LABELS\[chosenLevel\] \|\| ""\}”档处理整组/);
+  assert.match(page, /除代表图外的结果需在处理中心复核后才能交付/);
+  assert.doesNotMatch(page, /setColorMode\("level"\);[^}]*slice\(0, 1\)/);
+  assert.match(styles, /\.hdde-color-representative \{[\s\S]*font-size: 12px/);
+});
+
+test("S75 processing centre names group level-pick batches and rows correctly", () => {
+  const dashboard = fs.readFileSync(new URL("../../src/DashboardPage.jsx", import.meta.url), "utf8");
+  const row = dashboard.slice(dashboard.indexOf("function colorBatchTaskToQueueItem"), dashboard.indexOf("function colorBatchTaskToQueueItem") + 900);
+  assert.match(row, /mode: task\.operation_mode \|\| PROCESSING_MODE_COLOR_CORRECTION/);
+  assert.match(dashboard, /normalized === "LEVEL_PICK_COLOR_CORRECTION"\) return \{ label: "挑档校色"/);
+  assert.match(dashboard, /activeColorBatch\.level_pick\s*\?\s*`按代表图选定的“\$\{activeColorBatch\.level_pick\.label\}”档/);
+});

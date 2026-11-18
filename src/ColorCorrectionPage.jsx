@@ -261,7 +261,7 @@ export default function ColorCorrectionPage({
   const [referenceInput, setReferenceInput] = useState(null);
   const referenceMode = colorMode === "reference";
   const levelMode = colorMode === "level";
-  const singleSourceMode = referenceMode || levelMode;
+  const singleSourceMode = referenceMode;
   // Both the level-pick and the reference tab show four previews and let the user choose.
   const pickMode = levelMode || referenceMode;
   const [levelPreview, setLevelPreview] = useState(null);
@@ -286,6 +286,10 @@ export default function ColorCorrectionPage({
   const [previewUnavailable, setPreviewUnavailable] = useState(false);
   const [notice, setNotice] = useState("");
   const [reviewBusy, setReviewBusy] = useState(false);
+  // S75: in level pick several images form a group; the representative's preview decides the level.
+  const [representativeId, setRepresentativeId] = useState("");
+  const groupMode = levelMode && selectedItems.length > 1;
+  const representativeItem = levelMode ? (selectedItems.find((item) => item.id === representativeId) || selectedItems[0] || null) : null;
 
   useEffect(() => {
     onTaskContextChange?.(null);
@@ -613,7 +617,7 @@ export default function ColorCorrectionPage({
 
   // S74: re-render the four levels around a picked white. A refused point keeps the current preview.
   const createPointPreview = async (point) => {
-    const item = selectedItems.find((entry) => entry.data?.source_token);
+    const item = representativeItem;
     if (!item || referenceMode) return;
     setNeutralPickerOpen(false);
     setBusy(true);
@@ -639,9 +643,9 @@ export default function ColorCorrectionPage({
   };
 
   const createLevelPreview = async () => {
-    const item = selectedItems.find((entry) => entry.data?.source_token);
-    if (!item || selectedItems.length !== 1) {
-      setError(referenceMode ? "参考图校色每次处理一张目标图片，请先选择一张目标图片。" : "挑档校色每次处理一张图片，请先选择一张图片。");
+    const item = levelMode ? representativeItem : selectedItems.find((entry) => entry.data?.source_token);
+    if (!item?.data?.source_token || (referenceMode ? selectedItems.length !== 1 : selectedItems.length > 20)) {
+      setError(referenceMode ? "参考图校色每次处理一张目标图片，请先选择一张目标图片。" : "挑档校色可选一张，或同一批的 2–20 张图片。");
       return;
     }
     if (referenceMode && !referenceInput?.data?.source_token) {
@@ -678,6 +682,25 @@ export default function ColorCorrectionPage({
     setNotice("");
     onTaskContextChange?.(null);
     try {
+      if (groupMode && chosenLevel !== "original") {
+        const batchBody = {
+          source_tokens: selectedItems.map((entry) => entry.data.source_token),
+          level_pick: { preview_id: levelPreview.preview_id, level: chosenLevel },
+        };
+        if (currentTaskOutputRoot) batchBody.current_task_output_root = currentTaskOutputRoot;
+        const batchPayload = await requestJson("/api/color-correction/batches", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(batchBody),
+        });
+        setLevelPreview(null);
+        setZoomItem(null);
+        setNeutralPoint(null);
+        setBatchData(batchPayload.data);
+        setNotice(`整组任务已创建，共 ${batchPayload.data?.total_count || selectedItems.length} 张，正在进入处理中心。`);
+        if (batchPayload.data?.batch_id && typeof onOpenProcessing === "function") onOpenProcessing(batchPayload.data.batch_id);
+        return;
+      }
       const requestBody = { preview_id: levelPreview.preview_id, level: chosenLevel };
       if (currentTaskOutputRoot) requestBody.current_task_output_root = currentTaskOutputRoot;
       const payload = await requestJson("/api/color-correction/level-run", {
@@ -871,12 +894,12 @@ export default function ColorCorrectionPage({
           <div className="hdde-reference-tabs" role="group" aria-label="颜色校正模式">
             <button type="button" className={colorMode === "automatic" ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={colorMode === "automatic"} disabled={busy} onClick={() => { setColorMode("automatic"); clearResult(); setError(""); }}>自动校色</button>
             <button type="button" className={referenceMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={referenceMode} disabled={busy} onClick={() => { setColorMode("reference"); clearResult(); setError(""); }}>参考图校色</button>
-            <button type="button" className={levelMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={levelMode} disabled={busy} data-testid="color-mode-level" onClick={() => { setColorMode("level"); clearResult(); setError(""); setSelectedItems((current) => current.slice(0, 1)); }}>挑档校色</button>
+            <button type="button" className={levelMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={levelMode} disabled={busy} data-testid="color-mode-level" onClick={() => { setColorMode("level"); clearResult(); setError(""); }}>挑档校色</button>
           </div>
 
         <div className="hdde-color-intake-body">
         <section className="hdde-color-card hdde-color-source" aria-label="选择图片">
-          <div className="hdde-color-section-title"><span>1</span><div><h2>{referenceMode ? "目标图片" : "选择图片"}</h2><p>{referenceMode ? "选择一张需要校色的目标图片；不会覆盖原图。" : levelMode ? "选择一张偏黄、偏蓝或发灰的图片；不会覆盖原图。" : "支持一次选择多张 PNG、JPG、JPEG；每张最大 50 MB。"}</p></div>{selectedItems.length ? <strong className="hdde-color-selection-count" data-testid="color-selection-count">{selectedItems.length} 张</strong> : null}</div>
+          <div className="hdde-color-section-title"><span>1</span><div><h2>{referenceMode ? "目标图片" : "选择图片"}</h2><p>{referenceMode ? "选择一张需要校色的目标图片；不会覆盖原图。" : levelMode ? "选一张，或同一批光线一致的 2–20 张；多张时按代表图选定的档位整组处理，不会覆盖原图。" : "支持一次选择多张 PNG、JPG、JPEG；每张最大 50 MB。"}</p></div>{selectedItems.length ? <strong className="hdde-color-selection-count" data-testid="color-selection-count">{selectedItems.length} 张</strong> : null}</div>
           <div
             className={`hdde-color-dropzone${selectedItems.length ? " has-file" : ""}`}
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
@@ -891,6 +914,9 @@ export default function ColorCorrectionPage({
                     <strong title={item.data.display_name}>{item.data.display_name}</strong>
                     <span>{item.data.format} · {item.data.width} × {item.data.height} · {formatBytes(item.data.size_bytes)}</span>
                   </div>
+                  {groupMode ? (representativeItem?.id === item.id
+                    ? <em className="hdde-color-representative" data-testid="color-representative">代表图</em>
+                    : <button type="button" className="hdde-tertiary-action" data-testid="color-set-representative" disabled={busy} onClick={() => { setRepresentativeId(item.id); clearResult(); }}>设为代表图</button>) : null}
                   <button type="button" className="hdde-secondary-action" data-testid="color-remove-file" onClick={() => removeSelectedItem(item.id)} disabled={busy} aria-label={`移除 ${item.data.display_name}`}>移除</button>
                 </article>
               ))}
@@ -936,7 +962,7 @@ export default function ColorCorrectionPage({
         </div>
 
         <div className="hdde-color-execution">
-          {pickMode ? <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-level-preview" onClick={createLevelPreview} disabled={busy || selectedItems.length !== 1 || !outputSettings || (referenceMode && !referenceInput?.data?.source_token)}>
+          {pickMode ? <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-level-preview" onClick={createLevelPreview} disabled={busy || (referenceMode ? selectedItems.length !== 1 : !selectedItems.length || selectedItems.length > 20) || !outputSettings || (referenceMode && !referenceInput?.data?.source_token)}>
             {busy && !levelPreview ? "正在生成四档预览…" : levelPreview ? "重新生成四档预览" : "生成四档预览"}
           </button> : <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-run" onClick={runCorrection} disabled={busy || !selectedItems.length || !outputSettings}>
             {busy ? "正在创建处理任务…" : selectedItems.length > 1 ? `开始处理 ${selectedItems.length} 张图片` : "开始自动校正"}
@@ -963,12 +989,13 @@ export default function ColorCorrectionPage({
         </section>
       ) : null}
       {pickMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
-        <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。</p></div></div>
+        <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>{groupMode ? `代表图：${representativeItem?.data?.display_name || ""}。选定后整组 ${selectedItems.length} 张按同样的校正量处理；除代表图外的结果需在处理中心复核后才能交付。` : "点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。"}</p></div></div>
         <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy}
           pointTools={levelMode ? { onOpen: () => { setError(""); setNeutralPickerOpen(true); }, onClear: () => createPointPreview(null) } : null} />
         <div className="hdde-level-actions">
           <button type="button" className="hdde-primary-action" data-testid="color-level-run" disabled={busy || !chosenLevel} onClick={runLevelPick}>
-            {busy ? "正在生成结果…" : chosenLevel === "original" ? "使用原图（不生成新文件）" : `使用“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档生成结果`}
+            {busy ? "正在生成结果…" : chosenLevel === "original" ? (groupMode ? "使用原图（整组都不处理）" : "使用原图（不生成新文件）")
+              : groupMode ? `按“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档处理整组（${selectedItems.length} 张）` : `使用“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档生成结果`}
           </button>
         </div>
       </section> : null}

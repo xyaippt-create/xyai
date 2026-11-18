@@ -520,6 +520,7 @@ def register_image_compression_routes(
         LevelPickAnalysis,
         NeutralPointError,
         analyze_level_pick,
+        transfer_level_pick_correction,
         build_level_pick_preview,
         level_safety,
         pixel_sha256,
@@ -541,6 +542,8 @@ def register_image_compression_routes(
     # Level-pick previews live only in this process: a restart invalidates them, so a
     # formal Result can never be produced from a preview the user did not see in this run.
     color_level_preview_sessions: dict[str, dict[str, Any]] = {}
+    # S75: per batch level pick, the representative's measurement and preview facts (memory only).
+    color_batch_level_pick_context: dict[str, dict[str, Any]] = {}
     color_batch_queue: queue.Queue[str] = queue.Queue()
     color_batch_worker_lock = threading.Lock()
     color_batch_worker_state: dict[str, threading.Thread | None] = {"thread": None}
@@ -3393,8 +3396,13 @@ def register_image_compression_routes(
                 ):
                     remove_level_preview_files(directory.name[len("preview_"):], directory)
 
-    def execute_level_pick_task(record: dict[str, Any], session: dict[str, Any]) -> None:
-        """Materialise exactly the level the user saw; the user's choice is the acceptance."""
+    def execute_level_pick_task(record: dict[str, Any], session: dict[str, Any], transferred: LevelPickAnalysis | None = None) -> None:
+        """Materialise exactly the level the user saw; the user's choice is the acceptance.
+
+        S75: with ``transferred`` (the representative's analysis of a batch level pick) this
+        image gets the same correction at the chosen level. The user never saw it, so there
+        is no preview to match and the Result waits for review in the processing centre.
+        """
 
         if not claim_task_execution(record):
             return
@@ -3416,7 +3424,10 @@ def register_image_compression_routes(
             # measurement still describes them; rendering below still starts from the source and
             # must reproduce the previewed pixels exactly (S69-E).
             cached = session.pop("measurement_cache", None)
-            if reference_source:
+            if transferred is not None:
+                analysis = transfer_level_pick_correction(managed.pixels, transferred)
+                candidate = render_level(managed.pixels, analysis, level)
+            elif reference_source:
                 reference_path = Path(str(reference_source["path"])).resolve()
                 if _sha256_file(reference_path) != session["reference_sha256"]:
                     raise RuntimeError("参考图内容已变化，预览已失效，请重新生成预览。")
@@ -3432,11 +3443,17 @@ def register_image_compression_routes(
                 if analysis is None:
                     analysis = analyze_level_pick(managed.pixels, session.get("neutral_point"))
                 candidate = render_level(managed.pixels, analysis, level)
-            if pixel_sha256(candidate) != session["levels"][level]["pixel_sha256"]:
+            if transferred is None and pixel_sha256(candidate) != session["levels"][level]["pixel_sha256"]:
                 raise RuntimeError("正式结果与所选预览不一致，任务已阻断。")
             safety = level_safety(managed.pixels, candidate, analysis)
             if not safety["passed"]:
+                if transferred is not None:
+                    reasons = {"CLIPPING_GROWTH": "高光或暗部会被压掉", "SKIN_COLOUR_SHIFT": "人物肤色会明显变化",
+                               "ALPHA_CHANGED": "透明区域会变化", "GEOMETRY_OR_DEPTH_CHANGED": "尺寸或位深会变化"}
+                    detail = "、".join(reasons.get(code, code) for code in safety["failures"])
+                    raise RuntimeError(f"这张按整组档位处理会{detail}，未通过安全检查，已保留原图，未生成新文件。")
                 raise RuntimeError("所选档位未通过安全检查，任务已阻断。")
+            confirmed = transferred is None
             created_moment = datetime.fromisoformat(str(record["created_at"])).astimezone()
             while True:
                 output_path = build_output_path(
@@ -3488,14 +3505,15 @@ def register_image_compression_routes(
                 "actual_final_action": "REVIEW_REQUIRED",
                 "output_selected": "REVIEW_CANDIDATE",
                 "acceptance_authority": "REVIEW_ONLY",
-                "delivery_acceptance_authority": "HUMAN_CONFIRMED_REVIEW",
-                "result_review_status": "confirmed",
-                "delivery_eligible": True,
-                "candidate_identity": session["levels"][level]["pixel_sha256"],
+                "delivery_acceptance_authority": "HUMAN_CONFIRMED_REVIEW" if confirmed else "",
+                "result_review_status": "confirmed" if confirmed else "pending",
+                "delivery_eligible": confirmed,
+                "candidate_identity": session["levels"][level]["pixel_sha256"] if confirmed else pixel_sha256(candidate),
                 "analysis": {
                     ("REFERENCE_LEVEL_PICK" if reference_source else "LEVEL_PICK"): analysis_record,
                     "LEVEL_PICK_SAFETY": safety,
                     "SELECTED_LEVEL": level,
+                    **({"BATCH_LEVEL_PICK": dict(record["level_pick"].get("batch") or {})} if record["level_pick"].get("batch") else {}),
                     **({"REFERENCE_PROVENANCE": {
                         "reference_source_fingerprint": session["reference_sha256"],
                         "reference_display_name": str(reference_source.get("filename") or ""),
@@ -3505,8 +3523,10 @@ def register_image_compression_routes(
                 "after_metrics": {"delta_e00_mean": safety["delta_e00_mean"], "neutral_delta_e00_mean": safety["neutral_delta_e00_mean"], "clip_growth": safety["clip_growth"]},
                 "detected_issues": (["REFERENCE_SHIFT"] if analysis_record.get("recommended_level") == "medium" else []) if reference_source
                 else [tag for tag in analysis.category.split("+") if tag != "NO_CAST"],
-                "improvements": ["原图哈希保持不变，未覆盖或修改原图", f"按用户选择的“{LEVEL_LABELS[level]}”档生成，与预览逐像素一致", "候选文件已完成存在、解码、尺寸、格式与摘要验证"],
-                "review_points": ["用户在四档预览中选定该档，视为人工确认"],
+                "improvements": ["原图哈希保持不变，未覆盖或修改原图",
+                                 f"按用户选择的“{LEVEL_LABELS[level]}”档生成，与预览逐像素一致" if confirmed else f"按整组代表图的校正量和“{LEVEL_LABELS[level]}”档生成",
+                                 "候选文件已完成存在、解码、尺寸、格式与摘要验证"],
+                "review_points": ["用户在四档预览中选定该档，视为人工确认"] if confirmed else ["整组按代表图所选档位处理，这张未在预览中查看，请复核后确认"],
                 "applied_actions": ["USER_SELECTED_LEVEL_COLOR_CORRECTION"],
                 "parameters": {"level": level, "strength": LEVELS[level], "level_pick_version": version,
                                **({"reference_sha256": session["reference_sha256"]} if reference_source else {})},
@@ -3516,7 +3536,7 @@ def register_image_compression_routes(
                 "source": str(record["source_path"]),
                 "source_path": str(record["source_path"]),
                 "status": "REVIEW_REQUIRED",
-                "result_file": str(output_path),
+                "result_file": str(output_path) if confirmed else "",
                 "operation_mode": mode,
                 "selected_level": level,
                 **result_lineage_fields(record.get("source_metadata")),
@@ -3528,7 +3548,7 @@ def register_image_compression_routes(
                 "result": result_data,
                 "task_result": dict(result_data),
                 "result_id": result_id,
-                "result_file": str(output_path),
+                "result_file": str(output_path) if confirmed else "",
                 "output_path": output_path,
                 "output_preview_token": output_preview_token,
                 "preview_output_url": preview_url(output_preview_token) if output_preview_token else "",
@@ -3536,10 +3556,10 @@ def register_image_compression_routes(
                 "d3_final_action": "REVIEW_REQUIRED",
                 "result_action": "REVIEW_REQUIRED",
                 "output_selected": "REVIEW_CANDIDATE",
-                "result_review_status": "confirmed",
-                "result_reviewed_at": reviewed_at,
-                "delivery_eligible": True,
-                "delivery_acceptance_authority": "HUMAN_CONFIRMED_REVIEW",
+                "result_review_status": "confirmed" if confirmed else "pending",
+                "result_reviewed_at": reviewed_at if confirmed else None,
+                "delivery_eligible": confirmed,
+                "delivery_acceptance_authority": "HUMAN_CONFIRMED_REVIEW" if confirmed else "",
                 "output_metadata": dict(verified.get("output_metadata") or {}),
             })
             if shared_task_registry is None:
@@ -3548,16 +3568,21 @@ def register_image_compression_routes(
             transition_task(finalized, "completed", 100)
             record.update(finalized)
             task_registry[record["task_id"]] = finalized
-            for event, stage, impact in (
+            events = (
                 ("PROCESS_SUCCEEDED", "output_verification", "user_selected_level_output_available"),
                 ("RESULT_REGISTERED", "result_registry", "human_confirmed_unified_result_available"),
                 ("USER_CONFIRMED", "human_quality_review", "color_level_selected"),
                 ("RESULT_CONFIRMED", "result_registry", "human_confirmed_unified_result_available"),
                 ("COLOR_CORRECTION_LEVEL_PICK_SUCCEEDED", "output_verification", "user_selected_level_output_available"),
-            ):
+            ) if confirmed else (
+                ("PROCESS_SUCCEEDED", "output_verification", "batch_level_output_available"),
+                ("RESULT_REGISTERED", "result_registry", "batch_level_result_waiting_for_review"),
+                ("COLOR_CORRECTION_LEVEL_PICK_SUCCEEDED", "output_verification", "batch_level_output_available"),
+            )
+            for event, stage, impact in events:
                 emit_runtime_event(
                     event, stage=stage, result="success", status="completed", impact=impact,
-                    acceptance_authority="HUMAN_CONFIRMED_REVIEW", selected_level=level,
+                    acceptance_authority="HUMAN_CONFIRMED_REVIEW" if confirmed else "REVIEW_ONLY", selected_level=level,
                     **color_task_event_fields(record),
                 )
         except Exception as exc:
@@ -3614,6 +3639,7 @@ def register_image_compression_routes(
             "current_task_id": batch.get("current_task_id"),
             "output_directory": str(batch["output_dir"]),
             "items": items,
+            **({"level_pick": dict(batch["level_pick"])} if batch.get("level_pick") else {}),
         }
 
     def process_color_batch(batch_id: str) -> None:
@@ -3643,7 +3669,18 @@ def register_image_compression_routes(
             if not record or record.get("status") != "pending":
                 continue
             batch["current_task_id"] = task_id
-            execute_color_task(record)
+            level_context = color_batch_level_pick_context.get(batch_id)
+            if level_context is not None and record.get("level_pick"):
+                if record["level_pick"].get("batch", {}).get("representative"):
+                    # the one image the user saw: reproduce its preview exactly, human confirmed
+                    execute_level_pick_task(record, dict(level_context["snapshot"]))
+                else:
+                    execute_level_pick_task(
+                        record, {"source_sha256": str(record["source_metadata"].get("sha256") or "")},
+                        transferred=level_context["analysis"],
+                    )
+            else:
+                execute_color_task(record)
             refresh_color_batch(batch)
         refresh_color_batch(batch)
         batch["status"] = "completed" if batch["completed_count"] > 0 else "failed"
@@ -3651,6 +3688,7 @@ def register_image_compression_routes(
         batch["current_task_id"] = None
         batch["completed_at"] = lifecycle_timestamp()
         batch["processing_stage"] = "batch_completion"
+        color_batch_level_pick_context.pop(batch_id, None)
         if shared_task_registry is not None:
             shared_task_registry[batch_id] = batch
         emit_runtime_event(
@@ -5982,10 +6020,13 @@ def register_image_compression_routes(
     @app.post("/api/color-correction/batches", status_code=202)
     async def color_correction_batch_create(payload: dict = Body(default_factory=dict)):
         require_compression_directory()
-        allowed_fields = {"source_tokens", "current_task_output_root", "client_context"}
+        allowed_fields = {"source_tokens", "current_task_output_root", "level_pick", "client_context"}
         unknown = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": f"批量颜色校正请求包含未知字段：{', '.join(unknown)}。"})
+        level_pick_request = payload.get("level_pick")
+        if level_pick_request is not None and (not isinstance(level_pick_request, dict) or set(level_pick_request) != {"preview_id", "level"}):
+            raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "整组挑档需要代表图预览与所选档位。"})
         source_tokens = payload.get("source_tokens")
         if not isinstance(source_tokens, list) or not 2 <= len(source_tokens) <= 20:
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": "批量颜色校正每次需要选择2至20张图片。"})
@@ -5993,13 +6034,63 @@ def register_image_compression_routes(
         if len(set(normalized_tokens)) != len(normalized_tokens):
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": "同一批次不能重复提交同一张图片。"})
         sources = [require_token(token, role="source") for token in normalized_tokens]
+        level_session = None
+        representative_index = None
+        if level_pick_request is not None:
+            # S75: one previewed representative decides the level; the whole group gets its correction.
+            level = str(level_pick_request["level"])
+            level_session = color_level_preview_sessions.get(str(level_pick_request["preview_id"]))
+            if level_session is None:
+                raise HTTPException(status_code=404, detail={"code": "LEVEL_PREVIEW_NOT_FOUND", "message": "代表图预览已失效（可能服务已重启），请重新生成预览。"})
+            if level_session["expires_at"] <= now_provider():
+                raise HTTPException(status_code=410, detail={"code": "LEVEL_PREVIEW_EXPIRED", "message": "代表图预览已过期，请重新生成预览。"})
+            if level_session.get("used_by_task_id") or level_session.get("running_task_id"):
+                raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_ALREADY_USED", "message": "这组预览已经用过，请重新生成预览。"})
+            if level_session.get("reference"):
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "参考图校色暂不支持整组处理。"})
+            if level not in LEVELS:
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "整组处理请选择轻、中或强档；保留原图不需要处理。"})
+            if not level_session["levels"][level]["selectable"]:
+                raise HTTPException(status_code=409, detail={"code": "LEVEL_NOT_SELECTABLE", "message": "该档位在代表图上未通过安全检查，不能选择。"})
+            analysis = level_session.get("measurement_cache")
+            if not isinstance(analysis, LevelPickAnalysis):
+                raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_NOT_FOUND", "message": "代表图预览已失效，请重新生成预览。"})
+            representative_path = Path(str(level_session["source"]["path"])).resolve()
+            representative_index = next((index for index, source in enumerate(sources)
+                                         if Path(str(source["path"])).resolve() == representative_path), None)
+            if representative_index is None:
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "代表图必须是本批图片中的一张。"})
+            if not representative_path.is_file() or _sha256_file(representative_path) != level_session["source_sha256"]:
+                raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "代表图已变化或不存在，请重新生成预览。"})
         output_root = effective_color_output_root(payload)
         output_dir = color_output_dir(Path(str(output_root["normalized_path"])).resolve())
         batch_created_at = now_provider()
         batch_id = f"color_batch_{uuid.uuid4().hex[:16]}"
         batch_operation = new_operation_identity("batch_processing", module_id="hdde.processing.batch")
+        level_pick_fields = None
+        if level_session is not None:
+            level_pick_fields = {"preview_id": level_session["preview_id"], "level": level, "analysis": dict(level_session["analysis"])}
+            color_batch_level_pick_context[batch_id] = {
+                "analysis": analysis,
+                "level": level,
+                # what the representative's own task needs to reproduce its preview (S64 contract)
+                "snapshot": {
+                    "source_sha256": level_session["source_sha256"],
+                    "levels": {level: {"pixel_sha256": level_session["levels"][level]["pixel_sha256"]}},
+                    "measurement_cache": analysis,
+                    "neutral_point": level_session.get("neutral_point"),
+                    "reference_sha256": None,
+                },
+            }
+            level_session["used_by_task_id"] = batch_id
+            release_used_level_preview(level_session)
         records = [
-            create_color_task_record(source, output_root, batch_id=batch_id, batch_index=index)
+            create_color_task_record(
+                source, output_root, batch_id=batch_id, batch_index=index,
+                **({"level_pick": {**level_pick_fields, "batch": {"batch_id": batch_id, "representative": index - 1 == representative_index,
+                                                                   "representative_name": str(sources[representative_index].get("filename") or "")}}}
+                   if level_pick_fields is not None else {}),
+            )
             for index, source in enumerate(sources, start=1)
         ]
         batch = {
@@ -6019,10 +6110,12 @@ def register_image_compression_routes(
             "task_ids": [record["task_id"] for record in records],
             "processing_stage": "batch_queue",
             "error_context": {},
+            **({"level_pick": {"level": level, "label": LEVEL_LABELS[level], "representative_task_id": records[representative_index]["task_id"]}}
+               if level_session is not None else {}),
             "task_context": {
                 **batch_operation,
                 "batch_id": batch_id,
-                "purpose": "COLOR_CORRECTION_BATCH",
+                "purpose": "COLOR_LEVEL_PICK_BATCH" if level_session is not None else "COLOR_CORRECTION_BATCH",
                 "route": "/color-correction",
                 "route_family": "color_correction",
             },
