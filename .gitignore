@@ -78,6 +78,7 @@ models/restoration/*.pt
 models/restoration/*.safetensors
 models/restoration/*.ckpt
 models/local_retouch/*.onnx
+models/text_detection/*.onnx
 models/delivery_naming/florence-2-base-ft/
 *.zip
 测试图/

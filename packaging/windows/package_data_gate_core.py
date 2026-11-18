@@ -30,6 +30,7 @@ APP_RESOURCE_PREFIXES = (
     "_internal/dist/",
     "_internal/engine/batch_watermark/fonts/",
     "_internal/models/local_retouch/",
+    "_internal/models/text_detection/",
     "_internal/modes/",
     "_internal/rules/",
     "_internal/ai_noise_rules/",

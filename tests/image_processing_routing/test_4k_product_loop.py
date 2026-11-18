@@ -70,6 +70,29 @@ class FourKProductLoopTests(unittest.TestCase):
             self.assertTrue(repeated_output.is_file())
             self.assertEqual(sha256(output), first_output_hash)
 
+    def test_source_dpi_follows_the_metadata_writer_rule(self) -> None:
+        """A JPEG whose EXIF has no resolution carries no DPI (Pillow reports a made-up 72)."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            no_dpi = root / "exif-without-resolution.jpg"
+            exif = Image.Exif()
+            exif[305] = "fixture"
+            Image.new("RGB", (160, 90), (120, 96, 64)).save(no_dpi, format="JPEG", exif=exif)
+            with Image.open(no_dpi) as probe:
+                self.assertEqual(probe.info.get("dpi"), (72, 72))
+            with_dpi = root / "with-300-dpi.jpg"
+            Image.new("RGB", (160, 90), (120, 96, 64)).save(with_dpi, format="JPEG", dpi=(300, 300))
+
+            first = process_4k_v1_image(no_dpi, root)
+            second = process_4k_v1_image(with_dpi, root)
+
+            with Image.open(first["final_output_path"]) as image:
+                self.assertIsNone(image.info.get("dpi"))
+            with Image.open(second["final_output_path"]) as image:
+                self.assertAlmostEqual(image.info["dpi"][0], 300, delta=0.01)
+                self.assertAlmostEqual(image.info["dpi"][1], 300, delta=0.01)
+
     def test_exif_orientation_is_applied_to_pixels_before_dimension_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1,5 +1,33 @@
 # Codex Changelog
 
+## 2026-11-18｜4K 文字清晰度正式接入（负责人已签收，PASS_AND_FROZEN）
+
+- 按负责人决定，将试验版并入 `engine/image_processing_routing/four_k_v1.py`，合同升为 `4k_v1_contract_2.3`。超分前用 PP-OCRv3 中文文字检测模型（ONNX Runtime CPU，加载前校验 SHA-256）找出文字区。文字区内亮度改用超分结果，并受原图 3 像素邻域明暗范围和笔画面积保护约束；文字区外与 v4 逐像素一致。约 40 px 以上大字不处理。模型缺失、校验不符或无法加载时退回 v4 结果，任务照常完成，报告提示“未做文字清晰度加强”；任务结果和报告新增 `text_enhancement` 字段。
+- 打包：`program_resources.py` 与 `package_data_gate_core.py` 加入 `models/text_detection`（模型、README、Apache-2.0 许可证）；`.gitignore` 忽略该 ONNX。模型来源、哈希与许可证记录在 `models/text_detection/README.md`。
+- 验证：新增 6 项直接测试与此前 8 项输入保真测试通过，覆盖空掩码时逐像素等于 v4、改动不出文字区、限幅与笔画保护、模型校验不符时退回。正式代码在调参真值集上与试验版一致；未参与调参的验证集（等线、黑体，新文字）6 档亮度误差均更接近真值，锐利度 5/6 提升。负责人 16 张样本文字区外变化像素均为 0，检测每张 0.24–0.64 s。进程内真实后端上传→任务→成品通过（海报 11.5 s，3840×1600，`text_enhancement=APPLIED`）。4K 路由套件 144 项中 3 项未过，均为既有问题：正式目录测试 2 项；`dist` 前端缺 Build ID 导致运行状态为 degraded，1 项。打包测试 1 项未过，原因是 `dist` 前端产物未登记；本次新增资源已在清单中且文件存在。
+- 负责人 2026-11-18 看过验证集对照图后签收，阶段冻结；软件内 V0.7.3 更新日志新增「4K 画质增强」两条。未做：桌面安装包构建与软件内实测；运行中的后端需重启。证据：`artifacts/4k_text_clarity_integration_20261118/`（本地）。
+
+## 2026-11-18｜4K 文字清晰度试验版第二轮：文字检测模型（PoC，未接入）
+
+- 经负责人同意，下载 OpenCV 官方模型库的 PP-OCRv3 中文文字检测模型（`text_detection_cn_ppocrv3_2023may.onnx`，2.42 MB，Apache-2.0）到 `models/text_detection/`（本地，未入库），用 ONNX Runtime CPU 运行，只取文字区域掩码。合成文字召回 0.76–0.90，每张 0.3–1 s；海报署名、竖排字、墙面标语圈中，人脸、发丝、墨点、电线不误圈。约 40 px 以上大字不处理。
+- 新增笔画面积保护：超分使笔画面积偏离原图放大超过 8% 时逐步退回 v4，低对比灰字粗细偏差由 −13% 降到 −2%。真值测试 9–14 px 小字锐利度升 8–23%，亮度误差 7 档更接近真值、1 档持平，色度误差均不变差。
+- 负责人 16 张样本中，文字区以外变化像素均为 0，无文字的 5 张整图不变。对照图显示笔画更利落，v4 的灰色双影基本消失。已知风险：图标状包装可能被识别为文字。试验版融合耗时约翻倍（每张多 2–5 s）。产品代码未改。证据：`artifacts/4k_text_sharpen_poc_20261118/REPORT.md`（本地）。
+
+## 2026-11-18｜4K 文字清晰度试验版（PoC，未接入）
+
+- 负责人要求试验在不失真的前提下加强 4K 文字清晰度。隔离试验用系统中文字体渲染真值（字高 9–40 px，含低对比与彩色底），缩小 4 倍再经 4K 放大后比较。产品代码未改。
+- 边缘压陡方案会使笔画变粗、误差变大，已放弃。“文字区用超分亮度、色度取原图、亮度限制在原图邻域范围内”在已知文字位置时 8 档中 7 档更接近真值，9 px 字锐利度 0.52→0.69；电影海报署名手动框选后笔画更利落，暗边消失。低对比灰字仍被削细 13%，需加笔画面积保护。
+- 卡点是文字定位：本次写的启发式识别与仓库现有 1080P 识别器都会漏掉海报小字、误圈发丝和墨点，未接入。下一步待负责人在专用文字检测模型、用户框选文字区或停止三者中决定。证据：`artifacts/4k_text_sharpen_poc_20261118/REPORT.md`（本地）。
+
+## 2026-11-18｜4K 失真自查与修正（负责人已认可）
+
+- 负责人要求 4K 增强结果不得失真。自查查到四类失真并修正于 `engine/image_processing_routing/four_k_v1.py`，v4 亮度融合参数、模型与路线名不变，合同版本升为 `4k_v1_contract_2.2`。
+- 16 位灰度 PNG 原先几乎全部过曝成白（回缩对比 ΔE 59.4），现按位深缩放（ΔE 0.92）。带 CMYK 配置文件的印刷图原先未转换色彩，且把 CMYK 配置文件嵌进 RGB 成品（ΔE 12.45），现经原配置文件转 sRGB 并嵌 sRGB（ΔE 0.78）。
+- 透明抠图原先把透明区隐藏的黑色当作真实边缘锐化，边缘出现亮白描边（边缘 ΔE 5.17），现只替换完全透明像素的隐藏颜色（1.71），可见像素不变。
+- 高饱和色交界处，亮度锐化而色度仍是 LANCZOS 放大，出现发白内描边和紫/暗外描边。现在只在清晰双色边缘让色度随亮度锐化移动，不产生新颜色、不改亮度。真值测量边缘色度误差 33.5→20.1；6 张真实样本色度误差均不高于 v4，普通照片输出与修正前一致。
+- 新增 8 项直接测试通过。4K 路由套件 130 项中 2 项失败、hd_core 有 3 项失败与 1 项报错，均为既有问题（正式目录与任务登记初始化、HEAD 上已不匹配的历史冻结哈希、旧清单路线名）。未做桌面软件内实测与负责人目视验收；运行中的后端需重启。证据：`artifacts/4k_distortion_check_20261118/REPORT.md`（本地）。
+- 负责人 2026-11-18 查看对照图后认可保留。软件内 V0.7.2 更新日志新增「4K 画质增强」三条。桌面软件内实测未做，正式实例需重启或重新部署后才使用新算法。
+
 ## 2026-10-29 - V0.6.1-dev 4K v3 PASS_AND_FROZEN registered in current status
 
 - Product owner accepted the in-app acceptance of 4K v3. `docs/03_CURRENT_STATUS_V0.4.5.1.md` 4K sections rewritten: `4K_V3: PASS_AND_FROZEN`, contract `4k_v1_contract_2.0`, route `REALESRGAN_X4PLUS_FIDELITY_FUSION`, frozen commits 39c591f / 1b50364 / 730d7eb; the previous LANCZOS-only freeze is kept as history only; the cross-version risk "4K is only LANCZOS resize but named 4K画质增强" is closed. User-visible boundaries, protection rule (no change without owner request plus re-run of sample and in-app acceptance) and untested categories (PPT screenshots, real landscape photos) recorded. Documentation only; no code change.
