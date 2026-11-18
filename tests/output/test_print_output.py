@@ -253,3 +253,85 @@ class PrintUpscalePlanTests(unittest.TestCase):
         assert plan_print_upscale(1672, 941, 1900, 1069)["reason"] == "SMALL_SCALE"
         assert plan_print_upscale(3000, 2000, 7680, 5120)["reason"] == "SOURCE_TOO_LARGE"
         assert plan_print_upscale(1672, 941, 7680, 4322, color=False)["reason"] == "GRAYSCALE"
+
+
+class PrintFromFourKOriginalTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.client, self.registry = client_for(self.root)
+        original = Image.new("RGB", (60, 40), (200, 225, 245))
+        ImageDraw.Draw(original).rectangle((10, 10, 30, 28), fill=(20, 60, 140))
+        self.original_bytes = encoded(original)
+        self.original_path = self.root / "输出" / "1080P画质" / ".输入缓存" / "海报.png"
+        self.original_path.parent.mkdir(parents=True)
+        self.original_path.write_bytes(self.original_bytes)
+        four_k = encoded(original.resize((180, 120), Image.Resampling.LANCZOS))
+        self.four_k_path = self.root / "输出" / "4K画质增强" / "海报_影界4K.png"
+        self.four_k_path.parent.mkdir(parents=True)
+        self.four_k_path.write_bytes(four_k)
+        self.registry["task_4k"] = {
+            "task_id": "task_4k", "record_kind": "task", "status": "completed", "feature_key": "enhancement_4k",
+            "result_id": "image_result_4k", "result_file": str(self.four_k_path),
+            "output_sha256": hashlib.sha256(four_k).hexdigest(), "color_correction_enabled": False,
+            "source_path": str(self.original_path), "source_sha256": hashlib.sha256(self.original_bytes).hexdigest(),
+        }
+
+    def render(self):
+        form = {"result_id": "image_result_4k", "width": 600, "height": 400, "ppi": 150, "request_id": str(uuid4())}
+        response = self.client.post("/api/print-output/render", data=form)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_4k_result_is_rebuilt_from_its_verified_original(self):
+        result = self.render()
+        self.assertEqual(result["upscale"]["source"], "4K_ORIGINAL")
+        self.assertEqual(result["upscale"]["traced_source_sha256"], hashlib.sha256(self.original_bytes).hexdigest())
+        task = self.registry[result["task_id"]]
+        # The registered source is still the 4K result the user picked, and it is untouched.
+        self.assertEqual(Path(task["source_path"]).read_bytes(), self.four_k_path.read_bytes())
+        self.assertEqual((task["input_width"], task["input_height"]), (180, 120))
+        self.assertEqual(task["print_response"]["upscale"]["source"], "4K_ORIGINAL")
+        self.assertEqual(self.original_path.read_bytes(), self.original_bytes)
+
+    def test_changed_missing_or_colour_corrected_original_falls_back_to_the_4k_result(self):
+        self.original_path.write_bytes(encoded(Image.new("RGB", (60, 40), "red")))
+        self.assertEqual(self.render()["upscale"]["trace_fallback"], "ORIGINAL_CHANGED")
+        self.original_path.unlink()
+        self.assertEqual(self.render()["upscale"]["trace_fallback"], "ORIGINAL_MISSING")
+        self.registry["task_4k"] = {**self.registry["task_4k"], "color_correction_enabled": True}
+        fallback = self.render()["upscale"]
+        self.assertEqual((fallback["source"], fallback["trace_fallback"]), ("4K_RESULT", "4K_RESULT_COLOR_CORRECTED"))
+
+
+class PrintTextEdgeTests(unittest.TestCase):
+    def test_text_edges_get_steeper_without_moving_the_outline_or_leaving_the_gate(self):
+        import cv2
+        import numpy as np
+        from engine.print_upscale import _tighten_text_edges
+
+        sharp = np.full((200, 300, 3), 230, np.uint8)
+        sharp[60:140, 60:150] = (20, 60, 140)
+        sharp[60:140, 200:290] = (20, 60, 140)
+        soft = cv2.GaussianBlur(sharp, (0, 0), 2.0)
+        gate = np.zeros((20, 30), np.float32)
+        gate[4:16, 4:17] = 1.0  # first block only
+        out, touched = _tighten_text_edges(soft, gate, 7.0)
+        self.assertGreater(touched, 0)
+        luma = lambda a: cv2.cvtColor(a, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        before, after = luma(soft), luma(out)
+        # Outside the gate nothing changes, byte for byte.
+        self.assertTrue(np.array_equal(out[:, 180:], soft[:, 180:]))
+        lo, hi = before.min(), before.max()
+        mid = (lo + hi) / 2
+        left = slice(0, 180)
+        # The outline (midpoint contour) stays put and no value leaves the original range.
+        self.assertTrue(np.array_equal(before[:, left] < mid, after[:, left] < mid))
+        self.assertGreaterEqual(after.min(), lo - 1)
+        self.assertLessEqual(after.max(), hi + 1)
+        band = lambda a: int(((a[:, left] > lo + 0.2 * (hi - lo)) & (a[:, left] < lo + 0.8 * (hi - lo))).sum())
+        self.assertLess(band(after), band(before) * 0.9)
+        # A ramp wider than the window is not cut into terraces: it is left as it is.
+        ramp = cv2.GaussianBlur(sharp, (0, 0), 6.0)
+        self.assertTrue(np.array_equal(_tighten_text_edges(ramp, gate, 7.0)[0], ramp))
