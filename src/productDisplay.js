@@ -20,6 +20,7 @@ export function processingModeDisplayName(mode, fallback = "") {
     return PRODUCT_DISPLAY_NAMES.enhancement1080p;
   }
   if (normalized === "4k_v1" || normalized === "4k") return PRODUCT_DISPLAY_NAMES.enhancement4k;
+  if (normalized === "print_output") return "喷绘出图";
   if (normalized === "AUTO_COLOR_CORRECTION" || normalized === "color_correction") return "颜色校正";
   if (normalized === "LEVEL_PICK_COLOR_CORRECTION") return "挑档校色";
   if (normalized === "REFERENCE_LEVEL_PICK_COLOR_CORRECTION" || normalized === "REFERENCE_COLOR_CORRECTION") return "参考图校色";
@@ -32,6 +33,7 @@ export function processingTypeDisplayName(processingType, fallback = "") {
   if (normalized === "4k") return PRODUCT_DISPLAY_NAMES.enhancement4k;
   if (normalized === "color_correction") return "颜色校正";
   if (normalized === "compression") return "图片压缩";
+  if (normalized === "print_output") return "喷绘出图";
   if (normalized === "local_retouch") return "瑕疵修复";
   return fallback || normalized || "正式处理";
 }

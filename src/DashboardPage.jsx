@@ -174,6 +174,7 @@ function isRetiredImageDiagnosisTask(item) {
 
 function getModeDisplay(mode) {
   const normalized = mode || "";
+  if (normalized === "print_output") return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
   if (["fidelity", "texture", "text_safe"].includes(normalized)) {
     return { label: processingModeDisplayName(normalized), className: "text-[var(--brand-primary)]" };
   }

@@ -16,6 +16,7 @@ const CompressionPage = React.lazy(() => import("./CompressionPage.jsx"));
 const ColorCorrectionPage = React.lazy(() => import("./ColorCorrectionPage.jsx"));
 const SystemSettingsPage = React.lazy(() => import("./SystemSettingsPage.jsx"));
 const ReleaseNotesPage = React.lazy(() => import("./ReleaseNotesPage.jsx"));
+const PrintPreflightPage = React.lazy(() => import("./PrintPreflightPage.jsx"));
 const FourKEnhancementPage = React.lazy(() => import("./FourKEnhancementPage.jsx"));
 const SmartDeliveryPage = React.lazy(() => import("./SmartDeliveryPage.jsx"));
 const LocalRetouchPage = React.lazy(() => import("./LocalRetouchPage.jsx"));
@@ -207,7 +208,7 @@ export default function App() {
   const retouchResumeResultId = route?.key === "retouch"
     ? new URLSearchParams(window.location.search).get("resume_result") || ""
     : "";
-  const continueResultId = ["compression", "color-correction", "retouch", "processing", "batch-watermark"].includes(route?.key)
+  const continueResultId = ["compression", "color-correction", "retouch", "processing", "batch-watermark", "print-8k"].includes(route?.key)
     ? new URLSearchParams(window.location.search).get("continue_result") || ""
     : "";
 
@@ -590,6 +591,8 @@ export default function App() {
     content = <BatchWatermarkPage continueResultId={continueResultId} onNavigate={navigateTo} />;
   } else if (route.key === "settings") {
     content = <SystemSettingsPage onNavigate={navigateTo} />;
+  } else if (route.key === "print-8k") {
+    content = <PrintPreflightPage onNavigate={navigateTo} continueResultId={continueResultId} />;
   } else if (route.key === "release-notes") {
     content = <ReleaseNotesPage onNavigate={navigateTo} />;
   } else {
@@ -613,7 +616,7 @@ export default function App() {
       feedbackTarget={currentResultFeedbackTarget}
       feedbackDisabled={TASK_ROUTES.has(route?.key) && !currentResultFeedbackTarget}
     >
-      {["compression", "color-correction", "color-correction-review", "outputs", "output-compare", "smart-delivery", "retouch", "batch-watermark"].includes(route?.key) ? null : (
+      {["compression", "color-correction", "color-correction-review", "outputs", "output-compare", "smart-delivery", "retouch", "batch-watermark", "print-8k"].includes(route?.key) ? null : (
         <div
           hidden={!showsProcessingCenter}
           aria-hidden={!showsProcessingCenter}

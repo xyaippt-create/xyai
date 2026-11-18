@@ -15,7 +15,7 @@ const AppThemeContext = createContext(null);
 const NAVIGATION_GROUPS = Object.freeze([
   { label: "工作台", items: ["processing"] },
   { label: "图片处理", items: ["four-k-enhancement", "color-correction", "compression", "retouch", "batch-watermark"] },
-  { label: "交付", items: ["outputs"] },
+  { label: "交付", items: ["outputs", "print-8k"] },
   { label: "系统", items: ["settings"] },
 ]);
 
@@ -27,6 +27,7 @@ const ROUTE_ICONS = Object.freeze({
   retouch: "retouch",
   "batch-watermark": "watermark",
   outputs: "outputs",
+  "print-8k": "fit",
   "smart-delivery": "delivery",
   settings: "settings",
 });

@@ -2313,6 +2313,10 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         runtime_event_logger=log_runtime_event,
     )
 
+    from backend.print_output_api import register_print_output_routes
+
+    register_print_output_routes(app, user_dirs_provider=require_directory_ready, registry=task_registry)
+
     from backend.local_retouch_api import register_local_retouch_routes
 
     register_local_retouch_routes(

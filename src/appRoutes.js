@@ -22,6 +22,16 @@ export const APP_ROUTES = Object.freeze([
     plannedCapabilities: ["处理中心快捷入口"],
   },
   {
+    key: "print-8k",
+    name: "喷绘出图",
+    path: "/print-8k",
+    status: FEATURE_STATUSES.ENABLED,
+    pageTitle: "喷绘出图",
+    description: "按成品尺寸和目标精度预检、生成与预览喷绘文件。",
+    implementationType: "existing",
+    plannedCapabilities: ["喷绘尺寸预检", "8K 长边估算", "PNG 出图与交付"],
+  },
+  {
     key: "batch",
     name: "批量优化",
     path: "/batch",

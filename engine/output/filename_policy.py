@@ -13,6 +13,7 @@ FEATURE_COLOR = "color_correction"
 FEATURE_RETOUCH = "local_retouch"
 FEATURE_COMPRESSION = "image_compression"
 FEATURE_WATERMARK = "batch_watermark"
+FEATURE_PRINT = "print_output"
 
 FUNCTION_SHORT_NAMES = {
     FEATURE_4K: "4K",
@@ -21,6 +22,7 @@ FUNCTION_SHORT_NAMES = {
     FEATURE_RETOUCH: "修复",
     FEATURE_COMPRESSION: "压缩",
     FEATURE_WATERMARK: "水印",
+    FEATURE_PRINT: "喷绘",
 }
 
 _FEATURE_ALIASES = {
