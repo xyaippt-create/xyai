@@ -209,6 +209,6 @@ test("historical color previews fail into an explicit UI fallback", () => {
 
 test("颜色校正同级模式按钮具有完全一致的局部尺寸合同", () => {
   const css = read("src/ColorCorrectionReference.css");
-  assert.match(css, /\.hdde-reference-tabs\s*\{[\s\S]*?align-items:\s*center;/);
-  assert.match(css, /\.hdde-reference-tabs button\s*\{[\s\S]*?width:\s*112px;[\s\S]*?height:\s*44px;[\s\S]*?margin:\s*0;[\s\S]*?padding:\s*9px 15px;/);
+  assert.match(css, /\.hdde-reference-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(css, /\.hdde-reference-tabs button\s*\{[^}]*width:\s*100%;[^}]*min-height:\s*40px;[^}]*margin:\s*0;/);
 });

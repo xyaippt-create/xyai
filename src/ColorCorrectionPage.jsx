@@ -46,12 +46,18 @@ export function referenceLevelSummary(level) {
 
 export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false }) {
   const measurement = preview?.measurement || {};
+  const activeLevel = preview?.levels?.find((item) => item.level === chosen);
   return <div className="hdde-level-pick" data-testid="color-level-options">
     <div className="hdde-level-measure" role="status">
       <strong>{measurement.summary || "已完成测量"}</strong>
       <span>系统建议：{measurement.recommended_label || "原图"}{measurement.measured_offset ? ` · 偏色量 ${Number(measurement.measured_offset).toFixed(1)}` : ""}</span>
       {measurement.notice ? <p>{measurement.notice}</p> : null}
     </div>
+    {activeLevel ? <button type="button" className="hdde-level-active-preview" onClick={() => onZoom(activeLevel)}
+      aria-label={`放大当前${activeLevel.label}档预览`}>
+      <img src={apiUrl(activeLevel.preview_url)} alt={`${activeLevel.label}档当前效果`} />
+      <span>{activeLevel.label}档 · 点击放大</span>
+    </button> : null}
     <div className="hdde-level-grid" role="radiogroup" aria-label="选择校色档位">
       {(preview?.levels || []).map((item) => {
         const selected = chosen === item.level;
@@ -792,13 +798,15 @@ export default function ColorCorrectionPage({
         meta={<HddeStatusPill tone={capabilities ? "positive" : "neutral"}>{capabilities ? "本地服务已连接" : "正在连接本地服务"}</HddeStatusPill>}
       />
 
-      <div className="hdde-reference-tabs" role="group" aria-label="颜色校正模式">
-        <button type="button" className={colorMode === "automatic" ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={colorMode === "automatic"} disabled={busy} onClick={() => { setColorMode("automatic"); clearResult(); setError(""); }}>自动校色</button>
-        <button type="button" className={referenceMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={referenceMode} disabled={busy} onClick={() => { setColorMode("reference"); clearResult(); setError(""); }}>参考图校色</button>
-        <button type="button" className={levelMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={levelMode} disabled={busy} data-testid="color-mode-level" onClick={() => { setColorMode("level"); clearResult(); setError(""); setSelectedItems((current) => current.slice(0, 1)); }}>挑档校色</button>
-      </div>
+      <div className="hdde-color-flow hdde-desktop-columns">
+        <div className="hdde-color-intake">
+          <div className="hdde-reference-tabs" role="group" aria-label="颜色校正模式">
+            <button type="button" className={colorMode === "automatic" ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={colorMode === "automatic"} disabled={busy} onClick={() => { setColorMode("automatic"); clearResult(); setError(""); }}>自动校色</button>
+            <button type="button" className={referenceMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={referenceMode} disabled={busy} onClick={() => { setColorMode("reference"); clearResult(); setError(""); }}>参考图校色</button>
+            <button type="button" className={levelMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={levelMode} disabled={busy} data-testid="color-mode-level" onClick={() => { setColorMode("level"); clearResult(); setError(""); setSelectedItems((current) => current.slice(0, 1)); }}>挑档校色</button>
+          </div>
 
-      <div className="hdde-color-flow">
+        <div className="hdde-color-intake-body">
         <section className="hdde-color-card hdde-color-source" aria-label="选择图片">
           <div className="hdde-color-section-title"><span>1</span><div><h2>{referenceMode ? "目标图片" : "选择图片"}</h2><p>{referenceMode ? "选择一张需要校色的目标图片；不会覆盖原图。" : levelMode ? "选择一张偏黄、偏蓝或发灰的图片；不会覆盖原图。" : "支持一次选择多张 PNG、JPG、JPEG；每张最大 50 MB。"}</p></div>{selectedItems.length ? <strong className="hdde-color-selection-count" data-testid="color-selection-count">{selectedItems.length} 张</strong> : null}</div>
           <div
@@ -826,34 +834,40 @@ export default function ColorCorrectionPage({
           </div>
           {referenceMode && <div className="hdde-reference-input" aria-label="参考图片">
             <h3>参考图片</h3>
-            <p>只用来告诉系统"白应该是什么白"，结果会采用参考图的白，请选同一系列、同一光线的参考图。参考图不会被修改，也不会作为成品输出。支持 PNG、JPEG，最大 50 MB。</p>
+            <p>结果会采用参考图的白。请选同系列、同光线的 PNG 或 JPEG（最大 50 MB）。参考图仅供校色。</p>
+            <div className="hdde-reference-input-actions hdde-color-reference-tools" role="group" aria-label="参考图片操作">
+              <button type="button" className="hdde-secondary-action" disabled={busy} onClick={() => referenceInputRef.current?.click()}>{referenceInput ? "替换参考图" : "上传参考图"}</button>
+              {referenceInput && <button type="button" className="hdde-secondary-action" disabled={busy} onClick={() => { setReferenceInput(null); clearResult(); }}>删除参考图</button>}
+            </div>
             <input ref={referenceInputRef} id="color-reference-input" data-testid="color-reference-input" type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={intakeReference} disabled={busy} aria-label="上传参考图片" />
             {referenceInput?.data && <div className="hdde-reference-input-preview">
               <img src={apiUrl(referenceInput.data.safe_preview_url)} alt="参考图片预览" />
               <span>{referenceInput.data.display_name}</span>
             </div>}
-            <div className="hdde-reference-input-actions">
-              <button type="button" className="hdde-secondary-action" disabled={busy} onClick={() => referenceInputRef.current?.click()}>{referenceInput ? "替换参考图" : "上传参考图"}</button>
-              {referenceInput && <button type="button" className="hdde-secondary-action" disabled={busy} onClick={() => { setReferenceInput(null); clearResult(); }}>删除参考图</button>}
-            </div>
             {selectedItems.length > 1 && <p role="status">当前有多张目标图，请保留一张后再执行参考图校色。</p>}
           </div>}
         </section>
 
         <section className="hdde-color-card hdde-color-controls" aria-label="输出与处理">
-          <div className="hdde-color-section-title"><span>2</span><div><h2>确认输出并开始</h2><p>{referenceMode ? "先看按参考图生成的四档预览，由你选定一档。" : levelMode ? "先看四档预览，由你选定一档；系统不替你决定改不改。" : "系统会自动判断，不需要手动调参数。"}</p></div></div>
-          <div className="hdde-color-output-path">
-            <span>本次输出目录</span>
+          <div className="hdde-color-section-title"><span>2</span><h2>{pickMode ? "预览设置" : "输出设置"}</h2></div>
+          <div className="hdde-color-options">
+          <details className="hdde-color-output-path">
+            <summary>本次输出目录</summary>
             <code title={outputDirectory}>{outputDirectory || "正在读取正式输出目录…"}</code>
             <small>{currentTaskOutputRoot ? "仅当前任务使用，不修改长期设置" : "使用当前正式默认目录"}</small>
             <button type="button" className="hdde-secondary-action" onClick={chooseOutputRoot} disabled={busy || !outputSettings}>仅为本次选择文件夹</button>
-          </div>
-          <div className="hdde-color-safety">
-            <strong>自动保护</strong>
+          </details>
+          <details className="hdde-color-safety">
+            <summary>自动保护</summary>
             {pickMode
               ? <><span>保持原尺寸与比例</span><span>人物肤色保留原有暖调</span><span>高光不过曝、暗部不死黑</span></>
               : <><span>保持原尺寸与比例</span><span>保护高光、LED屏与透明边缘</span><span>逆光时优先改善人物和前景</span></>}
+          </details>
           </div>
+        </section>
+        </div>
+
+        <div className="hdde-color-execution">
           {pickMode ? <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-level-preview" onClick={createLevelPreview} disabled={busy || selectedItems.length !== 1 || !outputSettings || (referenceMode && !referenceInput?.data?.source_token)}>
             {busy && !levelPreview ? "正在生成四档预览…" : levelPreview ? "重新生成四档预览" : "生成四档预览"}
           </button> : <button type="button" className="hdde-primary-action hdde-color-run" data-testid="color-run" onClick={runCorrection} disabled={busy || !selectedItems.length || !outputSettings}>
@@ -862,12 +876,24 @@ export default function ColorCorrectionPage({
           <p className="hdde-color-task-state" data-status={originalKept ? "original_kept" : failed ? "failed" : completed ? "completed" : task?.status || "idle"} role="status">
             {taskLabel}{task?.progress != null && !originalKept ? ` · ${task.progress}%` : ""}
           </p>
-        </section>
-      </div>
-
+        </div>
+        </div>
       {error ? <div className="hdde-color-alert" role="alert">{error}</div> : null}
       {notice ? <div className="hdde-color-notice" role="status">{notice}</div> : null}
 
+      <div className="hdde-color-outcome" data-stage={completed ? "result" : levelPreview ? "levels" : "intake"}>
+      {!levelPreview && !completed ? (
+        <section className="hdde-color-card hdde-color-outcome-empty" aria-label="校正预览与结果">
+          <div className="hdde-color-section-title"><span>3</span><div><h2>预览与结果</h2><p>{pickMode ? "生成四档预览后，在这里选择要采用的一档。" : "校正后，在这里查看单图效果，或前往处理中心复核批次。"}</p></div></div>
+          <div className="hdde-color-preview-stage">
+            {selectedItems[0]?.data?.safe_preview_url ? (
+              <img src={apiUrl(selectedItems[0].data.safe_preview_url)} alt="待校正图片预览" />
+            ) : (
+              <button type="button" className="hdde-secondary-action" disabled={busy} onClick={() => inputRef.current?.click()}>选择待校正图片</button>
+            )}
+          </div>
+        </section>
+      ) : null}
       {pickMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
         <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。</p></div></div>
         <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy} />
@@ -885,20 +911,14 @@ export default function ColorCorrectionPage({
 
       {completed ? <>
         <section className="hdde-color-card hdde-color-result" aria-label="校正结果">
-          <HddeResultHero
-            conclusion={resultConclusion.label}
-            tone={resultConclusion.tone}
-            title={referenceView || levelResult ? resultConclusion.label : "颜色校正已完成"}
-            summary={resultSummary}
-            changes={(decision?.improvements || []).slice(0, 3)}
-            protections={protectionItems.slice(0, 4)}
-            nextAction={resultConclusion.nextAction}
-            actions={<>
+          <header className="hdde-color-result-heading">
+            <h2>{referenceView || levelResult ? resultConclusion.label : "颜色校正已完成"}</h2>
+            <div className="hdde-color-result-actions">
               <button type="button" disabled={!ui?.can_open_output} className="hdde-primary-action" data-testid="color-open-output" onClick={() => performResultAction("/api/color-correction/open-output", "已打开校正结果。")}>打开结果</button>
               <button type="button" disabled={!ui?.can_open_folder} className="hdde-secondary-action" data-testid="color-open-folder" onClick={() => performResultAction("/api/color-correction/open-output-folder", "已打开输出目录。")}> <HddeIcon name="folder" size={16} />打开所在目录</button>
               <button type="button" disabled={!ui?.output_path} className="hdde-tertiary-action" data-testid="color-copy-path" onClick={() => copyPath(ui.output_path, "结果路径已复制。")}> <HddeIcon name="copy" size={16} />复制路径</button>
-            </>}
-          />
+            </div>
+          </header>
 
           {originalSelected ? <div className="hdde-color-preview-fallback" role="status" data-testid="color-original-no-result"><strong>未生成新 Result</strong><p>本次颜色校正决定保留当前成品；原成品身份与文件保持不变，可继续执行其他处理。</p></div> : referenceView ? <ReferenceComparison target={sourcePreview} reference={referencePreview} candidate={outputPreview} /> : <div className="hdde-color-compare" data-testid="color-before-after">
             <img src={sourcePreview} alt="校正前" />
@@ -908,6 +928,17 @@ export default function ColorCorrectionPage({
             <span className="hdde-color-compare-label is-after">校正后</span>
             <input aria-label="拖动查看校正前后" type="range" min="0" max="100" value={comparePosition} onChange={(event) => setComparePosition(Number(event.target.value))} />
           </div>}
+          <HddeTechnicalDetails summary="查看校正结论">
+            <HddeResultHero
+              conclusion={resultConclusion.label}
+              tone={resultConclusion.tone}
+              title={referenceView || levelResult ? resultConclusion.label : "颜色校正已完成"}
+              summary={resultSummary}
+              changes={(decision?.improvements || []).slice(0, 3)}
+              protections={protectionItems.slice(0, 4)}
+              nextAction={resultConclusion.nextAction}
+            />
+          </HddeTechnicalDetails>
         </section>
 
         {!originalSelected && <div className="hdde-color-report-grid">
@@ -960,6 +991,8 @@ export default function ColorCorrectionPage({
           </dl>
         </HddeTechnicalDetails>}
       </> : null}
+      </div>
+      </div>
     </section>
   );
 }
