@@ -635,9 +635,69 @@ class BatchLevelPickApiTests(LevelPickApiTests):
         self.assertEqual(len(self.state["color_batch_registry"]), 0)
 
 
+class MultiLevelResultsApiTests(BatchLevelPickApiTests):
+    """S78: one preview of one image yields several of its previewed levels at once."""
+
+    def multi(self, source, preview, levels, expect=202, tokens=None):
+        response = self.client.post("/api/color-correction/batches", json={
+            "source_tokens": tokens or [source["source_token"]], "current_task_output_root": str(self.output_root),
+            "level_pick": {"preview_id": preview["preview_id"], "levels": levels}})
+        self.assertEqual(response.status_code, expect, response.text)
+        return response.json()
+
+    def test_two_levels_from_one_preview_match_their_previews(self):
+        source = self.intake()
+        source_path = Path(self.state["token_registry"][source["source_token"]]["path"])
+        source_sha = sha256(source_path)
+        preview = self.preview(source)
+        session = self.state["color_level_preview_sessions"][preview["preview_id"]]
+        expected = {}
+        for level in ("medium", "strong"):
+            with Image.open(session["levels"][level]["path"]) as opened:
+                expected[level] = np.asarray(opened.convert("RGB"))
+        batch = self.wait_batch(self.multi(source, preview, ["medium", "strong"])["data"]["batch_id"])
+        self.assertEqual((batch["completed_count"], batch["failed_count"]), (2, 0))
+        self.assertEqual((batch["confirmed_count"], batch["pending_review_count"]), (2, 0))
+        self.assertTrue(batch["level_pick"]["multi_level"])
+        self.assertEqual(batch["level_pick"]["levels"], ["medium", "strong"])
+        outputs = []
+        for item in batch["items"]:
+            record = self.registry[item["task"]["task_id"]]
+            level = record["level_pick"]["level"]
+            output = Path(item["ui"]["output_path"])
+            outputs.append(output)
+            with Image.open(output) as opened:
+                self.assertTrue(np.array_equal(np.asarray(opened.convert("RGB")), expected[level]), level)
+            self.assertTrue(record["delivery_eligible"])
+            self.assertEqual(record["result_review_status"], "confirmed")
+        self.assertEqual(len(set(outputs)), 2)
+        self.assertEqual(sha256(source_path), source_sha)
+        # the preview is consumed; the single-level run cannot reuse it afterwards
+        self.assertEqual(self.run_level(preview, "light").json()["detail"]["code"], "LEVEL_PREVIEW_ALREADY_USED")
+
+    def test_multi_level_requests_are_validated(self):
+        source = self.intake()
+        other = self.intake(cast_scene(size=(200, 150)), name="other.png")
+        preview = self.preview(source)
+        for levels, tokens, code in (
+            (["medium"], None, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            (["medium", "medium"], None, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            (["original", "strong"], None, "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            (["medium", "strong"], [source["source_token"], other["source_token"]], "COLOR_BATCH_LEVEL_PICK_INVALID"),
+            (["medium", "strong"], [other["source_token"]], "COLOR_BATCH_LEVEL_PICK_INVALID"),
+        ):
+            with self.subTest(levels=levels, tokens=bool(tokens)):
+                self.assertEqual(self.multi(source, preview, levels, expect=400, tokens=tokens)["detail"]["code"], code)
+        self.assertEqual(self.color_dir_files(), [])
+        self.assertEqual(len(self.state["color_batch_registry"]), 0)
+
+
 for _name in [name for name in vars(LevelPickApiTests) if name.startswith("test_")]:
     setattr(NeutralPointApiTests, _name, None)  # not callable: the loader skips it
     setattr(BatchLevelPickApiTests, _name, None)
+    setattr(MultiLevelResultsApiTests, _name, None)
+for _name in [name for name in vars(BatchLevelPickApiTests) if name.startswith("test_")]:
+    setattr(MultiLevelResultsApiTests, _name, None)
 
 
 if __name__ == "__main__":

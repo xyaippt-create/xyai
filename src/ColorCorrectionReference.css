@@ -277,6 +277,14 @@
 }
 .hdde-neutral-tools small { font-size: 12px; color: var(--text-secondary); }
 
+/* S77: what auto colour does, shown only in that mode */
+.hdde-color-mode-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 /* S75: the representative of a level-pick group */
 .hdde-color-representative {
   align-self: center;

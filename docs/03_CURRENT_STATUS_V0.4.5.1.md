@@ -189,6 +189,9 @@ S69_B_COLOR_LEVEL_PICK_DEHAZE: BLOCKED（2026-11-14；v3 候选：暗通道判�
 S71_DEHAZE_POC: BLOCKED，PAUSED_BY_OWNER（负责人 2026-11-14 裁定暂停除雾；2026-11-14；隔离 PoC，暗通道先验加导向滤波，合成雾样本。验证集识别 14/14，但强档去雾中位数 41.5%（要求 ≥50%）、2 例变差；对照图误判 12/24（设计图 9/13）；4K 单档 3.58 s（要求 ≤3 s）；光晕、安全、Alpha、确定性通过；复核图见强档明显偏色（雾色估错）。证据 artifacts/s71_dehaze_poc/；未接入软件）
 S74_COLOR_EYEDROPPER: PASS_AND_FROZEN（2026-11-18 负责人签字；挑档校色“点选白点”：用户点一处白或灰，四档按该点校正；签收时改为有白点建议“中”，“强”可手选。门禁 2 负责人裁定排除 S03（原图无白区），48 例强档中位数 82.2%、0 例变差；门禁 1 无点回归 101 张逐字节一致；门禁 3–7 通过。未做正式部署、未提交。证据 artifacts/s74_neutral_point/）
 S75_COLOR_BATCH_LEVEL_PICK: BLOCKED，WAITING_REAL_GROUP_SAMPLES（2026-11-18；挑档校色可选 2–20 张，代表图选档（可点白点）后整组按同一校正量处理，代表图人工确认、其余处理中心待复核。门禁 1–5 通过：合成组 42 张“中”中位数 61.8%、“强”77.8%，0 张变差；单张失败不连累；4K 每张 +0.14 s。门禁 6 缺真实同批图（RefSeries 为空）。代码在工作区，未部署、未提交。证据 artifacts/s75_batch_level_pick/）
+S76_COLOR_BLACK_POINT: BLOCKED，DEHAZE_LINE_STOPPED_BY_OWNER（负责人 2026-11-18 裁定停下去灰线，不再开展去灰、除雾或黑点新变体；2026-11-18；用户点黑点压暗发灰暗部。合成发灰 8 张“中”档去灰中位数 25.6%（要求 ≥50%）、2 张变差，“强”21.9%；S07 剪切增长、亮部 ΔE 2.27。原因：部分图无真黑；灰雾同时压暗亮部，只校黑点还原不了。未调参，候选归档 artifacts/s76_black_point/，正式代码已撤回至 18d5ac6。去灰线连续第三次 BLOCKED（S69-B、S71、S76））
+S77_COLOR_DEFAULT_MODE: PASS_AND_FROZEN（2026-11-18 负责人签字；颜色校正默认进入挑档校色，按钮顺序改为挑档｜参考图｜自动，自动校色模式提示多数图会保留原图，副标题改为不只描述自动校色；三种模式处理逻辑不变。前端测试 406 项通过，隔离浏览器实测通过。未部署、未提交）
+S78_COLOR_MULTI_LEVEL_RESULTS: PASS_AND_FROZEN（2026-11-18 负责人签字；单张挑档可勾选 2–3 档，一组预览一次生成多张成品，每档与预览逐像素一致并已确认，结果进处理中心；只选一档不变，整组仍一组一档，文件名规则不改。接口 93、前端 407 项测试通过，4K 两档 13.64 s 对两次单档 14.26 s，隔离浏览器实测通过。未部署、未提交）
 LEVEL_PICK_VERSION: hdde.color-level-pick.v2（S69-A 冻结）
 LEVEL_PICK_CONTRACT: docs/contracts/HDDE_COLOR_LEVEL_PICK_SUPPLEMENT_V1.md
 ```

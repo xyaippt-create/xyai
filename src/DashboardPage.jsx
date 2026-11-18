@@ -3514,7 +3514,9 @@ export default function DashboardPage({
               <div>
                 <p className="hdde-eyebrow">批量颜色校正</p>
                 <h2 id="color-batch-summary-title">{batchStatusLabel}</h2>
-                <p>{activeColorBatch.level_pick
+                <p>{activeColorBatch.level_pick?.multi_level
+                  ? `同一张图按所选“${activeColorBatch.level_pick.label}”档各生成一张成品，均与预览一致并已确认。`
+                  : activeColorBatch.level_pick
                   ? `按代表图选定的“${activeColorBatch.level_pick.label}”档，整组按同样的校正量处理；单张失败不会中断其他图片，除代表图外的结果确认后才能交付。`
                   : "每张图片独立分析与处理；单张失败不会中断其他图片。"}</p>
               </div>

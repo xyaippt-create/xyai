@@ -9,9 +9,12 @@ const display = fs.readFileSync(new URL("../../src/productDisplay.js", import.me
 const app = fs.readFileSync(new URL("../../src/App.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../../src/ColorCorrectionReference.css", import.meta.url), "utf8");
 
-test("level pick is a third mode next to automatic and reference, automatic stays default", () => {
-  assert.match(page, /useState\("automatic"\)/);
-  assert.match(page, /自动校色<\/button>[\s\S]*参考图校色<\/button>[\s\S]*挑档校色<\/button>/);
+test("level pick is the default and first mode, then reference and automatic (S77)", () => {
+  assert.match(page, /useState\("level"\)/);
+  assert.match(page, /挑档校色<\/button>[\s\S]*参考图校色<\/button>[\s\S]*自动校色<\/button>/);
+  assert.match(page, /colorMode === "automatic" \? <p className="hdde-color-mode-note" data-testid="color-auto-note">只在把握很大时才修改，多数图片会保留原图；想自己决定强度，请用挑档校色。<\/p> : null/);
+  assert.match(page, /description="修正偏黄、偏蓝等偏色，只调整现有像素，不改变构图和内容。"/);
+  assert.match(styles, /\.hdde-color-mode-note \{[\s\S]*font-size: 12px/);
   assert.match(page, /const levelMode = colorMode === "level"/);
   assert.match(page, /multiple=\{!singleSourceMode\}/);
   assert.match(page, /挑档校色每次处理一张图片/);
@@ -116,4 +119,18 @@ test("S75 processing centre names group level-pick batches and rows correctly", 
   assert.match(row, /mode: task\.operation_mode \|\| PROCESSING_MODE_COLOR_CORRECTION/);
   assert.match(dashboard, /normalized === "LEVEL_PICK_COLOR_CORRECTION"\) return \{ label: "挑档校色"/);
   assert.match(dashboard, /activeColorBatch\.level_pick\s*\?\s*`按代表图选定的“\$\{activeColorBatch\.level_pick\.label\}”档/);
+});
+
+test("S78 single-image level pick checks several levels and makes them as one batch", () => {
+  assert.match(page, /const multiLevelMode = levelMode && !groupMode;/);
+  assert.match(page, /type=\{multiChosen \? "checkbox" : "radio"\}/);
+  assert.match(page, /if \(level === "original"\) next = \["original"\];/);
+  const run = page.slice(page.indexOf("const runLevelPick"), page.indexOf("const performResultAction"));
+  assert.match(run, /if \(multiLevels\.length > 1\)/);
+  assert.match(run, /level_pick: \{ preview_id: levelPreview\.preview_id, levels: multiLevels \}/);
+  assert.match(run, /onOpenProcessing\(multiPayload\.data\.batch_id\)/);
+  assert.match(page, /生成所选 \$\{multiLevels\.length\} 档/);
+  assert.match(page, /multiChosen=\{multiLevelMode \? chosenLevels : null\}/);
+  const dashboard = fs.readFileSync(new URL("../../src/DashboardPage.jsx", import.meta.url), "utf8");
+  assert.match(dashboard, /activeColorBatch\.level_pick\?\.multi_level\s*\?\s*`同一张图按所选/);
 });

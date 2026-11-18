@@ -44,7 +44,7 @@ export function referenceLevelSummary(level) {
     : "已选择原图，未生成新文件。";
 }
 
-export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false, pointTools = null }) {
+export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false, pointTools = null, multiChosen = null }) {
   const measurement = preview?.measurement || {};
   const activeLevel = preview?.levels?.find((item) => item.level === chosen);
   const pointActive = measurement.neutral_source === "USER_POINT";
@@ -64,9 +64,9 @@ export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled =
       <img src={apiUrl(activeLevel.preview_url)} alt={`${activeLevel.label}档当前效果`} />
       <span>{activeLevel.label}档 · 点击放大</span>
     </button> : null}
-    <div className="hdde-level-grid" role="radiogroup" aria-label="选择校色档位">
+    <div className="hdde-level-grid" role={multiChosen ? "group" : "radiogroup"} aria-label="选择校色档位">
       {(preview?.levels || []).map((item) => {
-        const selected = chosen === item.level;
+        const selected = multiChosen ? multiChosen.includes(item.level) : chosen === item.level;
         const recommended = measurement.recommended_level === item.level;
         return <figure key={item.level} className="hdde-level-option" data-selected={selected ? "true" : "false"} data-testid={`color-level-${item.level}`}>
           <button type="button" className="hdde-level-zoom-trigger" onClick={() => onZoom(item)} aria-label={`放大查看${item.label}`}>
@@ -74,7 +74,7 @@ export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled =
           </button>
           <figcaption>
             <label>
-              <input type="radio" name="color-level" value={item.level} checked={selected} disabled={disabled || !item.selectable} onChange={() => onChoose(item.level)} />
+              <input type={multiChosen ? "checkbox" : "radio"} name="color-level" value={item.level} checked={selected} disabled={disabled || !item.selectable} onChange={() => onChoose(item.level)} />
               <span>{item.label}</span>
               {recommended ? <em>建议</em> : null}
             </label>
@@ -257,7 +257,8 @@ export default function ColorCorrectionPage({
 }) {
   const inputRef = useRef(null);
   const referenceInputRef = useRef(null);
-  const [colorMode, setColorMode] = useState("automatic");
+  // S77: level pick is the default; auto colour keeps most images unchanged (S67, S69).
+  const [colorMode, setColorMode] = useState("level");
   const [referenceInput, setReferenceInput] = useState(null);
   const referenceMode = colorMode === "reference";
   const levelMode = colorMode === "level";
@@ -266,6 +267,8 @@ export default function ColorCorrectionPage({
   const pickMode = levelMode || referenceMode;
   const [levelPreview, setLevelPreview] = useState(null);
   const [chosenLevel, setChosenLevel] = useState("");
+  // S78: single-image level pick may check several levels; "original" stays on its own.
+  const [chosenLevels, setChosenLevels] = useState([]);
   const [zoomItem, setZoomItem] = useState(null);
   const [neutralPoint, setNeutralPoint] = useState(null);
   const [neutralPickerOpen, setNeutralPickerOpen] = useState(false);
@@ -290,6 +293,23 @@ export default function ColorCorrectionPage({
   const [representativeId, setRepresentativeId] = useState("");
   const groupMode = levelMode && selectedItems.length > 1;
   const representativeItem = levelMode ? (selectedItems.find((item) => item.id === representativeId) || selectedItems[0] || null) : null;
+  const multiLevelMode = levelMode && !groupMode;
+  const multiLevels = multiLevelMode ? ["light", "medium", "strong"].filter((level) => chosenLevels.includes(level)) : [];
+  const chooseLevel = (level) => {
+    if (!multiLevelMode) {
+      setChosenLevel(level);
+      return;
+    }
+    setChosenLevels((current) => {
+      let next;
+      if (level === "original") next = ["original"];
+      else if (current.includes(level)) next = current.filter((item) => item !== level);
+      else next = [...current.filter((item) => item !== "original"), level];
+      if (!next.length) next = current;
+      setChosenLevel(next.includes(level) ? level : next[next.length - 1]);
+      return next;
+    });
+  };
 
   useEffect(() => {
     onTaskContextChange?.(null);
@@ -439,6 +459,7 @@ export default function ColorCorrectionPage({
     setNotice("");
     setLevelPreview(null);
     setChosenLevel("");
+    setChosenLevels([]);
     setZoomItem(null);
     setNeutralPoint(null);
     setNeutralPickerOpen(false);
@@ -631,6 +652,7 @@ export default function ColorCorrectionPage({
       });
       setLevelPreview(payload.data);
       setChosenLevel(payload.data?.measurement?.recommended_level || "original");
+      setChosenLevels([payload.data?.measurement?.recommended_level || "original"]);
       setNeutralPoint(point);
       setZoomItem(null);
       setNotice("");
@@ -666,6 +688,7 @@ export default function ColorCorrectionPage({
       });
       setLevelPreview(payload.data);
       setChosenLevel(payload.data?.measurement?.recommended_level || "original");
+      setChosenLevels([payload.data?.measurement?.recommended_level || "original"]);
       setNotice("");
     } catch (reason) {
       setNotice("");
@@ -682,6 +705,25 @@ export default function ColorCorrectionPage({
     setNotice("");
     onTaskContextChange?.(null);
     try {
+      if (multiLevels.length > 1) {
+        const multiBody = {
+          source_tokens: [representativeItem.data.source_token],
+          level_pick: { preview_id: levelPreview.preview_id, levels: multiLevels },
+        };
+        if (currentTaskOutputRoot) multiBody.current_task_output_root = currentTaskOutputRoot;
+        const multiPayload = await requestJson("/api/color-correction/batches", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(multiBody),
+        });
+        setLevelPreview(null);
+        setZoomItem(null);
+        setNeutralPoint(null);
+        setBatchData(multiPayload.data);
+        setNotice(`已按所选 ${multiLevels.length} 档生成任务，正在进入处理中心。`);
+        if (multiPayload.data?.batch_id && typeof onOpenProcessing === "function") onOpenProcessing(multiPayload.data.batch_id);
+        return;
+      }
       if (groupMode && chosenLevel !== "original") {
         const batchBody = {
           source_tokens: selectedItems.map((entry) => entry.data.source_token),
@@ -714,6 +756,7 @@ export default function ColorCorrectionPage({
       setNeutralPoint(null);
       if (payload.data?.selected_level === "original") {
         setChosenLevel("");
+        setChosenLevels([]);
         setNotice(payload.data.message || (referenceMode ? referenceLevelSummary("original") : levelPickSummary("original")));
         return;
       }
@@ -881,25 +924,26 @@ export default function ColorCorrectionPage({
   }
 
   return (
-    <section className="hdde-color-page hdde-page-frame hdde-page-stack" aria-label="自动颜色校正">
+    <section className="hdde-color-page hdde-page-frame hdde-page-stack" aria-label="颜色校正">
       <HddePageHeader
         eyebrow="单图与多图处理"
         title="颜色校正"
-        description="自动识别逆光、偏色和暗部问题，只调整现有像素，不改变构图和内容。"
+        description="修正偏黄、偏蓝等偏色，只调整现有像素，不改变构图和内容。"
         meta={<HddeStatusPill tone={capabilities ? "positive" : "neutral"}>{capabilities ? "本地服务已连接" : "正在连接本地服务"}</HddeStatusPill>}
       />
 
       <div className="hdde-color-flow hdde-desktop-columns">
         <div className="hdde-color-intake">
           <div className="hdde-reference-tabs" role="group" aria-label="颜色校正模式">
-            <button type="button" className={colorMode === "automatic" ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={colorMode === "automatic"} disabled={busy} onClick={() => { setColorMode("automatic"); clearResult(); setError(""); }}>自动校色</button>
-            <button type="button" className={referenceMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={referenceMode} disabled={busy} onClick={() => { setColorMode("reference"); clearResult(); setError(""); }}>参考图校色</button>
+            {/* S77: the mode users need most comes first and is the default */}
             <button type="button" className={levelMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={levelMode} disabled={busy} data-testid="color-mode-level" onClick={() => { setColorMode("level"); clearResult(); setError(""); }}>挑档校色</button>
+            <button type="button" className={referenceMode ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={referenceMode} disabled={busy} onClick={() => { setColorMode("reference"); clearResult(); setError(""); }}>参考图校色</button>
+            <button type="button" className={colorMode === "automatic" ? "hdde-primary-action" : "hdde-secondary-action"} aria-pressed={colorMode === "automatic"} disabled={busy} data-testid="color-mode-automatic" onClick={() => { setColorMode("automatic"); clearResult(); setError(""); }}>自动校色</button>
           </div>
 
         <div className="hdde-color-intake-body">
         <section className="hdde-color-card hdde-color-source" aria-label="选择图片">
-          <div className="hdde-color-section-title"><span>1</span><div><h2>{referenceMode ? "目标图片" : "选择图片"}</h2><p>{referenceMode ? "选择一张需要校色的目标图片；不会覆盖原图。" : levelMode ? "选一张，或同一批光线一致的 2–20 张；多张时按代表图选定的档位整组处理，不会覆盖原图。" : "支持一次选择多张 PNG、JPG、JPEG；每张最大 50 MB。"}</p></div>{selectedItems.length ? <strong className="hdde-color-selection-count" data-testid="color-selection-count">{selectedItems.length} 张</strong> : null}</div>
+          <div className="hdde-color-section-title"><span>1</span><div><h2>{referenceMode ? "目标图片" : "选择图片"}</h2><p>{referenceMode ? "选择一张需要校色的目标图片；不会覆盖原图。" : levelMode ? "选一张，或同一批光线一致的 2–20 张；多张时按代表图选定的档位整组处理，不会覆盖原图。" : "支持一次选择多张 PNG、JPG、JPEG；每张最大 50 MB。"}</p>{colorMode === "automatic" ? <p className="hdde-color-mode-note" data-testid="color-auto-note">只在把握很大时才修改，多数图片会保留原图；想自己决定强度，请用挑档校色。</p> : null}</div>{selectedItems.length ? <strong className="hdde-color-selection-count" data-testid="color-selection-count">{selectedItems.length} 张</strong> : null}</div>
           <div
             className={`hdde-color-dropzone${selectedItems.length ? " has-file" : ""}`}
             onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
@@ -989,12 +1033,12 @@ export default function ColorCorrectionPage({
         </section>
       ) : null}
       {pickMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
-        <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>{groupMode ? `代表图：${representativeItem?.data?.display_name || ""}。选定后整组 ${selectedItems.length} 张按同样的校正量处理；除代表图外的结果需在处理中心复核后才能交付。` : "点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。"}</p></div></div>
-        <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy}
+        <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>{groupMode ? `代表图：${representativeItem?.data?.display_name || ""}。选定后整组 ${selectedItems.length} 张按同样的校正量处理；除代表图外的结果需在处理中心复核后才能交付。` : multiLevelMode ? "点击图片可放大查看。可同时勾选几档，一次生成多张成品；选“原图”不会生成新文件。" : "点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。"}</p></div></div>
+        <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={chooseLevel} onZoom={setZoomItem} disabled={busy} multiChosen={multiLevelMode ? chosenLevels : null}
           pointTools={levelMode ? { onOpen: () => { setError(""); setNeutralPickerOpen(true); }, onClear: () => createPointPreview(null) } : null} />
         <div className="hdde-level-actions">
           <button type="button" className="hdde-primary-action" data-testid="color-level-run" disabled={busy || !chosenLevel} onClick={runLevelPick}>
-            {busy ? "正在生成结果…" : chosenLevel === "original" ? (groupMode ? "使用原图（整组都不处理）" : "使用原图（不生成新文件）")
+            {busy ? "正在生成结果…" : multiLevels.length > 1 ? `生成所选 ${multiLevels.length} 档（${multiLevels.map((level) => LEVEL_PICK_LABELS[level]).join("、")}）` : chosenLevel === "original" ? (groupMode ? "使用原图（整组都不处理）" : "使用原图（不生成新文件）")
               : groupMode ? `按“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档处理整组（${selectedItems.length} 张）` : `使用“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档生成结果`}
           </button>
         </div>

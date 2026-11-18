@@ -6025,10 +6025,19 @@ def register_image_compression_routes(
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": f"批量颜色校正请求包含未知字段：{', '.join(unknown)}。"})
         level_pick_request = payload.get("level_pick")
-        if level_pick_request is not None and (not isinstance(level_pick_request, dict) or set(level_pick_request) != {"preview_id", "level"}):
+        # S78: {preview_id, levels} makes several levels of one previewed image; S75 {preview_id, level} a group.
+        multi_level = isinstance(level_pick_request, dict) and set(level_pick_request) == {"preview_id", "levels"}
+        if level_pick_request is not None and not multi_level and (not isinstance(level_pick_request, dict) or set(level_pick_request) != {"preview_id", "level"}):
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "整组挑档需要代表图预览与所选档位。"})
         source_tokens = payload.get("source_tokens")
-        if not isinstance(source_tokens, list) or not 2 <= len(source_tokens) <= 20:
+        if multi_level:
+            requested_levels = level_pick_request.get("levels")
+            if (not isinstance(requested_levels, list) or not 2 <= len(requested_levels) <= len(LEVELS)
+                    or len(set(map(str, requested_levels))) != len(requested_levels) or any(str(item) not in LEVELS for item in requested_levels)):
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "一次生成多档请选择 2 至 3 个不同的档位（轻、中、强）。"})
+            if not isinstance(source_tokens, list) or len(source_tokens) != 1:
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "一次生成多档只适用于单张图片。"})
+        elif not isinstance(source_tokens, list) or not 2 <= len(source_tokens) <= 20:
             raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_REQUEST_INVALID", "message": "批量颜色校正每次需要选择2至20张图片。"})
         normalized_tokens = [str(token or "") for token in source_tokens]
         if len(set(normalized_tokens)) != len(normalized_tokens):
@@ -6038,7 +6047,9 @@ def register_image_compression_routes(
         representative_index = None
         if level_pick_request is not None:
             # S75: one previewed representative decides the level; the whole group gets its correction.
-            level = str(level_pick_request["level"])
+            # S78: or one previewed image gets several of its previewed levels.
+            chosen_levels = [str(item) for item in level_pick_request["levels"]] if multi_level else [str(level_pick_request["level"])]
+            level = chosen_levels[0]
             level_session = color_level_preview_sessions.get(str(level_pick_request["preview_id"]))
             if level_session is None:
                 raise HTTPException(status_code=404, detail={"code": "LEVEL_PREVIEW_NOT_FOUND", "message": "代表图预览已失效（可能服务已重启），请重新生成预览。"})
@@ -6048,10 +6059,10 @@ def register_image_compression_routes(
                 raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_ALREADY_USED", "message": "这组预览已经用过，请重新生成预览。"})
             if level_session.get("reference"):
                 raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "参考图校色暂不支持整组处理。"})
-            if level not in LEVELS:
+            if any(item not in LEVELS for item in chosen_levels):
                 raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "整组处理请选择轻、中或强档；保留原图不需要处理。"})
-            if not level_session["levels"][level]["selectable"]:
-                raise HTTPException(status_code=409, detail={"code": "LEVEL_NOT_SELECTABLE", "message": "该档位在代表图上未通过安全检查，不能选择。"})
+            if not all(level_session["levels"][item]["selectable"] for item in chosen_levels):
+                raise HTTPException(status_code=409, detail={"code": "LEVEL_NOT_SELECTABLE", "message": "所选档位在预览中未通过安全检查，不能选择。"})
             analysis = level_session.get("measurement_cache")
             if not isinstance(analysis, LevelPickAnalysis):
                 raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_NOT_FOUND", "message": "代表图预览已失效，请重新生成预览。"})
@@ -6059,7 +6070,8 @@ def register_image_compression_routes(
             representative_index = next((index for index, source in enumerate(sources)
                                          if Path(str(source["path"])).resolve() == representative_path), None)
             if representative_index is None:
-                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID", "message": "代表图必须是本批图片中的一张。"})
+                raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID",
+                                                             "message": "所选图片与这组预览不是同一张，请重新生成预览。" if multi_level else "代表图必须是本批图片中的一张。"})
             if not representative_path.is_file() or _sha256_file(representative_path) != level_session["source_sha256"]:
                 raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "代表图已变化或不存在，请重新生成预览。"})
         output_root = effective_color_output_root(payload)
@@ -6076,7 +6088,7 @@ def register_image_compression_routes(
                 # what the representative's own task needs to reproduce its preview (S64 contract)
                 "snapshot": {
                     "source_sha256": level_session["source_sha256"],
-                    "levels": {level: {"pixel_sha256": level_session["levels"][level]["pixel_sha256"]}},
+                    "levels": {item: {"pixel_sha256": level_session["levels"][item]["pixel_sha256"]} for item in chosen_levels},
                     "measurement_cache": analysis,
                     "neutral_point": level_session.get("neutral_point"),
                     "reference_sha256": None,
@@ -6084,15 +6096,26 @@ def register_image_compression_routes(
             }
             level_session["used_by_task_id"] = batch_id
             release_used_level_preview(level_session)
-        records = [
-            create_color_task_record(
-                source, output_root, batch_id=batch_id, batch_index=index,
-                **({"level_pick": {**level_pick_fields, "batch": {"batch_id": batch_id, "representative": index - 1 == representative_index,
-                                                                   "representative_name": str(sources[representative_index].get("filename") or "")}}}
-                   if level_pick_fields is not None else {}),
-            )
-            for index, source in enumerate(sources, start=1)
-        ]
+        if multi_level:
+            # every level of the one previewed image was seen by the user: each reproduces its preview
+            records = [
+                create_color_task_record(
+                    sources[0], output_root, batch_id=batch_id, batch_index=index,
+                    level_pick={**level_pick_fields, "level": item, "batch": {"batch_id": batch_id, "representative": True, "multi_level": True,
+                                                                             "representative_name": str(sources[0].get("filename") or "")}},
+                )
+                for index, item in enumerate(chosen_levels, start=1)
+            ]
+        else:
+            records = [
+                create_color_task_record(
+                    source, output_root, batch_id=batch_id, batch_index=index,
+                    **({"level_pick": {**level_pick_fields, "batch": {"batch_id": batch_id, "representative": index - 1 == representative_index,
+                                                                       "representative_name": str(sources[representative_index].get("filename") or "")}}}
+                       if level_pick_fields is not None else {}),
+                )
+                for index, source in enumerate(sources, start=1)
+            ]
         batch = {
             "record_kind": "batch",
             **batch_operation,
@@ -6110,7 +6133,9 @@ def register_image_compression_routes(
             "task_ids": [record["task_id"] for record in records],
             "processing_stage": "batch_queue",
             "error_context": {},
-            **({"level_pick": {"level": level, "label": LEVEL_LABELS[level], "representative_task_id": records[representative_index]["task_id"]}}
+            **({"level_pick": {"levels": chosen_levels, "label": "、".join(LEVEL_LABELS[item] for item in chosen_levels), "multi_level": True}}
+               if level_session is not None and multi_level else
+               {"level_pick": {"level": level, "label": LEVEL_LABELS[level], "representative_task_id": records[representative_index]["task_id"]}}
                if level_session is not None else {}),
             "task_context": {
                 **batch_operation,
