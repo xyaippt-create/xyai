@@ -187,6 +187,7 @@ S69_F_COLOR_KEEP_ORIGINAL_DISPLAY: PASS（2026-11-14；仅前端：自动校色�
 S69_G_LEVEL_PICK_NOTICE: PASS（2026-11-14；挑档“可能是有意的设计色调”提醒只在测到偏色（偏黄、偏蓝、偏绿或品红）时显示；黑白、暗调图不再误显示；只改后端 public_level_measurement 一处，接口字段不变；桌面实测 2 张通过；未部署）
 S69_B_COLOR_LEVEL_PICK_DEHAZE: BLOCKED（2026-11-14；v3 候选：暗通道判断灰雾、自动色阶式还原。灰雾 A 识别 8/11、去灰中位数 83%；灰雾 B 识别 10/11、中位数 40.6%，但 S01 花卉变差且强档被安全门禁拦下。门禁 1、2、5 未过；正常图零误判、偏色不退化、参考图 99/99 一致、耗时不增。候选归档于 artifacts/s69b_dehaze_candidate/，正式代码仍为 v2）
 S71_DEHAZE_POC: BLOCKED，PAUSED_BY_OWNER（负责人 2026-11-14 裁定暂停除雾；2026-11-14；隔离 PoC，暗通道先验加导向滤波，合成雾样本。验证集识别 14/14，但强档去雾中位数 41.5%（要求 ≥50%）、2 例变差；对照图误判 12/24（设计图 9/13）；4K 单档 3.58 s（要求 ≤3 s）；光晕、安全、Alpha、确定性通过；复核图见强档明显偏色（雾色估错）。证据 artifacts/s71_dehaze_poc/；未接入软件）
+S74_COLOR_EYEDROPPER: PASS_AND_FROZEN（2026-11-18 负责人签字；挑档校色“点选白点”：用户点一处白或灰，四档按该点校正；签收时改为有白点建议“中”，“强”可手选。门禁 2 负责人裁定排除 S03（原图无白区），48 例强档中位数 82.2%、0 例变差；门禁 1 无点回归 101 张逐字节一致；门禁 3–7 通过。未做正式部署、未提交。证据 artifacts/s74_neutral_point/）
 LEVEL_PICK_VERSION: hdde.color-level-pick.v2（S69-A 冻结）
 LEVEL_PICK_CONTRACT: docs/contracts/HDDE_COLOR_LEVEL_PICK_SUPPLEMENT_V1.md
 ```

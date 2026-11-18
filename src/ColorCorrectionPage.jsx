@@ -44,14 +44,20 @@ export function referenceLevelSummary(level) {
     : "已选择原图，未生成新文件。";
 }
 
-export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false }) {
+export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled = false, pointTools = null }) {
   const measurement = preview?.measurement || {};
   const activeLevel = preview?.levels?.find((item) => item.level === chosen);
+  const pointActive = measurement.neutral_source === "USER_POINT";
   return <div className="hdde-level-pick" data-testid="color-level-options">
     <div className="hdde-level-measure" role="status">
       <strong>{measurement.summary || "已完成测量"}</strong>
       <span>系统建议：{measurement.recommended_label || "原图"}{measurement.measured_offset ? ` · 偏色量 ${Number(measurement.measured_offset).toFixed(1)}` : ""}</span>
       {measurement.notice ? <p>{measurement.notice}</p> : null}
+      {pointTools ? <div className="hdde-neutral-tools">
+        <button type="button" className="hdde-secondary-action" data-testid="color-neutral-pick" disabled={disabled} onClick={pointTools.onOpen}>{pointActive ? "重新点选白点" : "点选白点"}</button>
+        {pointActive ? <button type="button" className="hdde-tertiary-action" data-testid="color-neutral-clear" disabled={disabled} onClick={pointTools.onClear}>取消白点，改回自动判断</button>
+          : <small>自动判断不准时，在原图上点一下本来应该是白或灰的地方，按这一点校正。</small>}
+      </div> : null}
     </div>
     {activeLevel ? <button type="button" className="hdde-level-active-preview" onClick={() => onZoom(activeLevel)}
       aria-label={`放大当前${activeLevel.label}档预览`}>
@@ -76,6 +82,36 @@ export function LevelPickOptions({ preview, chosen, onChoose, onZoom, disabled =
           </figcaption>
         </figure>;
       })}
+    </div>
+  </div>;
+}
+
+// S74: the click position as 0..1 of the displayed image (the picker shows it unscaled in aspect,
+// so the element box is the image itself).
+export function neutralPointFromClick(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const clamp = (value) => Math.min(1, Math.max(0, value));
+  return {
+    x: Number(clamp((event.clientX - rect.left) / rect.width).toFixed(5)),
+    y: Number(clamp((event.clientY - rect.top) / rect.height).toFixed(5)),
+  };
+}
+
+export function NeutralPointPicker({ src, point, onPick, onCancel }) {
+  return <div className="hdde-level-zoom hdde-neutral-picker" role="dialog" aria-modal="true" aria-label="点选白点" data-testid="color-neutral-picker">
+    <div className="hdde-level-zoom-bar">
+      <strong>点一下画面里本来应该是白色或灰色的地方，例如白墙、白纸、白衣服或灰色物体</strong>
+      <button type="button" className="hdde-secondary-action" onClick={onCancel}>取消</button>
+    </div>
+    <div className="hdde-neutral-picker-body">
+      <span className="hdde-neutral-picker-frame">
+        <img src={src} alt="在原图上点选白点" data-testid="color-neutral-picker-image" onClick={(event) => {
+          const picked = neutralPointFromClick(event);
+          if (picked) onPick(picked);
+        }} />
+        {point ? <i className="hdde-neutral-marker" aria-hidden="true" style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }} /> : null}
+      </span>
     </div>
   </div>;
 }
@@ -231,6 +267,8 @@ export default function ColorCorrectionPage({
   const [levelPreview, setLevelPreview] = useState(null);
   const [chosenLevel, setChosenLevel] = useState("");
   const [zoomItem, setZoomItem] = useState(null);
+  const [neutralPoint, setNeutralPoint] = useState(null);
+  const [neutralPickerOpen, setNeutralPickerOpen] = useState(false);
   const consumedSourceRequestRef = useRef("");
   const handledContinueResultRef = useRef("");
   const continueIntakeRef = useRef({ resultId: "", promise: null });
@@ -398,6 +436,8 @@ export default function ColorCorrectionPage({
     setLevelPreview(null);
     setChosenLevel("");
     setZoomItem(null);
+    setNeutralPoint(null);
+    setNeutralPickerOpen(false);
   };
 
   const intakeFiles = async (files) => {
@@ -571,6 +611,33 @@ export default function ColorCorrectionPage({
     }
   };
 
+  // S74: re-render the four levels around a picked white. A refused point keeps the current preview.
+  const createPointPreview = async (point) => {
+    const item = selectedItems.find((entry) => entry.data?.source_token);
+    if (!item || referenceMode) return;
+    setNeutralPickerOpen(false);
+    setBusy(true);
+    setError("");
+    setNotice(point ? "正在按你点选的白点重新生成四档预览…" : "正在改回自动判断，重新生成四档预览…");
+    try {
+      const payload = await requestJson("/api/color-correction/level-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(point ? { source_token: item.data.source_token, neutral_point: point } : { source_token: item.data.source_token }),
+      });
+      setLevelPreview(payload.data);
+      setChosenLevel(payload.data?.measurement?.recommended_level || "original");
+      setNeutralPoint(point);
+      setZoomItem(null);
+      setNotice("");
+    } catch (reason) {
+      setNotice("");
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const createLevelPreview = async () => {
     const item = selectedItems.find((entry) => entry.data?.source_token);
     if (!item || selectedItems.length !== 1) {
@@ -621,6 +688,7 @@ export default function ColorCorrectionPage({
       // One preview yields at most one Result; a new choice needs a new preview.
       setLevelPreview(null);
       setZoomItem(null);
+      setNeutralPoint(null);
       if (payload.data?.selected_level === "original") {
         setChosenLevel("");
         setNotice(payload.data.message || (referenceMode ? referenceLevelSummary("original") : levelPickSummary("original")));
@@ -896,7 +964,8 @@ export default function ColorCorrectionPage({
       ) : null}
       {pickMode && levelPreview && !completed ? <section className="hdde-color-card hdde-color-level-card" aria-label="选择校色档位">
         <div className="hdde-color-section-title"><span>3</span><div><h2>选择一档</h2><p>点击图片可放大查看。选定后才会生成正式结果；选“原图”不会生成新文件。</p></div></div>
-        <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy} />
+        <LevelPickOptions preview={levelPreview} chosen={chosenLevel} onChoose={setChosenLevel} onZoom={setZoomItem} disabled={busy}
+          pointTools={levelMode ? { onOpen: () => { setError(""); setNeutralPickerOpen(true); }, onClear: () => createPointPreview(null) } : null} />
         <div className="hdde-level-actions">
           <button type="button" className="hdde-primary-action" data-testid="color-level-run" disabled={busy || !chosenLevel} onClick={runLevelPick}>
             {busy ? "正在生成结果…" : chosenLevel === "original" ? "使用原图（不生成新文件）" : `使用“${LEVEL_PICK_LABELS[chosenLevel] || ""}”档生成结果`}
@@ -908,6 +977,12 @@ export default function ColorCorrectionPage({
         <div className="hdde-level-zoom-bar"><strong>{zoomItem.label}</strong><button type="button" className="hdde-secondary-action" onClick={() => setZoomItem(null)}>关闭</button></div>
         <div className="hdde-level-zoom-body"><img src={apiUrl(zoomItem.preview_url)} alt={`${zoomItem.label}档原尺寸`} /></div>
       </div> : null}
+
+      {neutralPickerOpen && levelMode && levelPreview ? <NeutralPointPicker
+        src={apiUrl(levelPreview.levels?.find((item) => item.level === "original")?.preview_url)}
+        point={neutralPoint}
+        onPick={(point) => createPointPreview(point)}
+        onCancel={() => setNeutralPickerOpen(false)} /> : null}
 
       {completed ? <>
         <section className="hdde-color-card hdde-color-result" aria-label="校正结果">

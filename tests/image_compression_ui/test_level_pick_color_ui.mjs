@@ -66,3 +66,27 @@ test("result page treats level pick as colour correction and still offers delive
   assert.match(display, /LEVEL_PICK_COLOR_CORRECTION"\) return "挑档校色"/);
   assert.match(app, /"LEVEL_PICK_COLOR_CORRECTION", "REFERENCE_LEVEL_PICK_COLOR_CORRECTION", "color_correction"\]\.includes\(taskContext\?\.mode\)/);
 });
+
+test("S74 white point: picker only in level mode, sends neutral_point, keeps preview on refusal", () => {
+  assert.match(page, /pointTools=\{levelMode \? \{/);
+  assert.match(page, /neutral_point: point/);
+  assert.match(page, /点选白点/);
+  assert.match(page, /取消白点，改回自动判断/);
+  const pointPreview = page.slice(page.indexOf("const createPointPreview"), page.indexOf("const createLevelPreview"));
+  assert.match(pointPreview, /if \(!item \|\| referenceMode\) return;/);
+  assert.doesNotMatch(pointPreview, /clearResult\(\)|setLevelPreview\(null\)/);
+  assert.match(pointPreview, /setError\(reason\.message\)/);
+  assert.match(page, /neutralPickerOpen && levelMode && levelPreview/);
+  assert.match(styles, /\.hdde-neutral-picker-frame img[\s\S]*cursor: crosshair/);
+});
+
+test("S74 click position maps to 0..1 of the displayed image and is clamped", () => {
+  const start = page.indexOf("export function neutralPointFromClick");
+  const end = page.indexOf("export function NeutralPointPicker");
+  const source = page.slice(start, end).replace("export function", "function");
+  const pick = vm.runInNewContext(`${source}; neutralPointFromClick`);
+  const target = { getBoundingClientRect: () => ({ left: 100, top: 50, width: 400, height: 200 }) };
+  assert.deepEqual({ ...pick({ currentTarget: target, clientX: 300, clientY: 100 }) }, { x: 0.5, y: 0.25 });
+  assert.deepEqual({ ...pick({ currentTarget: target, clientX: 900, clientY: 0 }) }, { x: 1, y: 0 });
+  assert.equal(pick({ currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }) }, clientX: 1, clientY: 1 }), null);
+});

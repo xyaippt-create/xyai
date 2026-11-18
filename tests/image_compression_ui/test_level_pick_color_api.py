@@ -408,5 +408,133 @@ class LevelPickApiTests(unittest.TestCase):
                 self.assertIn(word, task["failure_reason"])
                 self.assertNotIn("FORMAL_COLOR", task["failure_reason"])
 
+
+# S74: user-picked white point. In cast_scene() (240 x 180) the ramp at x=0.5, y=0.3 is a grey
+# under the cast, the red block sits at (50, 40), the deep shadow at (25, 160).
+GREY_POINT = {"x": 0.5, "y": 0.3}
+RED_POINT = {"x": 50 / 240, "y": 40 / 180}
+SHADOW_POINT = {"x": 25 / 240, "y": 160 / 180}
+
+
+def point_chroma(pixels: np.ndarray, point: dict) -> float:
+    from engine.color_correction.level_pick import _lab
+
+    h, w = pixels.shape[:2]
+    x, y = int(point["x"] * w), int(point["y"] * h)
+    lab = _lab(pixels[y - 2:y + 3, x - 2:x + 3, :3]).reshape(-1, 3)
+    return float(np.hypot(np.median(lab[:, 1]), np.median(lab[:, 2])))
+
+
+class NeutralPointAlgorithmTests(unittest.TestCase):
+    def test_strong_level_makes_the_picked_point_neutral(self):
+        pixels = cast_scene()
+        analysis = analyze_level_pick(pixels, GREY_POINT)
+        self.assertEqual(analysis.recommended_level, "medium")
+        self.assertEqual(analysis.intent_hints, [])
+        record = analysis.to_record()
+        self.assertEqual(record["neutral_source"], "USER_POINT")
+        self.assertGreater(point_chroma(pixels, GREY_POINT), 8.0)
+        previous = point_chroma(pixels, GREY_POINT)
+        for level in ("light", "medium", "strong"):
+            candidate = render_level(pixels, analysis, level)
+            self.assertTrue(level_safety(pixels, candidate, analysis)["passed"], level)
+            now = point_chroma(candidate, GREY_POINT)
+            self.assertLess(now, previous, level)
+            previous = now
+        self.assertLessEqual(previous, 2.0)
+
+    def test_measured_path_is_untouched_without_a_point(self):
+        pixels = cast_scene()
+        measured = analyze_level_pick(pixels)
+        self.assertNotIn("neutral_source", measured.to_record())
+        self.assertNotIn("user_point", measured.to_record())
+        self.assertTrue(np.array_equal(render_level(pixels, measured, "strong"), render_level(pixels, analyze_level_pick(pixels, None), "strong")))
+
+    def test_unusable_points_are_refused_with_a_reason(self):
+        from engine.color_correction.level_pick import NeutralPointError
+
+        cases = (
+            (cast_scene(), RED_POINT, "NEUTRAL_POINT_TOO_COLOURFUL"),
+            (cast_scene(), SHADOW_POINT, "NEUTRAL_POINT_TOO_DARK"),
+            (np.full((120, 120, 3), 255, np.uint8), {"x": 0.5, "y": 0.5}, "NEUTRAL_POINT_CLIPPED"),
+            (cast_scene(alpha=True), {"x": 10 / 240, "y": 0.5}, "NEUTRAL_POINT_TRANSPARENT"),
+            (cast_scene(), {"x": 1.5, "y": 0.5}, "NEUTRAL_POINT_INVALID"),
+            (cast_scene(), {"x": "a", "y": 0.5}, "NEUTRAL_POINT_INVALID"),
+        )
+        for pixels, point, code in cases:
+            with self.subTest(code=code, point=point):
+                with self.assertRaises(NeutralPointError) as caught:
+                    analyze_level_pick(pixels, point)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_edge_points_alpha_and_determinism(self):
+        from engine.color_correction.level_pick import NeutralPointError
+
+        pixels = cast_scene(alpha=True)
+        for point in ({"x": 1.0, "y": 1.0}, {"x": 0.999, "y": 0.0}, {"x": 0.0, "y": 0.0}):
+            try:  # sampling stays inside the image: a usable point or a reasoned refusal, never a crash
+                analyze_level_pick(pixels, point)
+            except NeutralPointError as exc:
+                self.assertTrue(exc.code.startswith("NEUTRAL_POINT_"))
+        analysis = analyze_level_pick(pixels, GREY_POINT)
+        first = render_level(pixels, analysis, "strong")
+        second = render_level(pixels, analyze_level_pick(pixels, GREY_POINT), "strong")
+        self.assertTrue(np.array_equal(first, second))
+        self.assertTrue(np.array_equal(first[..., 3], pixels[..., 3]))
+        hidden = pixels[..., 3] == 0
+        self.assertTrue(np.array_equal(first[hidden], pixels[hidden]))
+
+
+class NeutralPointApiTests(LevelPickApiTests):
+    """Reuses the API fixtures; the inherited API tests are hidden below so they run once."""
+
+    def point_preview(self, source, point, expect=200):
+        response = self.client.post("/api/color-correction/level-preview", json={"source_token": source["source_token"], "neutral_point": point})
+        self.assertEqual(response.status_code, expect, response.text)
+        return response.json()
+
+    def test_point_preview_and_result_follow_the_picked_white(self):
+        data = self.point_preview(self.intake(), GREY_POINT)["data"]
+        measurement = data["measurement"]
+        self.assertIn("按你点选的位置校正", measurement["summary"])
+        self.assertIn("偏黄", measurement["summary"])
+        self.assertEqual(measurement["recommended_level"], "medium")
+        self.assertEqual(measurement["neutral_source"], "USER_POINT")
+        self.assertTrue(all(item["selectable"] for item in data["levels"]))
+        session = self.state["color_level_preview_sessions"][data["preview_id"]]
+        with Image.open(session["levels"]["strong"]["path"]) as opened:
+            preview_pixels = np.asarray(opened.convert("RGB"))
+        self.assertLessEqual(point_chroma(preview_pixels, GREY_POINT), 2.0)
+        response = self.run_level(data, "strong")
+        self.assertEqual(response.status_code, 200, response.text)
+        output = Path(response.json()["data"]["ui"]["output_path"])
+        with Image.open(output) as opened:
+            self.assertTrue(np.array_equal(np.asarray(opened.convert("RGB")), preview_pixels))
+        record = self.registry[response.json()["data"]["task"]["task_id"]]
+        self.assertEqual(record["level_pick"]["analysis"]["neutral_source"], "USER_POINT")
+
+    def test_point_survives_a_dropped_measurement_cache(self):
+        data = self.point_preview(self.intake(), GREY_POINT)["data"]
+        self.state["color_level_preview_sessions"][data["preview_id"]].pop("measurement_cache")
+        response = self.run_level(data, "medium")
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_point_requests_are_validated(self):
+        source = self.intake()
+        refused = self.point_preview(source, RED_POINT, expect=422)["detail"]
+        self.assertEqual(refused["code"], "NEUTRAL_POINT_TOO_COLOURFUL")
+        self.assertIn("白", refused["message"])
+        for point in ({"x": 0.5}, {"x": 0.5, "y": 0.5, "z": 1}, [0.5, 0.5]):
+            self.assertEqual(self.point_preview(source, point, expect=400)["detail"]["code"], "NEUTRAL_POINT_INVALID")
+        both = self.client.post("/api/color-correction/level-preview", json={
+            "source_token": source["source_token"], "reference_source_token": source["source_token"], "neutral_point": GREY_POINT})
+        self.assertEqual(both.status_code, 400)
+        self.assertEqual(self.color_dir_files(), [])
+
+
+for _name in [name for name in vars(LevelPickApiTests) if name.startswith("test_")]:
+    setattr(NeutralPointApiTests, _name, None)  # not callable: the loader skips it
+
+
 if __name__ == "__main__":
     unittest.main()

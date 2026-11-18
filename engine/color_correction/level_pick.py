@@ -47,6 +47,14 @@ CAST_MIN_WHITE = 10.0          # a cast is named and recommended from this white
 HAZE_MIN = 0.06
 VEIL_MAX_CHROMA = 12.0
 
+# S74: a white point the user picks on the image. Fixed before validation; not tuned.
+POINT_RADIUS_REL = 0.004       # patch radius as a share of the long edge
+POINT_RADIUS_MIN = 3           # pixels
+POINT_CLIP_HIGH = 250
+POINT_CLIP_LOW = 5
+POINT_MIN_VALID_SHARE = 0.5    # at least half of the patch must be usable colour evidence
+POINT_MAX_CHROMA = NEUTRAL_MAX_CHROMA
+
 GAMUT_KNEE = 0.85
 GAMUT_CEILING = 0.995
 GAMUT_FLOOR = 0.002
@@ -365,7 +373,64 @@ def _cast_curve(cast: dict[str, Any]) -> list[list[float]]:
     if not cast["estimates"]:
         return []
     a, b = cast["ab"]
-    return [[0.0, a, b], *[[knot, a, b] for knot in FLAT_CURVE_KNOTS], [100.0, 0.0, 0.0]]
+    knots = list(FLAT_CURVE_KNOTS)
+    # S74: a picked white brighter than the last knot gets its own full-strength knot, or the
+    # pure-white pin would leave part of the cast on exactly the surface the user named.
+    point_l = float((cast.get("user_point") or {}).get("l") or 0.0)
+    if point_l > knots[-1]:
+        knots.append(min(point_l, 99.0))
+    return [[0.0, a, b], *[[knot, a, b] for knot in knots], [100.0, 0.0, 0.0]]
+
+
+class NeutralPointError(LevelPickError):
+    """The picked point cannot serve as a white: the code says why (S74)."""
+
+    def __init__(self, code: str, detail: dict[str, Any] | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = dict(detail or {})
+
+
+def sample_neutral_point(pixels: np.ndarray, point: Any) -> dict[str, Any]:
+    """Robust white of a small patch around a point given in 0..1 image coordinates (S74).
+
+    The user names this surface as white or grey, so its colour is the cast. Clipped,
+    near-black and transparent pixels carry no cast evidence and are left out; a patch with
+    too little evidence or a clearly coloured patch is refused instead of corrected.
+    """
+
+    try:
+        x, y = float(point["x"]), float(point["y"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise NeutralPointError("NEUTRAL_POINT_INVALID") from exc
+    if not (np.isfinite(x) and np.isfinite(y) and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+        raise NeutralPointError("NEUTRAL_POINT_INVALID")
+    h, w = pixels.shape[:2]
+    cx, cy = min(w - 1, int(x * w)), min(h - 1, int(y * h))
+    r = max(POINT_RADIUS_MIN, int(round(POINT_RADIUS_REL * max(h, w))))
+    y0, y1, x0, x1 = max(0, cy - r), min(h, cy + r + 1), max(0, cx - r), min(w, cx + r + 1)
+    patch = pixels[y0:y1, x0:x1]
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    inside = (yy - cy) ** 2 + (xx - cx) ** 2 <= r * r
+    rgb = patch[..., :3]
+    opaque = inside & ((patch[..., 3] >= VISIBLE_ALPHA_MIN) if patch.shape[2] == 4 else True)
+    valid = opaque & (rgb.max(axis=-1) < POINT_CLIP_HIGH) & (rgb.min(axis=-1) > POINT_CLIP_LOW)
+    total = int(inside.sum())
+    detail = {"x": round(x, 5), "y": round(y, 5), "pixel": [cx, cy], "radius": r}
+    if int(opaque.sum()) < POINT_MIN_VALID_SHARE * total:
+        raise NeutralPointError("NEUTRAL_POINT_TRANSPARENT", detail)
+    if int(valid.sum()) < POINT_MIN_VALID_SHARE * total:
+        bright = int((opaque & (rgb.max(axis=-1) >= POINT_CLIP_HIGH)).sum())
+        raise NeutralPointError("NEUTRAL_POINT_CLIPPED" if bright * 2 >= int(opaque.sum()) else "NEUTRAL_POINT_TOO_DARK", detail)
+    lin = np.median(_LINEAR_LUT[rgb[valid]].astype(np.float64), axis=0)
+    lab = _lab(_to_srgb(lin.astype(np.float32)).reshape(1, 1, 3))[0, 0]
+    chroma = float(np.hypot(lab[1], lab[2]))
+    detail.update({"l": round(float(lab[0]), 2), "patch_ab": [round(float(lab[1]), 2), round(float(lab[2]), 2)], "chroma": round(chroma, 2)})
+    if chroma > POINT_MAX_CHROMA:
+        raise NeutralPointError("NEUTRAL_POINT_TOO_COLOURFUL", detail)
+    shift = np.log(np.maximum(np.array([lin[0] / lin[1], lin[2] / lin[1]]), 1e-6))
+    return {**detail, "shift": [round(float(shift[0]), 4), round(float(shift[1]), 4)],
+            "ab": [round(v, 2) for v in _shift_to_white_ab(shift)]}
 
 
 def _intent_hints(view: np.ndarray, visible: np.ndarray) -> list[str]:
@@ -429,10 +494,12 @@ class LevelPickAnalysis:
     skin: np.ndarray | None = field(default=None, repr=False)
     tone_curve: list[list[float]] = field(default_factory=list)
     cast: dict[str, Any] = field(default_factory=dict)
+    user_point: dict[str, Any] | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
             "level_pick_version": LEVEL_PICK_VERSION,
+            **({"neutral_source": "USER_POINT", "user_point": dict(self.user_point)} if self.user_point else {}),
             "category": self.category,
             "measured_offset": self.measured_offset,
             "recommended_level": self.recommended_level,
@@ -458,9 +525,54 @@ def _classify(cast: dict[str, Any], haze: dict[str, float]) -> tuple[str, float]
     return ("+".join(tags) if tags else "NO_CAST"), offset
 
 
-def analyze_level_pick(pixels: np.ndarray) -> LevelPickAnalysis:
-    """Measure cast, haze and protection regions of an RGB/RGBA uint8 working-domain image."""
+def _analyze_user_point(pixels: np.ndarray, point: Any) -> LevelPickAnalysis:
+    """S74: the user named a white, so that patch's colour is the cast; nothing is guessed.
 
+    The four levels, gain rendering, skin protection and safety gates stay those of the
+    measured path. No haze stretch and no design-tone hint: the user asked for the white only
+    and has already judged the image. The medium level is the recommendation (owner sign-off
+    2026-11-18): strong makes the named patch fully neutral, which overshot deliberately warm
+    lighting in review, so it stays the user's own choice.
+    """
+
+    sample = sample_neutral_point(pixels, point)
+    rgb = np.ascontiguousarray(pixels[..., :3])
+    visible = pixels[..., 3] >= VISIBLE_ALPHA_MIN if pixels.shape[2] == 4 else np.ones(rgb.shape[:2], bool)
+    view, visible_view = _analysis_view(rgb, visible)
+    cast = {"trusted": True, "opposed": False, "shift": list(sample["shift"]), "ab": list(sample["ab"]),
+            "estimates": [list(sample["shift"])], "user_point": sample}
+    no_haze = {"black": 0.0, "white": 1.0, "lift": 0.0, "headroom": 0.0, "haze": 0.0}
+    category, offset = _classify(cast, no_haze)
+    lab = _lab(view)
+    patch_ab = sample["patch_ab"]
+    near = visible_view & (np.hypot(lab[..., 1] - patch_ab[0], lab[..., 2] - patch_ab[1]) <= NEUTRAL_RADIUS)
+    face_boxes = _faces(rgb)
+    return LevelPickAnalysis(
+        source_shape=tuple(pixels.shape),
+        neutral={"reliable": True, "reason": "USER_POINT", "ab": list(patch_ab), "share": round(float(near.mean()), 4), "grid_cells": _grid_cells(near, 0.01), "tone_curve": []},
+        haze=no_haze,
+        intent_hints=[],
+        face_boxes=face_boxes,
+        category=category,
+        measured_offset=offset,
+        recommended_level="medium",
+        tone_curve=_cast_curve(cast),
+        cast=cast,
+        neutral_mask_view=near,
+        skin=_skin_weight(rgb, face_boxes),
+        user_point=sample,
+    )
+
+
+def analyze_level_pick(pixels: np.ndarray, neutral_point: Any = None) -> LevelPickAnalysis:
+    """Measure cast, haze and protection regions of an RGB/RGBA uint8 working-domain image.
+
+    With ``neutral_point`` ({x, y} in 0..1 of the oriented image) the user's white replaces
+    the measurement (S74); without it the measured path is unchanged.
+    """
+
+    if neutral_point is not None:
+        return _analyze_user_point(pixels, neutral_point)
     rgb = np.ascontiguousarray(pixels[..., :3])
     visible = pixels[..., 3] >= VISIBLE_ALPHA_MIN if pixels.shape[2] == 4 else np.ones(rgb.shape[:2], bool)
     view, visible_view = _analysis_view(rgb, visible)
@@ -640,13 +752,13 @@ class LevelPickPreview:
     processing_time_ms: int
 
 
-def build_level_pick_preview(source_path: str | Path) -> LevelPickPreview:
+def build_level_pick_preview(source_path: str | Path, neutral_point: Any = None) -> LevelPickPreview:
     """Decode through the formal colour-management boundary and render every level."""
 
     started = time.perf_counter()
     source = load_color_managed_source(source_path)
     pixels = source.pixels
-    analysis = analyze_level_pick(pixels)
+    analysis = analyze_level_pick(pixels, neutral_point)
     # The levels render in parallel threads. Every matrix product on this path is einsum, not
     # BLAS: concurrent OpenBLAS calls from several threads crashed (access violation) on 4K input.
     base = _prepare_render(pixels, analysis)
@@ -676,10 +788,12 @@ __all__ = [
     "LevelPickAnalysis",
     "LevelPickError",
     "LevelPickPreview",
+    "NeutralPointError",
     "analyze_level_pick",
     "build_level_pick_preview",
     "delta_e2000",
     "level_safety",
     "pixel_sha256",
     "render_level",
+    "sample_neutral_point",
 ]

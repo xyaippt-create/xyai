@@ -518,6 +518,7 @@ def register_image_compression_routes(
         LEVEL_PICK_VERSION,
         LEVELS,
         LevelPickAnalysis,
+        NeutralPointError,
         analyze_level_pick,
         build_level_pick_preview,
         level_safety,
@@ -3297,7 +3298,34 @@ def register_image_compression_routes(
                     **color_task_event_fields(record),
                 )
 
+    def public_point_measurement(analysis: Mapping[str, Any]) -> dict[str, Any]:
+        """S74: the user named the white, so the summary describes that patch, not a guess."""
+
+        point = dict(analysis.get("user_point") or {})
+        a, b = (list(point.get("ab") or [0.0, 0.0]) + [0.0, 0.0])[:2]
+        offset = float(analysis.get("measured_offset") or 0.0)
+        if offset < 3.0:
+            direction = "接近中性，校正幅度很小"
+        elif abs(b) >= abs(a):
+            direction = "偏黄" if b > 0 else "偏蓝"
+        else:
+            direction = "偏品红" if a > 0 else "偏绿"
+        return {
+            "category": str(analysis.get("category") or "NO_CAST"),
+            "summary": f"按你点选的位置校正：该处{direction}",
+            "measured_offset": analysis.get("measured_offset"),
+            "recommended_level": "medium",
+            "recommended_label": LEVEL_LABELS["medium"],
+            "intent_hints": [],
+            "possible_design_colour": False,
+            "notice": "“中”通常已经自然；想让你点的位置完全变成中性白或灰，可以选“强”。",
+            "neutral_source": "USER_POINT",
+            "neutral_point": {"x": point.get("x"), "y": point.get("y")},
+        }
+
     def public_level_measurement(analysis: Mapping[str, Any]) -> dict[str, Any]:
+        if analysis.get("neutral_source") == "USER_POINT":
+            return public_point_measurement(analysis)
         category = str(analysis.get("category") or "NO_CAST")
         hints = list(analysis.get("intent_hints") or [])
         labels = {"YELLOW": "画面偏黄", "BLUE": "画面偏蓝", "TINT": "画面偏绿或偏品红", "GREY": "画面发灰"}
@@ -3402,7 +3430,7 @@ def register_image_compression_routes(
             else:
                 analysis = cached if isinstance(cached, LevelPickAnalysis) and cached.source_shape == tuple(managed.pixels.shape) else None
                 if analysis is None:
-                    analysis = analyze_level_pick(managed.pixels)
+                    analysis = analyze_level_pick(managed.pixels, session.get("neutral_point"))
                 candidate = render_level(managed.pixels, analysis, level)
             if pixel_sha256(candidate) != session["levels"][level]["pixel_sha256"]:
                 raise RuntimeError("正式结果与所选预览不一致，任务已阻断。")
@@ -5774,10 +5802,17 @@ def register_image_compression_routes(
     @app.post("/api/color-correction/level-preview")
     async def color_correction_level_preview(payload: dict = Body(default_factory=dict)):
         require_compression_directory()
-        allowed_fields = {"source_token", "reference_source_token", "client_context"}
+        allowed_fields = {"source_token", "reference_source_token", "neutral_point", "client_context"}
         unknown = sorted(str(key) for key in payload if key not in allowed_fields)
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "LEVEL_PREVIEW_REQUEST_INVALID", "message": f"挑档校色请求包含未知字段：{', '.join(unknown)}。"})
+        # S74: a user-picked white {x, y} (0..1 of the oriented image), level pick only.
+        neutral_point = payload.get("neutral_point")
+        if neutral_point is not None:
+            if payload.get("reference_source_token"):
+                raise HTTPException(status_code=400, detail={"code": "LEVEL_PREVIEW_REQUEST_INVALID", "message": "参考图校色不能同时点选白点。"})
+            if not isinstance(neutral_point, dict) or set(neutral_point) != {"x", "y"}:
+                raise HTTPException(status_code=400, detail={"code": "NEUTRAL_POINT_INVALID", "message": "白点位置无效，请在图片上重新点选。"})
         source = require_token(str(payload.get("source_token") or ""), role="source")
         source_path = Path(str(source["path"])).resolve()
         if _sha256_file(source_path) != source.get("sha256"):
@@ -5794,9 +5829,17 @@ def register_image_compression_routes(
         prune_level_preview_sessions()
         try:
             if reference_source is None:
-                preview = await asyncio.to_thread(build_level_pick_preview, source_path)
+                preview = await asyncio.to_thread(build_level_pick_preview, source_path, neutral_point)
             else:
                 preview = await asyncio.to_thread(build_reference_level_pick_preview, source_path, reference_path)
+        except NeutralPointError as exc:
+            messages = {
+                "NEUTRAL_POINT_TOO_COLOURFUL": "这里颜色比较鲜艳，不像白色或灰色。请点白墙、白纸、白衣服或灰色区域。",
+                "NEUTRAL_POINT_CLIPPED": "这里太亮，已经没有颜色信息。请点稍暗一点的白色或灰色区域。",
+                "NEUTRAL_POINT_TOO_DARK": "这里太暗，看不出颜色。请点亮一点的白色或灰色区域。",
+                "NEUTRAL_POINT_TRANSPARENT": "这里是透明区域，请点图片上有内容的白色或灰色区域。",
+            }
+            raise HTTPException(status_code=422, detail={"code": exc.code, "message": messages.get(exc.code, "白点位置无效，请在图片上重新点选。"), "point": exc.detail}) from exc
         except ColorManagementError as exc:
             raise HTTPException(status_code=415, detail={"code": "UNSUPPORTED_SOURCE_FORMAT", "reason": str(exc), "message": color_input_rejection_message(exc)}) from exc
         reference_usable = reference_source is None or bool(preview.plan.usable)
@@ -5837,6 +5880,7 @@ def register_image_compression_routes(
             "source_sha256": str(source["sha256"]),
             "reference": dict(reference_source) if reference_source is not None else None,
             "reference_sha256": str(reference_source["sha256"]) if reference_source is not None else None,
+            "neutral_point": dict(neutral_point) if neutral_point is not None else None,
             "directory": str(directory),
             "levels": levels,
             "analysis": analysis_record,
