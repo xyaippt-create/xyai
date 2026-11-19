@@ -24,6 +24,14 @@ class SharedTaskRegistryConcurrencyTests(unittest.TestCase):
     def disk_keys(self, registry):
         return set(json.loads(registry.path.read_text(encoding="utf-8"))["records"])
 
+    def test_missing_formal_root_is_not_recreated_by_opening_or_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "removed-formal-root"
+            registry = SharedTaskRegistry(root)
+            self.assertEqual(len(registry), 0)
+            self.assertIsNone(registry.get("missing-task"))
+            self.assertFalse(root.exists())
+
     def test_two_backends_keep_each_others_results(self):
         first = SharedTaskRegistry(self.root)
         second = SharedTaskRegistry(self.root)  # Started before first wrote anything.

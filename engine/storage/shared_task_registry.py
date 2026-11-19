@@ -83,6 +83,11 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
                     self._release_file_lock()
 
     def _acquire_file_lock(self) -> None:
+        if not self._root.is_dir():
+            # A vanished formal root must stay missing so start-up reports it as not
+            # ready instead of silently recreating it; with no root there is no shared
+            # registry file to protect yet.
+            return
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = self._lock_path.open("a+b")
         deadline = time.monotonic() + REGISTRY_LOCK_TIMEOUT_SECONDS
