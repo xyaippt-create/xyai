@@ -429,7 +429,7 @@ class NeutralPointAlgorithmTests(unittest.TestCase):
     def test_strong_level_makes_the_picked_point_neutral(self):
         pixels = cast_scene()
         analysis = analyze_level_pick(pixels, GREY_POINT)
-        self.assertEqual(analysis.recommended_level, "medium")
+        self.assertEqual(analysis.recommended_level, "strong")
         self.assertEqual(analysis.intent_hints, [])
         record = analysis.to_record()
         self.assertEqual(record["neutral_source"], "USER_POINT")
@@ -442,6 +442,24 @@ class NeutralPointAlgorithmTests(unittest.TestCase):
             self.assertLess(now, previous, level)
             previous = now
         self.assertLessEqual(previous, 2.0)
+
+    def test_warm_point_keeps_part_of_its_warmth_cool_and_tint_do_not(self):
+        # S80: a low-CCT white keeps some warmth even at strong; cool and magenta whites keep none.
+        warm = cast_scene((30, 8, -30))
+        analysis = analyze_level_pick(warm, GREY_POINT)
+        self.assertGreater(analysis.cast["warm_keep"]["keep"], 0.1)
+        self.assertLess(analysis.cast["warm_keep"]["cct"], 4000)
+        strong = render_level(warm, analysis, "strong")
+        self.assertTrue(level_safety(warm, strong, analysis)["passed"])
+        kept = point_chroma(strong, GREY_POINT)
+        self.assertGreater(kept, 2.0)
+        self.assertLess(kept, point_chroma(warm, GREY_POINT) * 0.4)
+        for cast in ((-14, 4, 18), (12, -8, 8)):
+            pixels = cast_scene(cast)
+            other = analyze_level_pick(pixels, GREY_POINT)
+            self.assertEqual(other.cast["warm_keep"]["keep"], 0.0, cast)
+            self.assertTrue(all(len(knot) == 3 for knot in other.tone_curve), cast)
+            self.assertLessEqual(point_chroma(render_level(pixels, other, "strong"), GREY_POINT), 2.0, cast)
 
     def test_measured_path_is_untouched_without_a_point(self):
         pixels = cast_scene()
@@ -498,7 +516,7 @@ class NeutralPointApiTests(LevelPickApiTests):
         measurement = data["measurement"]
         self.assertIn("按你点选的位置校正", measurement["summary"])
         self.assertIn("偏黄", measurement["summary"])
-        self.assertEqual(measurement["recommended_level"], "medium")
+        self.assertEqual(measurement["recommended_level"], "strong")
         self.assertEqual(measurement["neutral_source"], "USER_POINT")
         self.assertTrue(all(item["selectable"] for item in data["levels"]))
         session = self.state["color_level_preview_sessions"][data["preview_id"]]

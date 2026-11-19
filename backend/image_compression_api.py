@@ -3480,11 +3480,15 @@ def register_image_compression_routes(
             "category": str(analysis.get("category") or "NO_CAST"),
             "summary": f"按你点选的位置校正：该处{direction}",
             "measured_offset": analysis.get("measured_offset"),
-            "recommended_level": "medium",
-            "recommended_label": LEVEL_LABELS["medium"],
+            "recommended_level": "strong",
+            "recommended_label": LEVEL_LABELS["strong"],
             "intent_hints": [],
             "possible_design_colour": False,
-            "notice": "“中”通常已经自然；想让你点的位置完全变成中性白或灰，可以选“强”。",
+            "notice": (
+                "该处是暖光，“强”会保留少量暖调，更接近人眼看到的样子；想留更多原有氛围，可以选“中”或“轻”。"
+                if float(((analysis.get("cast") or {}).get("warm_keep") or {}).get("keep") or 0.0) > 0.0
+                else "“强”会让你点的位置变成中性白或灰；想保留一点原有色调，可以选“中”或“轻”。"
+            ),
             "neutral_source": "USER_POINT",
             "neutral_point": {"x": point.get("x"), "y": point.get("y")},
         }

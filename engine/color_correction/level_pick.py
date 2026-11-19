@@ -55,6 +55,16 @@ POINT_CLIP_LOW = 5
 POINT_MIN_VALID_SHARE = 0.5    # at least half of the patch must be usable colour evidence
 POINT_MAX_CHROMA = NEUTRAL_MAX_CHROMA
 
+# S80: eyes adapt only partly to low-CCT light (incomplete chromatic adaptation, e.g. Zhai &
+# Luo 2018: degree of adaptation ~0.85 at 4000 K, ~0.65 at 2700 K), so a warm-lit scene made
+# fully neutral looks cold. Along the Planckian direction only, a picked white warmer than
+# WARM_KEEP_FROM_K keeps up to WARM_KEEP_MAX of its warmth at every level; green/magenta tint
+# and cool casts are corrected as before. Fixed from the literature before validation; not tuned.
+WARM_KEEP_MAX = 0.35
+WARM_KEEP_FROM_K = 5000.0
+WARM_KEEP_FULL_K = 2700.0
+_WARM_DIR = np.array([21.8, 57.5]) / np.hypot(21.8, 57.5)  # Lab a*b* of a 3000 K white vs D65
+
 GAMUT_KNEE = 0.85
 GAMUT_CEILING = 0.995
 GAMUT_FLOOR = 0.002
@@ -382,6 +392,28 @@ def _cast_curve(cast: dict[str, Any]) -> list[list[float]]:
     return [[0.0, a, b], *[[knot, a, b] for knot in knots], [100.0, 0.0, 0.0]]
 
 
+def _warm_keep(ab: Any) -> dict[str, Any]:
+    """S80: share of a picked white's warmth that every level leaves in place, and its a*b*.
+
+    Only the white's component along the warm Planckian direction counts, and its colour
+    temperature (McCamy) decides the share, so a green, magenta or cool white keeps nothing.
+    """
+
+    along = max(0.0, float(np.dot(np.asarray(ab, np.float64), _WARM_DIR)))
+    none = {"keep": 0.0, "cct": None, "ab": [0.0, 0.0]}
+    if along <= 0.0:
+        return none
+    x_, y_, z_ = _lab_to_xyz(100.0, *(along * _WARM_DIR))
+    total = x_ + y_ + z_
+    n = (x_ / total - 0.3320) / (0.1858 - y_ / total)
+    cct = 449 * n**3 + 3525 * n**2 + 6823.3 * n + 5520.33
+    keep = WARM_KEEP_MAX * float(np.clip((WARM_KEEP_FROM_K - cct) / (WARM_KEEP_FROM_K - WARM_KEEP_FULL_K), 0.0, 1.0))
+    if keep <= 0.0:
+        return {**none, "cct": round(float(cct))}
+    residual = keep * along * _WARM_DIR
+    return {"keep": round(keep, 4), "cct": round(float(cct)), "ab": [float(residual[0]), float(residual[1])]}
+
+
 class NeutralPointError(LevelPickError):
     """The picked point cannot serve as a white: the code says why (S74)."""
 
@@ -530,17 +562,23 @@ def _analyze_user_point(pixels: np.ndarray, point: Any) -> LevelPickAnalysis:
 
     The four levels, gain rendering, skin protection and safety gates stay those of the
     measured path. No haze stretch and no design-tone hint: the user asked for the white only
-    and has already judged the image. The medium level is the recommendation (owner sign-off
-    2026-11-18): strong makes the named patch fully neutral, which overshot deliberately warm
-    lighting in review, so it stays the user's own choice.
+    and has already judged the image. S80: a warm (low-CCT) white keeps part of its warmth at
+    every level, so strong no longer turns warm-lit scenes cold and is the recommendation again
+    (owner ruling 2026-11-19; S74 had moved it to medium for that reason).
     """
 
     sample = sample_neutral_point(pixels, point)
     rgb = np.ascontiguousarray(pixels[..., :3])
     visible = pixels[..., 3] >= VISIBLE_ALPHA_MIN if pixels.shape[2] == 4 else np.ones(rgb.shape[:2], bool)
     view, visible_view = _analysis_view(rgb, visible)
+    warm = _warm_keep(sample["ab"])
     cast = {"trusted": True, "opposed": False, "shift": list(sample["shift"]), "ab": list(sample["ab"]),
-            "estimates": [list(sample["shift"])], "user_point": sample}
+            "estimates": [list(sample["shift"])], "user_point": sample,
+            "warm_keep": {"keep": warm["keep"], "cct": warm["cct"]}}
+    curve = _cast_curve(cast)
+    if warm["keep"] > 0.0:
+        # Each knot carries the a*b* its white is moved to at full strength; the pure-white pin keeps 0.
+        curve = [[*knot, *(warm["ab"] if knot[0] < 100.0 else [0.0, 0.0])] for knot in curve]
     no_haze = {"black": 0.0, "white": 1.0, "lift": 0.0, "headroom": 0.0, "haze": 0.0}
     category, offset = _classify(cast, no_haze)
     lab = _lab(view)
@@ -555,8 +593,8 @@ def _analyze_user_point(pixels: np.ndarray, point: Any) -> LevelPickAnalysis:
         face_boxes=face_boxes,
         category=category,
         measured_offset=offset,
-        recommended_level="medium",
-        tone_curve=_cast_curve(cast),
+        recommended_level="strong",
+        tone_curve=curve,
         cast=cast,
         neutral_mask_view=near,
         skin=_skin_weight(rgb, face_boxes),
@@ -687,7 +725,7 @@ def _prepare_render(pixels: np.ndarray, analysis: LevelPickAnalysis) -> _RenderB
     lin_flat = _LINEAR_LUT[pixels[..., :3]].reshape(-1, 3)
     knot_pixels = []
     # Piecewise-linear blend weights of each tone knot by the pixel's own L*.
-    for k, (kl, _ka, _kb) in enumerate(knots):
+    for k, kl in enumerate(knots[:, 0]):
         left = knots[k - 1, 0] if k > 0 else kl - 1.0
         right = knots[k + 1, 0] if k + 1 < len(knots) else kl + 1.0
         w = np.where(pixel_l <= kl, (pixel_l - left) / max(kl - left, 1e-6), (right - pixel_l) / max(right - kl, 1e-6))
@@ -711,8 +749,13 @@ def _render_prepared(base: _RenderBase, analysis: LevelPickAnalysis, level: str)
     img = src
     if base.knots is not None:
         out = np.zeros((src.shape[0] * src.shape[1], 3), np.float32)
-        for (kl, ka, kb), (idx, w, lin) in zip(base.knots, base.knot_pixels):
-            m = _gain_matrix((ka, kb), (ka * (1 - strength), kb * (1 - strength)))
+        for knot, (idx, w, lin) in zip(base.knots, base.knot_pixels):
+            ka, kb = knot[1], knot[2]
+            if knot.shape[0] > 3:  # S80: warm white keeps (ta, tb) of its warmth at full strength
+                ta, tb = knot[3], knot[4]
+                m = _gain_matrix((ka, kb), (ta + (ka - ta) * (1 - strength), tb + (kb - tb) * (1 - strength)))
+            else:
+                m = _gain_matrix((ka, kb), (ka * (1 - strength), kb * (1 - strength)))
             out[idx] += w * np.einsum("ij,kj->ik", lin, m)
         img = _to_srgb(_gamut_pull(out.reshape(src.shape)))
     if analysis.haze["haze"] >= HAZE_MIN:
