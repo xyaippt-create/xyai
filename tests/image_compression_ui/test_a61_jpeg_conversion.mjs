@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { TARGET_FORMAT_OPTIONS, buildCompressionRequestPlan, targetFormatHelper } from '../../src/compressionParams.js';
 import { createCompressionBatch, BATCH_STORAGE_KEY } from '../../src/batchCompression.js';
 
-test('explicit JPG uses one request policy for every supported source format', () => {
+test('JPG conversion requires an explicit target and explains pixel and Alpha changes', () => {
   for (const format of ['PNG','JPEG','WEBP']) {
     const plan = buildCompressionRequestPlan({fileInfo:{format,width:640,height:360},mode:'DELIVERY_OPTIMIZATION',targetFormat:'JPEG'});
     assert.equal(plan.valid,true);
     assert.deepEqual(plan.params,{target_format:'JPEG'});
+    assert.match(plan.message,/像素差异/);
+    assert.match(plan.message,/白底/);
   }
   const plan = buildCompressionRequestPlan({fileInfo:{format:'WEBP'},mode:'DELIVERY_OPTIMIZATION'});
   assert.deepEqual(plan.params,{target_format:'SMART_COMPRESSION'});
@@ -34,12 +36,12 @@ test('smart compression is the default and preserve format remains explicit', ()
   assert.deepEqual(TARGET_FORMAT_OPTIONS.map(({value,label})=>[value,label]),[
     ['SMART_COMPRESSION','智能压缩（推荐）'],['PRESERVE_FORMAT','保持原格式'],['JPEG','JPG'],['PNG','PNG'],['WEBP','WebP'],
   ]);
-  assert.equal(targetFormatHelper('SMART_COMPRESSION'),'在安全范围内自动选择更小的合格结果；透明图片默认保留原格式。');
-  assert.equal(targetFormatHelper('PRESERVE_FORMAT'),'保持原图片格式，仅优化当前格式。');
-  assert.equal(targetFormatHelper('JPEG'),'统一输出为 JPG。');
-  assert.equal(targetFormatHelper('PNG'),'统一输出为 PNG。');
+  assert.match(targetFormatHelper('SMART_COMPRESSION'),/默认保持原格式/);
+  assert.match(targetFormatHelper('PRESERVE_FORMAT'),/JPG 按质量门槛压缩/);
+  assert.match(targetFormatHelper('JPEG'),/可能产生像素差异/);
+  assert.match(targetFormatHelper('PNG'),/全部像素与透明通道保持不变/);
   assert.match(targetFormatHelper('WEBP'),/部分软件可能不兼容/);
-  for (const targetFormat of ['JPEG','PNG','WEBP']) {
+  for (const targetFormat of ['PNG','WEBP']) {
     assert.deepEqual(buildCompressionRequestPlan({fileInfo:{format:'PNG'},mode:'DELIVERY_OPTIMIZATION',targetFormat}).params,{target_format:targetFormat});
   }
   for (const mode of ['LOSSLESS_COMPRESSION','RESIZE_REDUCTION','UPLOAD_ADAPTATION']) {

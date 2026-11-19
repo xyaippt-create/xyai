@@ -139,30 +139,23 @@ class SingleWinnerTests(unittest.TestCase):
             )
             self.assertEqual(generated["selection_policy"], "SINGLE_WINNER_QUALITY_V2")
 
-    def test_manual_jpg_adaptive_search_is_bounded_and_uses_both_subsampling_modes(self) -> None:
+    def test_default_jpeg_restores_quality_search_without_format_conversion(self) -> None:
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
-            source = root / "source.png"
+            source = root / "source.jpg"
             output = root / "formal"
-            _business_image().save(source, format="PNG", compress_level=0, dpi=(300, 300))
+            _business_image().save(source, format="JPEG", quality=95, dpi=(300, 300))
+            original = source.read_bytes()
 
-            generated = generate_delivery_candidates(
-                source,
-                output,
-                source_filename=source.name,
-                moment=datetime(2026, 9, 5, 12, 1, 0),
-                target_format="JPEG",
-            )
-
-            jpgs = [item for item in generated["candidates"] if item["format"] == "JPG"]
-            searched_modes = {
-                item["search_details"]["subsampling"]
-                for item in jpgs
-            }
-            self.assertEqual(searched_modes, {"4:4:4", "4:2:0"})
-            self.assertTrue(all(item["direct_source_lineage"] for item in jpgs))
-            self.assertLessEqual(len(jpgs), generated["jpg_search"]["max_encodings"])
-            self.assertIsNotNone(generated["jpg_search"]["lowest_safe_quality"])
+            for target in ("SMART_COMPRESSION", "PRESERVE_FORMAT", "JPEG"):
+                generated = generate_delivery_candidates(source, output, source_filename=source.name,
+                                                         moment=datetime(2026, 11, 1), target_format=target)
+                self.assertGreater(generated["jpg_search"]["encode_count"], 0)
+                self.assertEqual({item["format"] for item in generated["candidates"]}, {"JPG"})
+                self.assertEqual(generated["effective_target_format"], "JPEG")
+                self.assertFalse(generated["format_conversion"])
+                self.assertEqual(generated["winner"]["quality_gate"]["status"], "PASS")
+                self.assertEqual(source.read_bytes(), original)
 
     def test_size_and_content_profiles_are_centralized_without_gate_thresholds(self) -> None:
         self.assertEqual(set(SIZE_SEARCH_PROFILE), {"SMALL", "MEDIUM", "LARGE", "VERY_LARGE"})
@@ -216,7 +209,7 @@ class SingleWinnerTests(unittest.TestCase):
             self.assertEqual(set(by_id), {PNG_LOSSLESS_SCHEME})
             self.assertEqual(generated["target_format"], "SMART_COMPRESSION")
             self.assertEqual(generated["effective_target_format"], "PNG")
-            self.assertEqual(generated["format_policy"], "SMART_SAFE_FORMAT_SELECTION")
+            self.assertEqual(generated["format_policy"], "PRESERVE_SOURCE_FORMAT")
             self.assertEqual(generated["alpha_handling"]["action"], "PRESERVE")
             self.assertTrue(all(item["format"] == "PNG" for item in generated["candidates"]))
 
@@ -240,7 +233,7 @@ class SingleWinnerTests(unittest.TestCase):
             self.assertEqual({item["format"] for item in generated["candidates"]}, {"PNG"})
             self.assertFalse(generated["smart_compression_details"]["comparison_performed"])
 
-    def test_smart_opaque_png_compares_png_and_jpg_then_publishes_one_winner(self) -> None:
+    def test_smart_opaque_png_publishes_one_pixel_identical_winner(self) -> None:
         with tempfile.TemporaryDirectory() as root_name:
             root = Path(root_name)
             source = root / "opaque.png"
@@ -255,9 +248,11 @@ class SingleWinnerTests(unittest.TestCase):
                 target_format="SMART_COMPRESSION",
             )
 
-            self.assertEqual({item["format"] for item in generated["candidates"]}, {"PNG", "JPG"})
-            self.assertTrue(generated["smart_compression_details"]["comparison_performed"])
-            self.assertIn(generated["effective_target_format"], {"PNG", "JPEG"})
+            self.assertEqual({item["format"] for item in generated["candidates"]}, {"PNG"})
+            self.assertFalse(generated["smart_compression_details"]["comparison_performed"])
+            self.assertEqual(generated["effective_target_format"], "PNG")
+            self.assertTrue(generated["winner"]["lossless_verified"])
+            self.assertEqual(generated["winner"]["pixel_diff_count"], 0)
             self.assertEqual(generated["public_output_count"], 1)
             self.assertEqual(
                 len([item for item in generated["candidates"] if item.get("output_path")]),

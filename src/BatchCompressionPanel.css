@@ -18,9 +18,9 @@
   font-size: 13px;
 }
 .hdde-compression-page > .hdde-page-header .hdde-compression-mode-tabs button[aria-pressed="true"] {
-  background: var(--card-background);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-strong) 12%, transparent);
-  color: var(--brand-primary);
+  background: var(--control-selected-surface);
+  box-shadow: var(--control-selected-shadow);
+  color: var(--text-primary);
   font-weight: 700;
 }
 .hdde-batch-compression {
@@ -35,23 +35,139 @@
   padding: 18px;
 }
 .hdde-batch-compression-format {
-  width: min(100%, 420px);
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.hdde-batch-compression-format__heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.hdde-batch-compression-format__heading h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+.hdde-batch-compression-format__heading span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.hdde-batch-compression-format__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  align-items: stretch;
+  gap: 12px 16px;
+}
+.hdde-batch-compression-format__fields > label {
+  min-width: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-background);
 }
 .hdde-batch-compression-format .hdde-compression-target-field {
   display: grid;
+  align-content: start;
   gap: 6px;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
-.hdde-batch-compression-format select {
+.hdde-batch-compression-format__fields > :only-child { max-width: 460px; }
+.hdde-batch-compression-format .hdde-compression-field-helper {
+  color: var(--text-secondary);
+}
+.hdde-batch-compression-format select,
+.hdde-batch-compression-restore select {
   width: 100%;
+  min-width: 0;
   min-height: 40px;
   padding: 8px 34px 8px 11px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   color: var(--text-primary);
   background: var(--card-background);
+  font-size: 13px;
+}
+.hdde-batch-compression-conversion {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  align-content: center;
+  gap: 10px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.hdde-batch-compression-conversion:has(input:checked) {
+  border-color: var(--control-selected-border);
+  background: var(--control-selected-surface);
+}
+.hdde-batch-compression-conversion:has(input:disabled) { cursor: default; }
+.hdde-batch-compression-conversion input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--brand-primary);
+}
+.hdde-batch-compression-conversion strong,
+.hdde-batch-compression-conversion small { display: block; }
+.hdde-batch-compression-conversion strong { font-size: 13px; line-height: 1.5; }
+.hdde-batch-compression-conversion small {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.hdde-batch-compression-conversion:has(input:focus-visible),
+.hdde-batch-compression-format select:focus-visible,
+.hdde-batch-compression-restore select:focus-visible {
+  outline: var(--control-focus);
+  outline-offset: -2px;
+}
+.hdde-batch-compression-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  padding: 18px 16px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  background: var(--card-background);
+}
+.hdde-batch-compression-empty__copy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.hdde-batch-compression-empty__copy svg {
+  flex: none;
+  box-sizing: content-box;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--brand-primary-soft);
+  color: var(--brand-primary);
+}
+.hdde-batch-compression-empty__copy p { margin: 2px 0 0; }
+.hdde-batch-compression-empty > .hdde-primary-action {
+  min-width: 96px;
+  margin: 0;
+}
+.hdde-batch-compression-restore {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 460px);
+  color: var(--text-secondary);
   font-size: 13px;
 }
 .hdde-batch-compression-list-card > .hdde-section-header,
@@ -128,6 +244,7 @@
 }
 .hdde-batch-compression-table {
   width: 100%;
+  min-width: 700px;
   table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
@@ -144,9 +261,32 @@
 .hdde-batch-compression-table th:nth-child(4) { width: 108px; }
 .hdde-batch-compression-table th:nth-child(5) { width: 172px; }
 .hdde-batch-compression-table th:nth-child(6) { width: 68px; }
-.hdde-batch-compression-table th:nth-child(7) { width: 92px; }
+.hdde-batch-compression-table th:nth-child(7) { width: 116px; }
 .hdde-batch-compression-table td:not(.hdde-batch-compression-name) { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hdde-batch-compression-table :is(th, td):is(:nth-child(5), :nth-child(6)) { text-align: right; }
 .hdde-batch-compression-name { min-width: 0; }
+.hdde-batch-compression-name > small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.hdde-batch-compression-name > .hdde-batch-compression-location {
+  margin-top: 2px;
+  color: var(--text-secondary);
+}
+.hdde-batch-compression-table td:last-child .hdde-batch-compression-actions {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.hdde-compression-page .hdde-batch-compression-table td:last-child .hdde-link-action {
+  max-width: 100%;
+  min-height: 36px;
+  padding: 4px 6px;
+  white-space: normal;
+}
 .hdde-batch-compression-name > strong {
   display: block;
   min-width: 0;
@@ -174,11 +314,10 @@
   border-radius: 8px;
   color: var(--text-muted);
   background: var(--surface-subtle);
-  font-size: 11px;
+  font-size: 12px;
 }
 button.hdde-batch-thumbnail { cursor: zoom-in; }
-button.hdde-batch-thumbnail:hover,
-button.hdde-batch-thumbnail:focus-visible { border-color: var(--brand-primary); outline: 2px solid var(--brand-primary-soft); }
+button.hdde-batch-thumbnail:focus-visible { outline: var(--control-focus); outline-offset: -2px; }
 .hdde-batch-thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .hdde-batch-compression-summary { display: grid; gap: 12px; padding: 18px; }
 .hdde-batch-compression-summary__header {
@@ -233,6 +372,7 @@ button.hdde-batch-thumbnail:focus-visible { border-color: var(--brand-primary); 
 .hdde-batch-delivery-report > span { color: var(--text-secondary); font-size: 13px; }
 .hdde-batch-delivery-report ul { display: grid; gap: 5px; margin: 3px 0 0; padding-left: 20px; color: var(--text-primary); font-size: 13px; }
 .hdde-batch-delivery-report li span { font-weight: 700; }
+.hdde-batch-delivery-report li { overflow-wrap: anywhere; }
 .hdde-batch-delivery-confirm {
   justify-self: start;
   margin-top: 5px;
@@ -288,7 +428,7 @@ button.hdde-batch-thumbnail:focus-visible { border-color: var(--brand-primary); 
   .hdde-batch-compression-table th:nth-child(4) { width: 92px; }
   .hdde-batch-compression-table th:nth-child(5) { width: 142px; }
   .hdde-batch-compression-table th:nth-child(6) { width: 58px; }
-  .hdde-batch-compression-table th:nth-child(7) { width: 82px; }
+  .hdde-batch-compression-table th:nth-child(7) { width: 104px; }
   .hdde-batch-thumbnail { width: 50px; height: 50px; min-height: 50px !important; }
   .hdde-batch-compression-summary__relation { grid-template-columns: auto auto auto; }
   .hdde-batch-compression-summary__saving { grid-column: 1 / -1; justify-self: start; text-align: left; }

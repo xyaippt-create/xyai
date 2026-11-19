@@ -83,6 +83,48 @@ def _xmp_bytes(info: dict[str, Any]) -> bytes:
     return value if isinstance(value, bytes) else b""
 
 
+def load_static_image(image: Image.Image) -> str:
+    """Fully decode one picture, including a declared auxiliary JPEG thumbnail."""
+    frame_count = int(getattr(image, "n_frames", 1))
+    if str(image.format or "").upper() == "MPO" and frame_count == 2:
+        entries = getattr(image, "mpinfo", {}).get(0xB002, [])
+        attributes = [entry.get("Attribute", {}) for entry in entries]
+        camera_thumbnail = (
+            len(attributes) == 2
+            and attributes[0].get("MPType") == "Baseline MP Primary Image"
+            and attributes[0].get("DependentParentImageFlag") is True
+            and attributes[1].get("MPType") in {
+                "Large Thumbnail (VGA Equivalent)",
+                "Large Thumbnail (Full HD Equivalent)",
+            }
+            and attributes[1].get("DependentChildImageFlag") is True
+            and all(item.get("ImageDataFormat") == "JPEG" for item in attributes)
+        )
+        if camera_thumbnail:
+            image.seek(0)
+            primary_size = image.size
+            # A corrupt auxiliary stream must still fail complete input validation.
+            image.seek(1)
+            image.load()
+            thumbnail_size = image.size
+            image.seek(0)
+            image.load()
+            if (
+                thumbnail_size[0] < primary_size[0]
+                and thumbnail_size[1] < primary_size[1]
+                and thumbnail_size[0] * primary_size[1] == thumbnail_size[1] * primary_size[0]
+            ):
+                return "JPEG"
+    if bool(getattr(image, "is_animated", False)) or frame_count != 1:
+        raise CompressionRuntimeError(
+            "MULTI_FRAME_SOURCE_UNSUPPORTED",
+            "这张图片包含多个独立画面或动画，当前不能安全压缩。",
+            TechnicalStatus.CANNOT_MEET_SAFELY,
+        )
+    image.load()
+    return "JPEG" if image.format == "JPG" else str(image.format or "UNKNOWN").upper()
+
+
 def read_image_info(path: str | Path, *, allow_webp: bool = False) -> dict[str, Any]:
     source = Path(path)
     magic = detect_format(source)
@@ -90,10 +132,11 @@ def read_image_info(path: str | Path, *, allow_webp: bool = False) -> dict[str, 
         raise CompressionRuntimeError("SOURCE_FORMAT_UNSUPPORTED", "Only PNG and JPEG are supported.", TechnicalStatus.CANNOT_MEET_SAFELY)
     try:
         with Image.open(source) as opened:
-            if allow_webp and (getattr(opened, "is_animated", False) or getattr(opened, "n_frames", 1) != 1):
-                raise CompressionRuntimeError("MULTI_FRAME_SOURCE_UNSUPPORTED", "仅支持单帧静态图片。", TechnicalStatus.CANNOT_MEET_SAFELY)
-            opened.load()
-            file_format = "JPEG" if opened.format == "JPG" else str(opened.format or "UNKNOWN").upper()
+            if allow_webp:
+                file_format = load_static_image(opened)
+            else:
+                opened.load()
+                file_format = "JPEG" if opened.format == "JPG" else str(opened.format or "UNKNOWN").upper()
             info = dict(opened.info or {})
             icc = info.get("icc_profile") if isinstance(info.get("icc_profile"), bytes) else None
             exif = info.get("exif") if isinstance(info.get("exif"), bytes) else b""
@@ -185,7 +228,9 @@ def _make_png_chunk(chunk_type: bytes, data: bytes) -> bytes:
 
 
 def _compress_scanlines(scanlines: bytes, strategy: int) -> bytes:
-    compressor = zlib.compressobj(9, zlib.DEFLATED, 15, 9, strategy)
+    # Level 9 spends disproportionate time searching equivalent DEFLATE streams.
+    # Level 6 changes encoding effort only; decoded scanlines remain identical.
+    compressor = zlib.compressobj(6, zlib.DEFLATED, 15, 9, strategy)
     return compressor.compress(scanlines) + compressor.flush()
 
 

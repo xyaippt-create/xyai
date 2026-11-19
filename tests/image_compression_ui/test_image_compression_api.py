@@ -273,7 +273,7 @@ class ImageCompressionApiStage4Tests(unittest.TestCase):
         self.assertTrue(png_record["metadata_details"]["lossless_verification"]["alpha_exact"])
         self.assertTrue(png_record["metadata_details"]["lossless_verification"]["alpha_preserved"])
 
-    def test_01c_opaque_alpha_is_removed_only_after_rgba_identity_passes(self):
+    def test_01c_opaque_alpha_is_removed_only_after_exact_rgba_identity(self):
         image = Image.new("RGBA", (128, 84), (12, 90, 180, 255))
         stream = io.BytesIO()
         image.save(stream, format="PNG", compress_level=0)

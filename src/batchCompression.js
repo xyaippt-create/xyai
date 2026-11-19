@@ -1,5 +1,6 @@
 import { apiErrorMessage } from "./compressionStatus.js";
 import { TARGET_FORMAT_OPTIONS } from "./compressionParams.js";
+import { checkBatchOutput } from "./batchOutputPreflight.js";
 
 const API_BASE = import.meta.env?.VITE_API_BASE_URL || "";
 
@@ -67,13 +68,15 @@ export const BATCH_STORAGE_KEY = "hdde.compression.active-batch.v1";
 const END_STATES = new Set(["COMPLETED", "KEEP_ORIGINAL", "FAILED", "CANCELED"]);
 const TARGET_FORMAT_VALUES = new Set(TARGET_FORMAT_OPTIONS.map((item) => item.value));
 
+const DEFAULT_BATCH_FORMAT_SETTINGS = { targetFormat: "SMART_COMPRESSION", allowOpaquePngToJpeg: true };
+
 // The browser retains only an exact batch ID. The shared backend registry owns
 // sources, scheduling and results; reload/reconnect never submits another run.
-export function createCompressionBatch({ request = requestJson, storage = globalThis.localStorage } = {}) {
+export function createCompressionBatch({ request = requestJson, storage = globalThis.localStorage, checkOutput } = {}) {
   let savedId = "";
   try { savedId = storage?.getItem(BATCH_STORAGE_KEY) || ""; } catch { /* start reports unavailable storage */ }
   if (!/^compression_batch_[a-f0-9]{32}$/.test(savedId)) savedId = "";
-  let snapshot = { items: [], running: false, batchId: savedId, loading: false, state: savedId ? "RESTORING" : "LOCAL", error: "", targetFormat: "SMART_COMPRESSION" };
+  let snapshot = { items: [], running: false, batchId: savedId, loading: false, state: savedId ? "RESTORING" : "LOCAL", error: "", ...DEFAULT_BATCH_FORMAT_SETTINGS, allowOpaquePngToJpeg: !savedId };
   const listeners = new Set();
   let refreshing = false;
   const publish = (patch) => {
@@ -97,7 +100,8 @@ export function createCompressionBatch({ request = requestJson, storage = global
       if (row.resultId) results.add(row.resultId);
     }
     if (data.serverSessionId === snapshot.serverSessionId && (data.revision || 0) < (snapshot.revision || 0)) return;
-    publish({ ...data, targetFormat: responseTargetFormat, error: "", loading: false });
+    publish({ ...data, targetFormat: responseTargetFormat, error: "", loading: false,
+      allowOpaquePngToJpeg: responseTargetFormat === "SMART_COMPRESSION" && data.allowOpaquePngToJpeg === true });
   };
   const editable = () => !snapshot.batchId && !snapshot.loading;
   const batch = {
@@ -112,7 +116,7 @@ export function createCompressionBatch({ request = requestJson, storage = global
       const additions = Array.from(files || []).map((file) => {
         const error = !/\.(png|jpe?g|webp)$/i.test(file.name)
           ? "仅支持 PNG、JPG、JPEG、WebP，请移除此项后添加支持的图片。"
-          : !file.size ? "文件为空，请重新添加有效图片。" : file.size > 50 * 1024 * 1024 ? "单张图片不能超过50MB。" : "";
+          : !file.size ? "文件为空，请重新添加有效图片。" : "";
         return {
           id: crypto.randomUUID(), file, name: file.name,
           originalBytes: file.size, finalBytes: null, savedPercent: null,
@@ -127,21 +131,45 @@ export function createCompressionBatch({ request = requestJson, storage = global
     clear() {
       if (snapshot.loading || snapshot.running || (snapshot.batchId && snapshot.items.some((item) => !END_STATES.has(item.status)))) return;
       try { storage?.removeItem(BATCH_STORAGE_KEY); } catch { publish({ error: "无法更新批次恢复记录。" }); return; }
-      publish({ items: [], batchId: "", running: false, state: "LOCAL", revision: 0, error: "", targetFormat: "SMART_COMPRESSION" });
+      publish({ items: [], batchId: "", running: false, state: "LOCAL", revision: 0, error: "", ...DEFAULT_BATCH_FORMAT_SETTINGS });
     },
     setTargetFormat(value) {
-      if (!editable() || !TARGET_FORMAT_VALUES.has(value)) return;
-      publish({ targetFormat: value, error: "" });
+      if (!editable() || !TARGET_FORMAT_VALUES.has(value) || value === snapshot.targetFormat) return;
+      publish({ targetFormat: value, allowOpaquePngToJpeg: value === DEFAULT_BATCH_FORMAT_SETTINGS.targetFormat, error: "" });
+    },
+    setAllowOpaquePngToJpeg(value) {
+      if (!editable() || snapshot.targetFormat !== "SMART_COMPRESSION") return;
+      publish({ allowOpaquePngToJpeg: value === true, error: "" });
+    },
+    async recent() {
+      return (await request("/api/image-compression/batches")).data.batches;
+    },
+    async restore(batchId) {
+      if (!editable() || snapshot.items.length || !/^compression_batch_[a-f0-9]{32}$/.test(batchId)) return;
+      try { storage?.setItem(BATCH_STORAGE_KEY, batchId); } catch { /* the server keeps the batch */ }
+      publish({ batchId, state: "RESTORING", error: "" });
+      await batch.refresh();
     },
     async start() {
-      if (!editable() || !snapshot.items.length) return;
+      if (!editable() || !snapshot.items.some((item) => item.status === "QUEUED")) return;
       const batchId = `compression_batch_${crypto.randomUUID().replaceAll("-", "")}`;
       try {
         if (!storage) throw new Error("浏览器批次恢复存储不可用，未开始处理。");
+        if (checkOutput) {
+          const sizes = snapshot.items.map((item) => item.originalBytes);
+          publish({ loading: true, error: "" });
+          try {
+            await checkOutput({ source_bytes: sizes.reduce((sum, size) => sum + size, 0), largest_source_bytes: Math.max(...sizes) });
+          } catch (reason) {
+            publish({ loading: false, error: reason.message || "无法检查批次输出空间，请重试。" });
+            return;
+          }
+        }
         storage.setItem(BATCH_STORAGE_KEY, batchId);
         const body = new FormData();
         body.set("batch_id", batchId);
         body.set("target_format", snapshot.targetFormat);
+        if (snapshot.allowOpaquePngToJpeg) body.set("allow_opaque_png_to_jpeg", "true");
         snapshot.items.forEach((item) => body.append("files", item.file));
         publish({ batchId, loading: true, state: "IMPORTING", error: "" });
         accept((await request("/api/image-compression/batches", { method: "POST", body })).data);
@@ -171,6 +199,7 @@ export function createCompressionBatch({ request = requestJson, storage = global
             catch { publish({ error: "当前批次不存在，但无法清除恢复记录；请检查浏览器存储后重试。" }); return; }
             publish({ batchId: "", items: [], running: false, loading: false, state: "BATCH_NOT_FOUND",
               revision: 0, control: undefined, serverSessionId: undefined,
+              ...DEFAULT_BATCH_FORMAT_SETTINGS,
               error: "当前批次不存在，请重新创建批次。" });
           } else {
             publish({ error: `${reason.message || "服务连接中断"} 将继续尝试恢复此批次，不会重新提交图片。` });
@@ -191,4 +220,4 @@ export function createCompressionBatch({ request = requestJson, storage = global
   return batch;
 }
 
-export const compressionBatch = createCompressionBatch();
+export const compressionBatch = createCompressionBatch({ checkOutput: (sizes) => checkBatchOutput("image-compression", sizes) });

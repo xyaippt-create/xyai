@@ -4,6 +4,12 @@ import { BATCH_STORAGE_KEY, createCompressionBatch, summarizeCompressionBatch } 
 
 const id = "compression_batch_" + "a".repeat(32);
 const file = (name = "same.png") => new File(["x".repeat(100)], name);
+
+test("batch accepts an image above 50 MB while rejecting empty and unsupported files", () => {
+  const batch = createCompressionBatch({ storage: { getItem: () => null } });
+  batch.add([{ name: "large.png", size: 51 * 1024 * 1024 }, { name: "empty.png", size: 0 }, { name: "bad.txt", size: 10 }]);
+  assert.deepEqual(batch.getSnapshot().items.map(item => item.status), ["QUEUED", "FAILED", "FAILED"]);
+});
 const storage = () => {
   const data = new Map();
   return { getItem: (key) => data.get(key), setItem: (key, value) => data.set(key, value), removeItem: (key) => data.delete(key) };
@@ -22,6 +28,7 @@ test("start saves exact batch identity before one multipart submission; never ca
     assert.equal(path, "/api/image-compression/batches");
     assert.equal(options.body.getAll("files").length, 2);
     assert.equal(options.body.get("target_format"), "JPEG");
+    assert.equal(options.body.has("allow_opaque_png_to_jpeg"), false);
     assert.equal(saved.getItem(BATCH_STORAGE_KEY), options.body.get("batch_id"));
     return { data: data(options.body.get("batch_id")) };
   } });
@@ -41,6 +48,34 @@ test("refresh restores the exact persisted batch with only GET, not latest or su
   await batch.refresh(); await batch.start();
   assert.deepEqual(calls, [[`/api/image-compression/batches/${id}`]]);
   assert.equal(batch.getSnapshot().items[1].resultId, "");
+  assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, false);
+  batch.setAllowOpaquePngToJpeg(true);
+  assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, false);
+  batch.clear();
+  assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, true);
+});
+
+test("new smart batches allow opaque PNG to JPG by default and honor an explicit opt-out", async () => {
+  for (const allowConversion of [true, false]) {
+    let submitted;
+    const batch = createCompressionBatch({ storage: storage(), request: async (_path, { body }) => {
+      submitted = body;
+      return { data: data(body.get("batch_id"), [], {
+        targetFormat: "SMART_COMPRESSION",
+        allowOpaquePngToJpeg: body.has("allow_opaque_png_to_jpeg"),
+      }) };
+    } });
+    assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, true);
+    batch.setTargetFormat("PRESERVE_FORMAT");
+    assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, false);
+    batch.setTargetFormat("SMART_COMPRESSION");
+    assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, true);
+    if (!allowConversion) batch.setAllowOpaquePngToJpeg(false);
+    batch.add([file()]);
+    await batch.start();
+    assert.equal(submitted.get("allow_opaque_png_to_jpeg"), allowConversion ? "true" : null);
+    assert.equal(batch.getSnapshot().allowOpaquePngToJpeg, allowConversion);
+  }
 });
 
 test("disconnect preserves known completed results and reconnect does not resubmit", async () => {

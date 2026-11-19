@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 from PIL import Image, ImageOps
+from PIL.PngImagePlugin import PngInfo
 
 from engine.output.filename_policy import FEATURE_COMPRESSION, build_output_path, resolve_collision_path
+from engine.output.metadata_writer import set_jpeg_jfif_density
 from engine.output.publish_safety import publish_image_bytes_with_metadata, publish_prepared_bytes_no_overwrite
 
-from .common import CompressionRuntimeError, optimise_png_data, read_image_info
+from .common import CompressionRuntimeError, load_static_image, optimise_png_data, parse_png_chunks, read_image_info
 from .jpg_quality_gate import JPG_QUALITY_GATE_VERSION, evaluate_jpg_quality, prepare_jpg_source_analysis
 from .lossless_verifier import verify_lossless_png_files, verify_lossless_webp_files
 from .statuses import TechnicalStatus
@@ -179,6 +184,13 @@ def _encode_jpg_candidate(
 ) -> bytes:
     stream = io.BytesIO()
     kwargs = _save_kwargs(source)
+    dpi = kwargs.pop("dpi", None)
+    if source.get("format") != "JPEG" and dpi:
+        # JFIF density is integer-only. Keep PNG/WebP resolution in EXIF
+        # rationals so e.g. 96.012 DPI does not become 96 and fail metadata QA.
+        exif = Image.Exif()
+        exif[282], exif[283], exif[296] = float(dpi[0]), float(dpi[1]), 2
+        kwargs["exif"] = exif
     rgb = image if image.mode == "RGB" else image.convert("RGB")
     rgb.save(
         stream,
@@ -189,7 +201,11 @@ def _encode_jpg_candidate(
         progressive=False,
         **kwargs,
     )
-    return stream.getvalue()
+    encoded = stream.getvalue()
+    # Preserve declared JFIF units exactly. The metadata writer separately
+    # inherits source EXIF. Pillow's fallback info["dpi"] is not a declaration.
+    jfif_resolution = source.get("jpeg_jfif_resolution")
+    return set_jpeg_jfif_density(encoded, *jfif_resolution) if jfif_resolution else encoded
 
 
 def _jpg_reference_image(image: Image.Image) -> Image.Image:
@@ -296,6 +312,7 @@ def _encode_png_variant(
     optimize: bool,
     compress_level: int,
     remove_opaque_alpha: bool = False,
+    pnginfo: PngInfo | None = None,
 ) -> bytes:
     stream = io.BytesIO()
     target = image.convert("RGB") if remove_opaque_alpha else (
@@ -306,6 +323,7 @@ def _encode_png_variant(
         format="PNG",
         optimize=optimize,
         compress_level=compress_level,
+        pnginfo=pnginfo,
         **_save_kwargs(source),
     )
     return stream.getvalue()
@@ -316,30 +334,41 @@ def _png_variant_payloads(
     source: dict[str, Any],
     source_data: bytes,
 ) -> list[tuple[str, bytes]]:
-    variants = [
-        ("a01_pillow_optimize", _encode_png_variant(displayed, source, optimize=True, compress_level=9)),
-        ("pillow_deflate_9", _encode_png_variant(displayed, source, optimize=False, compress_level=9)),
-        ("pillow_deflate_6", _encode_png_variant(displayed, source, optimize=False, compress_level=6)),
-    ]
-    if source.get("format") == "PNG" and source.get("exif_orientation") in (None, 1):
-        structurally_optimized, _details = optimise_png_data(source_data)
-        variants.append(("source_idat_optimized", structurally_optimized))
-    if _has_alpha_storage(displayed) and not _real_transparency(displayed):
-        variants.extend((
-            ("opaque_alpha_to_rgb_optimize", _encode_png_variant(
-                displayed,
-                source,
-                optimize=True,
-                compress_level=9,
-                remove_opaque_alpha=True,
-            )),
-            ("opaque_alpha_to_rgb_deflate_9", _encode_png_variant(
-                displayed,
-                source,
-                optimize=False,
-                compress_level=9,
-                remove_opaque_alpha=True,
-            )),
+    variants: list[tuple[str, bytes]] = []
+    pnginfo = PngInfo()
+    color_chunks = []
+    is_png_source = source.get("format") == "PNG"
+    recompress_idat = is_png_source and source.get("exif_orientation") in (None, 1)
+    if is_png_source:
+        for chunk in parse_png_chunks(source_data):
+            if chunk["type"] in {b"gAMA", b"cHRM", b"sRGB", b"cICP", b"sBIT"}:
+                pnginfo.add(chunk["type"], chunk["data"])
+                color_chunks.append(chunk["type"])
+    # Restore the original refiltering candidate once, without the duplicate
+    # level-6/9 and opaque-Alpha encoding passes. Keep the existing fast IDAT path.
+    remove_opaque_alpha = (
+        _has_alpha_storage(displayed) and not _real_transparency(displayed)
+        and b"sBIT" not in color_chunks
+    )
+    encode_refiltered = partial(
+        _encode_png_variant,
+        displayed, source, optimize=True, compress_level=9,
+        remove_opaque_alpha=remove_opaque_alpha, pnginfo=pnginfo,
+    )
+    # Overlap the two independent encoders for megapixel PNGs. Cap the
+    # pixel count to bound the memory cost of simultaneous encoding.
+    pixels = displayed.width * displayed.height
+    parallel = recompress_idat and 1_000_000 <= pixels <= 16_000_000 and (os.cpu_count() or 1) > 1
+    with (ThreadPoolExecutor(max_workers=1) if parallel else nullcontext()) as executor:
+        refiltered = executor.submit(encode_refiltered) if executor is not None else None
+        if recompress_idat:
+            structurally_optimized, _details = optimise_png_data(source_data)
+            variants.append(("source_idat_optimized", structurally_optimized))
+        encoded = refiltered.result() if refiltered is not None else encode_refiltered()
+    if not any(payload == encoded for _name, payload in variants):
+        variants.append((
+            "opaque_alpha_to_rgb_optimize" if remove_opaque_alpha else "a01_pillow_optimize",
+            encoded,
         ))
     return variants
 
@@ -679,7 +708,7 @@ def _source_candidate(source: dict[str, Any], *, width: int, height: int) -> dic
         "width": width,
         "height": height,
         "output_path": str(source["path"]),
-        "applicable_scene": "原图已经是当前质量与体积约束下的最优交付结果",
+        "applicable_scene": "本次未生成通过质量检查且更小的交付结果",
         "recommended": False,
         "reason": "没有内部候选同时通过质量安全门并获得正向体积收益。",
         "status": "AVAILABLE",
@@ -807,6 +836,7 @@ def _evaluate_jpg_trial(
 def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .jpg_large_search import plan_large_jpg_search
 
+    max_encodings = kwargs.pop("max_full_encodings", 200)
     started = time.perf_counter()
     order = tuple(CONTENT_RISK_PROFILE[kwargs["content_risk_id"]]["subsampling_order"])
     plans, roi_summary = plan_large_jpg_search(kwargs["displayed"], order)
@@ -819,6 +849,8 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
     def evaluate(quality, mode):
         key = (quality, mode)
         if key not in evaluated:
+            if len(candidates) >= max_encodings:
+                return None
             candidate = _evaluate_jpg_trial(**trial_args, quality=quality, subsampling=mode, full_resolution=True,
                                             encode_index=len(candidates) + 1)
             candidate["search_details"]["policy"] = "LARGE_NATIVE_ROI_V1"
@@ -827,12 +859,15 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
         return evaluated[key]
 
     def passed(candidate):
-        return candidate["quality_gate"]["status"] == "PASS"
+        return candidate is not None and candidate["quality_gate"]["status"] == "PASS"
 
     def refine(mode, safe, failed):
         while safe - failed > 1:
             middle = (safe + failed) // 2
-            if passed(evaluate(middle, mode)):
+            trial = evaluate(middle, mode)
+            if trial is None:
+                return safe
+            if passed(trial):
                 safe = middle
             else:
                 failed = middle
@@ -840,12 +875,17 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
         return safe
 
     for plan in plans:
+        if len(candidates) >= max_encodings:
+            break
         mode, quality = plan["subsampling"], plan["quality"]
         if not passed(evaluate(quality, mode)):
             failed, step = quality, 2
             while quality < 100:
                 quality = min(100, quality + step)
-                if passed(evaluate(quality, mode)):
+                trial = evaluate(quality, mode)
+                if trial is None:
+                    break
+                if passed(trial):
                     refine(mode, quality, failed)
                     break
                 failed, step = quality, step * 2
@@ -859,7 +899,7 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
     # winner, continue full-size coarse/fine exploration before retaining PNG.
     refined = set(boundaries)
     stop_reason = "FULL_RESOLUTION_REJECTED_BOTH_MODES"
-    while True:
+    while len(candidates) < max_encodings:
         passing = [item for item in candidates if passed(item)]
         if not passing:
             break
@@ -880,7 +920,10 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
         safe, step = int(best["search_details"]["quality"]), 1
         while safe > 1:
             quality = max(1, safe - step)
-            if passed(evaluate(quality, mode)):
+            trial = evaluate(quality, mode)
+            if trial is None:
+                break
+            if passed(trial):
                 safe, step = quality, step * 2
             else:
                 safe = refine(mode, safe, quality)
@@ -889,13 +932,15 @@ def _large_jpg_candidates(**kwargs) -> tuple[list[dict[str, Any]], dict[str, Any
             boundaries[mode] = {"last_pass": 1, "first_fail": None, "scope": "FULL_RESOLUTION_FLOOR"}
         refined.add(mode)
 
+    if len(candidates) >= max_encodings:
+        stop_reason = "FULL_RESOLUTION_BUDGET_EXHAUSTED"
     passing = [item for item in candidates if passed(item)]
     lowest = min(passing, key=lambda item: item["search_details"]["quality"], default=None)
     best = min(passing, key=lambda item: item["file_size"], default=None)
     return candidates, {
         "policy": "LARGE_NATIVE_ROI_V1", "size_profile": kwargs["size_profile_id"],
         "content_risk_profile": kwargs["content_risk_id"], "quality_floor": 1,
-        "max_encodings": 200, "encode_count": len(candidates), "full_image_encode_count": len(candidates),
+        "max_encodings": max_encodings, "encode_count": len(candidates), "full_image_encode_count": len(candidates),
         "subsampling_order": ["4:4:4" if mode == 0 else "4:2:0" for mode in order],
         "lowest_safe_quality": lowest["search_details"]["quality"] if lowest else None,
         "lowest_safe_subsampling": lowest["search_details"]["subsampling"] if lowest else None,
@@ -925,6 +970,7 @@ def _adaptive_jpg_candidates(
     lossless_bytes: int | None = None,
     alpha_handling: dict[str, Any] | None = None,
     _source_analysis: Any | None = None,
+    compare_with_preserved: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     lossless_gain = (1.0 - lossless_bytes / int(source["size_bytes"])) * 100.0 if lossless_bytes is not None else None
     if size_profile_id in {"LARGE", "VERY_LARGE"} and (
@@ -937,6 +983,7 @@ def _adaptive_jpg_candidates(
             lossless_bytes=lossless_bytes if lossless_bytes is not None else int(source["size_bytes"]),
             alpha_handling=alpha_handling,
             _source_analysis=_source_analysis,
+            max_full_encodings=int(size_profile["max_encodings"]) if compare_with_preserved else 200,
         )
     started = time.perf_counter()
     candidates: list[dict[str, Any]] = []
@@ -1212,8 +1259,9 @@ def generate_delivery_candidates(
     source_filename: str,
     moment: datetime,
     target_format: str | None = SMART_COMPRESSION_TARGET_FORMAT,
+    allow_opaque_png_to_jpeg: bool = False,
 ) -> dict[str, Any]:
-    """Run smart, preserve-format, or one explicitly requested format route."""
+    """Keep the source format by default; validate each selected format's quality."""
 
     source_file = Path(source_path).resolve()
     output_root = Path(output_directory).resolve()
@@ -1242,21 +1290,21 @@ def generate_delivery_candidates(
         registered_sha256=source_sha256,
         registered_size=source_size,
     )
+    jpeg_jfif_resolution = None
     try:
         with Image.open(io.BytesIO(source_data)) as opened:
-            if bool(getattr(opened, "is_animated", False)) or int(getattr(opened, "n_frames", 1)) != 1:
-                raise CompressionRuntimeError(
-                    "MULTI_FRAME_SOURCE_UNSUPPORTED",
-                    "多帧图片不在当前交付优化安全范围内。",
-                    TechnicalStatus.CANNOT_MEET_SAFELY,
-                )
-            opened.load()
+            load_static_image(opened)
             if opened.mode not in {"1", "L", "LA", "P", "RGB", "RGBA"}:
                 raise CompressionRuntimeError(
                     "SOURCE_COLOR_MODE_UNSUPPORTED",
                     "当前交付优化仅支持单帧 8-bit 灰度、RGB 或 RGBA 图片。",
                     TechnicalStatus.CANNOT_MEET_SAFELY,
                 )
+            if source_format == "JPEG":
+                unit = opened.info.get("jfif_unit")
+                density = opened.info.get("jfif_density")
+                if unit in (1, 2) and density and all(density):
+                    jpeg_jfif_resolution = (unit, density)
             displayed = ImageOps.exif_transpose(opened).copy()
     except CompressionRuntimeError:
         raise
@@ -1265,18 +1313,21 @@ def generate_delivery_candidates(
 
     width, height = displayed.size
     has_real_transparency = _real_transparency(displayed)
-    smart_opaque_png = bool(
-        normalized_target == SMART_COMPRESSION_TARGET_FORMAT
+    smart_png_opt_in = (
+        allow_opaque_png_to_jpeg is True and normalized_target == SMART_COMPRESSION_TARGET_FORMAT
         and source_format == "PNG"
-        and not has_real_transparency
     )
-    jpg_reference = _jpg_reference_image(displayed) if policy_target == "JPEG" or smart_opaque_png else None
+    size_profile_id, size_profile = _size_search_profile(source_size)
+    compare_jpeg = (
+        smart_png_opt_in and not has_real_transparency
+        and source_size > int(size_profile["min_jpg_saved_bytes"])
+    )
+    jpg_reference = _jpg_reference_image(displayed) if policy_target == "JPEG" or compare_jpeg else None
     alpha_handling = {
         "source_has_real_transparency": has_real_transparency,
         "action": "FLATTEN_ON_WHITE" if policy_target == "JPEG" and has_real_transparency else "PRESERVE",
         "background_rgb": [255, 255, 255] if policy_target == "JPEG" and has_real_transparency else None,
     }
-    size_profile_id, size_profile = _size_search_profile(source_size)
     content_risk_id, content_risk_metrics = _content_risk_profile(
         jpg_reference if jpg_reference is not None else displayed,
         has_real_transparency=False if jpg_reference is not None else has_real_transparency,
@@ -1312,7 +1363,7 @@ def generate_delivery_candidates(
                 TechnicalStatus.CANNOT_MEET_SAFELY,
             )
         png_candidate = None
-        if policy_target == "PNG" or smart_opaque_png:
+        if policy_target == "PNG":
             png_candidate = _generate_verified_png_candidate(
                 source_snapshot,
                 evaluation_root,
@@ -1337,23 +1388,6 @@ def generate_delivery_candidates(
                 "failure_reasons": [],
             }
             candidates.append(png_candidate)
-        if smart_opaque_png:
-            jpg_candidates, jpg_search_summary = _adaptive_jpg_candidates(
-                displayed=jpg_reference,
-                source=source,
-                source_data=source_data,
-                source_snapshot=source_snapshot,
-                evaluation_root=evaluation_root,
-                width=width,
-                height=height,
-                size_profile_id=size_profile_id,
-                size_profile=size_profile,
-                content_risk_id=content_risk_id,
-                lossless_bytes=int(png_candidate["file_size"]),
-                alpha_handling=alpha_handling,
-                _source_analysis=jpg_source_analysis,
-            )
-            candidates.extend(jpg_candidates)
         elif policy_target == "WEBP":
             candidates.append(_generate_verified_webp_candidate(
                 source_snapshot,
@@ -1364,10 +1398,11 @@ def generate_delivery_candidates(
                 displayed=displayed,
                 moment=moment,
             ))
-        elif policy_target == "JPEG":
+        best_preserved_bytes = min(source_size, int(png_candidate["file_size"])) if png_candidate else source_size
+        if policy_target == "JPEG" or compare_jpeg:
             jpg_candidates, jpg_search_summary = _adaptive_jpg_candidates(
                 displayed=jpg_reference,
-                source=source,
+                source={**source, "jpeg_jfif_resolution": jpeg_jfif_resolution},
                 source_data=source_data,
                 source_snapshot=source_snapshot,
                 evaluation_root=evaluation_root,
@@ -1376,16 +1411,22 @@ def generate_delivery_candidates(
                 size_profile_id=size_profile_id,
                 size_profile=size_profile,
                 content_risk_id=content_risk_id,
-                lossless_bytes=source_size,
+                lossless_bytes=best_preserved_bytes,
                 alpha_handling=alpha_handling,
                 _source_analysis=jpg_source_analysis,
+                compare_with_preserved=compare_jpeg,
             )
             candidates.extend(jpg_candidates)
 
         eligible = [
             item for item in candidates
             if item["status"] == "AVAILABLE"
+            and (item.get("format") == "JPG" or (
+                item.get("lossless_verified") is True
+                and item.get("pixel_identical") is True
+            ))
             and item.get("quality_gate", {}).get("status") == "PASS"
+            and (not compare_jpeg or item["format"] != "JPG" or int(item["file_size"]) < best_preserved_bytes)
             and (explicit_conversion or _has_winner_size_benefit(
                 item,
                 source_size=source_size,
@@ -1445,9 +1486,9 @@ def generate_delivery_candidates(
                 for item in candidates
             )
             source_candidate["reason"] = (
-                "通过质量安全门的同格式候选未获得足够体积收益，已保留原图。"
+                "通过质量检查的候选未获得足够体积收益，已保留原图。"
                 if any_target_pass
-                else "没有内部候选同时通过质量安全门并获得有效体积收益，已保留原图。"
+                else "未找到更小且通过质量检查的结果，已保留原图。"
             )
             recommendation_reason = str(source_candidate["reason"])
             winner["recommended"] = True
@@ -1461,39 +1502,34 @@ def generate_delivery_candidates(
 
         smart_summary = ""
         smart_details: dict[str, Any] = {
-            "comparison_performed": smart_opaque_png,
+            "comparison_performed": compare_jpeg,
             "png_candidate_bytes": int(png_candidate["file_size"]) if png_candidate is not None else None,
             "jpeg_candidate_bytes": None,
             "jpeg_gate_result": "NOT_RUN",
             "jpeg_rejection_reason": None,
+            "best_preserved_bytes": best_preserved_bytes,
         }
-        if smart_opaque_png:
-            jpg_items = [item for item in candidates if item.get("format") == "JPG"]
-            passing_jpg = [item for item in jpg_items if item.get("quality_gate", {}).get("status") == "PASS"]
-            best_jpg = min(
-                passing_jpg or jpg_items,
-                key=lambda item: int(item.get("file_size") or source_size),
-                default=None,
-            )
-            if best_jpg is not None:
-                smart_details["jpeg_candidate_bytes"] = int(best_jpg["file_size"])
-                smart_details["jpeg_gate_result"] = str(best_jpg.get("quality_gate", {}).get("status") or "UNKNOWN")
-            if winner_output_format == "JPEG":
-                smart_summary = "智能压缩已在质量要求范围内选择更小的交付格式。"
-            else:
-                smart_summary = "已保持 PNG，未找到质量达标且更小的 JPG 结果。"
-                if not passing_jpg:
-                    reasons = sorted({
-                        str(reason)
-                        for item in jpg_items
-                        for reason in item.get("quality_gate", {}).get("failure_reasons", [])
-                        if reason
-                    })
-                    smart_details["jpeg_rejection_reason"] = ", ".join(reasons) or "JPEG_QUALITY_GATE_REJECTED"
-                elif png_candidate is not None and int(best_jpg["file_size"]) >= int(png_candidate["file_size"]):
-                    smart_details["jpeg_rejection_reason"] = "JPEG_NOT_SMALLER_THAN_PNG"
-                else:
-                    smart_details["jpeg_rejection_reason"] = "JPEG_GAIN_BELOW_MINIMUM"
+        jpg_items = [item for item in candidates if item.get("format") == "JPG"]
+        passing_jpg = [item for item in jpg_items if item.get("quality_gate", {}).get("status") == "PASS"]
+        best_jpg = min(passing_jpg or jpg_items, key=lambda item: int(item["file_size"]), default=None)
+        if best_jpg is not None:
+            smart_details["jpeg_candidate_bytes"] = int(best_jpg["file_size"])
+            smart_details["jpeg_gate_result"] = str(best_jpg["quality_gate"]["status"])
+        if normalized_target == SMART_COMPRESSION_TARGET_FORMAT:
+            smart_summary = "默认保持原格式，在通过质量检查的候选中择优；无法安全减小时保留原图。"
+            if compare_jpeg:
+                smart_summary = "已比较保格式结果与通过全图画质检查的 JPG，按实际体积和收益择优。"
+                if not format_conversion:
+                    if not passing_jpg:
+                        smart_details["jpeg_rejection_reason"] = "JPG_QUALITY_GATE_NOT_PASSED"
+                    elif int(best_jpg["file_size"]) >= best_preserved_bytes:
+                        smart_details["jpeg_rejection_reason"] = "JPG_NOT_SMALLER_THAN_PRESERVED"
+                    else:
+                        smart_details["jpeg_rejection_reason"] = "JPG_SAVINGS_INSUFFICIENT"
+            elif smart_png_opt_in:
+                smart_details["jpeg_rejection_reason"] = (
+                    "SOURCE_HAS_REAL_TRANSPARENCY" if has_real_transparency else "JPG_SAVINGS_INSUFFICIENT"
+                )
 
         winner_scheme_id = str(winner["scheme_id"])
         for candidate in candidates:
@@ -1515,13 +1551,14 @@ def generate_delivery_candidates(
     return {
         "source": source,
         "target_format": normalized_target,
+        "allow_opaque_png_to_jpeg": allow_opaque_png_to_jpeg is True and normalized_target == SMART_COMPRESSION_TARGET_FORMAT,
         "effective_target_format": winner_output_format,
         "format_conversion": format_conversion,
         "format_policy": (
-            "SMART_SAFE_FORMAT_SELECTION"
-            if normalized_target == SMART_COMPRESSION_TARGET_FORMAT
+            "SMART_OPAQUE_PNG_JPEG"
+            if compare_jpeg
             else "PRESERVE_SOURCE_FORMAT"
-            if normalized_target == PRESERVE_FORMAT_TARGET_FORMAT
+            if normalized_target in {SMART_COMPRESSION_TARGET_FORMAT, PRESERVE_FORMAT_TARGET_FORMAT}
             else "USER_SELECTED_TARGET_FORMAT"
         ),
         "smart_compression_summary": smart_summary,

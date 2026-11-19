@@ -13,10 +13,11 @@ from engine.output.metadata_writer import (
     HDDE_SOFTWARE,
     _extract_xmp,
     _merged_xmp,
+    _read_exif,
     read_hdde_metadata,
 )
 
-from .common import read_image_info
+from .common import PNG_SIGNATURE, parse_png_chunks, read_image_info
 
 
 _PROTECTED_EXIF_TAGS = (
@@ -50,10 +51,8 @@ def _has_alpha_storage(image: Image.Image) -> bool:
 
 
 def _protected_exif_facts(path: Path) -> dict[int, str]:
-    with Image.open(path) as image:
-        image.load()
-        exif = image.getexif()
-        return {tag: repr(exif.get(tag)) for tag in _PROTECTED_EXIF_TAGS if tag in exif}
+    exif = _read_exif(path.read_bytes())
+    return {tag: repr(exif.get(tag)) for tag in _PROTECTED_EXIF_TAGS if tag in exif}
 
 
 def _dpi_matches(source_dpi: Any, output_dpi: Any) -> bool:
@@ -150,6 +149,15 @@ def _verify_lossless_files(
     dpi_preserved = _dpi_matches(source_info.get("dpi"), output_info.get("dpi"))
     source_data = source_file.read_bytes()
     output_data = candidate_file.read_bytes()
+    def color_chunks(data: bytes) -> dict[bytes, bytes]:
+        if not data.startswith(PNG_SIGNATURE):
+            return {}
+        return {chunk["type"]: chunk["data"] for chunk in parse_png_chunks(data)
+                if chunk["type"] in {b"gAMA", b"cHRM", b"sRGB", b"cICP", b"sBIT"}}
+
+    # Identical channel values alone cannot prove identical appearance if a
+    # conversion drops PNG gamma or color interpretation declarations.
+    color_rendering_preserved = color_chunks(source_data) == color_chunks(output_data)
     source_sha256 = hashlib.sha256(source_data).hexdigest()
     output_sha256 = hashlib.sha256(output_data).hexdigest()
     artifact_identity_stable = (
@@ -167,6 +175,7 @@ def _verify_lossless_files(
         icc_preserved,
         dpi_preserved,
         xmp_preserved,
+        color_rendering_preserved,
     ))
     decodable = output_info.get("format") == expected_format
     lossless_verified = bool(decodable and pixel_identical and alpha_preserved and metadata_verified)
@@ -197,6 +206,7 @@ def _verify_lossless_files(
         "identity_metadata_preserved": identity_metadata_preserved,
         "exif_preserved": exif_preserved,
         "icc_preserved": icc_preserved,
+        "color_rendering_preserved": color_rendering_preserved,
         "dpi_preserved": dpi_preserved,
         "xmp_preserved": xmp_preserved,
         "decodable": decodable,

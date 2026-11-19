@@ -1,6 +1,7 @@
 """A06 durable orchestration, using the real frozen optimizer and registry."""
 import asyncio
 import copy
+import errno
 import hashlib
 import io
 import tempfile
@@ -33,11 +34,11 @@ class BatchStabilityTests(unittest.TestCase):
                      "image_compression_output_dir": self.output, "tmp_dir": self.root / "tmp"}
         self.client = None
 
-    def open(self):
+    def open(self, output_dir_validator=None):
         self.registry = SharedTaskRegistry(self.root)
         app = FastAPI()
         state = register_image_compression_routes(app, user_dirs_provider=lambda: self.dirs,
-                                                 shared_task_registry=self.registry)
+                                                 shared_task_registry=self.registry, output_dir_validator=output_dir_validator)
         self.service = state["batch_service"]
         self.client = TestClient(app)
         self.client.__enter__()
@@ -62,9 +63,12 @@ class BatchStabilityTests(unittest.TestCase):
             Image.new("RGBA" if alpha else "RGB", (160, 120), (24, 120, 220, 90) if alpha else (24, 120, 220)).save(data, format="PNG", compress_level=0)
         return ("same.jpg" if keep else "same.png", data.getvalue(), "image/jpeg" if keep else "image/png")
 
-    def create(self, files, workers=1, target_format="PRESERVE_FORMAT"):
+    def create(self, files, workers=1, target_format="PRESERVE_FORMAT", allow_opaque_png_to_jpeg=None):
         batch_id = "compression_batch_" + uuid.uuid4().hex
-        response = self.client.post("/api/image-compression/batches", data={"batch_id": batch_id, "workers": workers, "target_format": target_format},
+        data = {"batch_id": batch_id, "workers": workers, "target_format": target_format}
+        if allow_opaque_png_to_jpeg is not None:
+            data["allow_opaque_png_to_jpeg"] = allow_opaque_png_to_jpeg
+        response = self.client.post("/api/image-compression/batches", data=data,
                                     files=[("files", value) for value in files])
         self.assertEqual(response.status_code, 200, response.text)
         return batch_id
@@ -115,8 +119,9 @@ class BatchStabilityTests(unittest.TestCase):
 
         self.assertEqual(len(after), len(before))
         for old_item, new_item in zip(before, after, strict=True):
-            old_stable = {key: value for key, value in old_item.items() if key != "sourcePreviewUrl"}
-            new_stable = {key: value for key, value in new_item.items() if key != "sourcePreviewUrl"}
+            preview_fields = {"sourcePreviewUrl", "sourceThumbnailUrl"}
+            old_stable = {key: value for key, value in old_item.items() if key not in preview_fields}
+            new_stable = {key: value for key, value in new_item.items() if key not in preview_fields}
             self.assertEqual(new_stable, old_stable)
             if not new_item["sourceSha256"]:
                 self.assertFalse(new_item["sourcePreviewUrl"])
@@ -156,6 +161,18 @@ class BatchStabilityTests(unittest.TestCase):
             paused = self.until(batch_id, lambda d: d["state"] == "PAUSED")
             self.assertEqual([i["status"] for i in paused["items"]], ["COMPLETED", "QUEUED", "QUEUED"])
             first_id = paused["items"][0]["resultId"]
+            eligibility_url = f"/api/image-compression/batches/{batch_id}/delivery/eligibility"
+            eligible = self.client.get(eligibility_url).json()["data"]
+            self.assertEqual(eligible["originalItemIds"], [])
+            self.assertEqual([item["result_id"] for item in eligible["items"]], [first_id])
+            self.assertTrue(eligible["items"][0]["delivery_eligible"])
+            winner = Path(paused["items"][0]["output_path"])
+            moved = winner.with_suffix(".eligibility-probe")
+            winner.rename(moved)
+            try:
+                self.assertFalse(self.client.get(eligibility_url).json()["data"]["items"][0]["available"])
+            finally:
+                moved.rename(winner)
             self.control(batch_id, "resume")
             done = self.until(batch_id)
             self.assertEqual(done["items"][0]["resultId"], first_id)
@@ -192,6 +209,27 @@ class BatchStabilityTests(unittest.TestCase):
         restored = self.status(batch_id)
         for item in restored["items"]:
             self.assertEqual(self.client.get(item["sourcePreviewUrl"]).status_code, 200)
+
+    def test_restored_batch_thumbnail_and_preview_reject_a_replaced_source(self):
+        self.open()
+        original = io.BytesIO()
+        Image.new("RGBA", (320, 240), (20, 40, 60, 90)).save(original, format="PNG", compress_level=0)
+        batch_id = self.create([("alpha.png", original.getvalue(), "image/png")])
+        self.until(batch_id)
+        self.close()
+        self.open()
+        item = self.status(batch_id)["items"][0]
+        thumb = self.client.get(item["sourceThumbnailUrl"])
+        self.assertEqual(thumb.status_code, 200, thumb.text)
+        with Image.open(io.BytesIO(thumb.content)) as opened:
+            self.assertEqual(opened.size, (160, 120))
+            self.assertEqual(opened.getpixel((0, 0))[3], 90)
+        preview = self.client.get(item["sourcePreviewUrl"])
+        self.assertEqual(preview.content, original.getvalue())
+        source = Path(self.service.batches[batch_id]["items"][0]["source"]["path"])
+        Image.new("RGBA", (320, 240), (60, 40, 20, 90)).save(source, format="PNG", compress_level=0)
+        self.assertEqual(self.client.get(item["sourceThumbnailUrl"]).status_code, 404)
+        self.assertEqual(self.client.get(item["sourcePreviewUrl"]).status_code, 404)
 
     def test_cancel_drains_active_and_never_deletes_winner(self):
         self.open()
@@ -257,6 +295,105 @@ class BatchStabilityTests(unittest.TestCase):
         self.assertEqual([i["status"] for i in done["items"]], ["COMPLETED", "FAILED", "COMPLETED"])
         self.assertEqual(done["items"][1]["error"], "SOURCE_IDENTITY_MISMATCH")
         self.assert_outputs(done)
+
+    def test_retry_failed_reuses_publication_receipt_and_ignores_bad_source(self):
+        self.open()
+        blocked = True
+
+        def publish(source, candidates, *, expected_sha256):
+            target, = candidates
+            if blocked and self.output in target.parents and "retry-me" in target.name:
+                raise PermissionError(errno.EACCES, "temporarily denied")
+            return publish_verified_file_copy_no_overwrite(source, [target], expected_sha256=expected_sha256)
+
+        image = self.image()
+        with patch("backend.batch_compression_api.publish_verified_file_copy_no_overwrite", side_effect=publish):
+            batch_id = self.create([image, ("retry-me.png", *image[1:]), ("bad.png", b"bad", "image/png")])
+            before = self.until(batch_id)
+            self.assertEqual([i["status"] for i in before["items"]], ["COMPLETED", "FAILED", "FAILED"])
+            self.assertEqual([i["retryable"] for i in before["items"]], [False, True, False])
+            self.close()
+            blocked = False
+            self.open()
+            recent = self.client.get("/api/image-compression/batches").json()["data"]["batches"]
+            self.assertEqual(recent[0]["batchId"], batch_id)
+            with patch("backend.image_compression_api.generate_delivery_candidates", side_effect=AssertionError("receipt must be reused")):
+                self.control(batch_id, "retry_failed")
+                self.control(batch_id, "retry_failed")
+                after = self.until(batch_id)
+        self.assertEqual([i["status"] for i in after["items"]], ["COMPLETED", "COMPLETED", "FAILED"])
+        for field in ("taskId", "resultId", "outputSha256", "output_path"):
+            self.assertEqual(before["items"][0][field], after["items"][0][field])
+        self.assert_outputs(after)
+
+    def test_keep_original_delivery_validates_source_and_reuses_copy_after_restart(self):
+        self.open()
+        original = self.image(keep=True)
+        batch_id = self.create([original, original])
+        done = self.until(batch_id)
+        self.assertEqual([item["status"] for item in done["items"]], ["KEEP_ORIGINAL", "KEEP_ORIGINAL"])
+        eligibility_url = f"/api/image-compression/batches/{batch_id}/delivery/eligibility"
+        self.assertEqual(self.client.get(eligibility_url).json()["data"]["originalItemIds"],
+                         [item["id"] for item in done["items"]])
+        urls = [f"/api/image-compression/batches/{batch_id}/delivery/originals/{item['id']}" for item in done["items"]]
+        self.assertEqual(self.client.post(urls[0], json={"confirmed": 1}).status_code, 400)
+        copies = []
+        for url in urls:
+            response = self.client.post(url, json={"confirmed": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            copies.append(response.json()["data"])
+        self.assertEqual([copy["deliveryFileName"] for copy in copies], ["same.jpg", "same_02.jpg"])
+        self.close()
+        self.open()
+        self.assertEqual(self.client.post(urls[0], json={"confirmed": True}).json()["data"], copies[0])
+        source = Path(self.service.batches[batch_id]["items"][1]["source"]["path"])
+        source.write_bytes(b"invalid original")
+        self.assertEqual(self.client.get(eligibility_url).json()["data"]["originalItemIds"],
+                         [done["items"][0]["id"]])
+        rejected = self.client.post(urls[1], json={"confirmed": True})
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["detail"]["code"], "BATCH_ORIGINAL_UNAVAILABLE")
+        self.assertEqual(len(list((self.root / "输出" / "智能交付").iterdir())), 2)
+        for copy in copies:
+            self.assertEqual(Path(copy["deliveryPath"]).read_bytes(), original[1])
+
+    def test_retry_failed_accepts_confirmed_output_root_write_probe_failure(self):
+        checks = 0
+
+        def validate(path):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                return {"valid": False, "failed_stage": "output_directory_writable_check"}
+            return {"valid": True, "normalized_path": path}
+
+        self.open(output_dir_validator=validate)
+        batch_id = self.create([self.image()], target_format="SMART_COMPRESSION", allow_opaque_png_to_jpeg=True)
+        before = self.until(batch_id)["items"][0]
+        self.assertEqual(before["status"], "FAILED")
+        self.assertTrue(before["retryable"])
+        self.control(batch_id, "retry_failed")
+        retried = self.until(batch_id)
+        after = retried["items"][0]
+        self.assertEqual(after["status"], "COMPLETED")
+        self.assertEqual(after["taskId"], before["taskId"])
+        self.assertTrue(retried["allowOpaquePngToJpeg"])
+        self.assertTrue(self.registry[after["taskId"]]["request"]["allow_opaque_png_to_jpeg"])
+
+    def test_low_space_rejects_compression_before_saving_batch(self):
+        client = self.open()
+        image = self.image()[1]
+        endpoint = "/api/image-compression/batches"
+        batch_id = "compression_batch_" + "a" * 32
+        with patch("backend.batch_capacity.shutil.disk_usage") as usage:
+            usage.return_value.free = len(image) * 2
+            preflight = client.post(f"{endpoint}/preflight", json={"source_bytes": len(image), "largest_source_bytes": len(image)})
+            created = client.post(endpoint, data={"batch_id": batch_id}, files={"files": ("input.png", image, "image/png")})
+        for response in (preflight, created):
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "BATCH_DISK_SPACE_INSUFFICIENT")
+        self.assertEqual(client.get(f"{endpoint}/{batch_id}").status_code, 404)
+        self.assertFalse(list(self.root.rglob("*.png")))
 
     def test_duplicate_batch_id_and_unknown_recovery_are_rejected(self):
         self.open()

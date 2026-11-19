@@ -16,11 +16,11 @@ export const TARGET_FORMAT_OPTIONS = Object.freeze([
 ]);
 
 const TARGET_FORMAT_HELPERS = Object.freeze({
-  SMART_COMPRESSION: "在安全范围内自动选择更小的合格结果；透明图片默认保留原格式。",
-  PRESERVE_FORMAT: "保持原图片格式，仅优化当前格式。",
-  JPEG: "统一输出为 JPG。",
-  PNG: "统一输出为 PNG。",
-  WEBP: "统一输出为 WebP，部分软件可能不兼容。",
+  SMART_COMPRESSION: "默认保持原格式，按质量检查选择更小的结果；JPG 使用高质量压缩，不保证固定压缩比例。",
+  PRESERVE_FORMAT: "保持原图片格式；PNG / WebP 使用无损优化，JPG 按质量门槛压缩。",
+  JPEG: "按质量门槛输出 JPG，可能产生像素差异；透明区域将合成到白底。",
+  PNG: "无损输出为 PNG，全部像素与透明通道保持不变。",
+  WEBP: "无损输出为 WebP，全部像素保持不变；部分软件可能不兼容。",
 });
 
 export function targetFormatHelper(targetFormat) {
@@ -176,6 +176,7 @@ export function buildCompressionRequestPlan({
   fileInfo,
   mode,
   targetFormat = "SMART_COMPRESSION",
+  allowOpaquePngToJpeg = false,
   resizeStrategy = "short_side",
   shortSidePreset = "1080",
   customShortSide = "",
@@ -194,7 +195,11 @@ export function buildCompressionRequestPlan({
     return {
       valid: true,
       message: targetFormatHelper(normalizedTarget),
-      params: { target_format: normalizedTarget },
+      params: {
+        target_format: normalizedTarget,
+        ...(normalizedTarget === "SMART_COMPRESSION" && allowOpaquePngToJpeg === true
+          ? { allow_opaque_png_to_jpeg: true } : {}),
+      },
     };
   }
   if (fileInfo.format === "WEBP") return { valid: false, message: "WebP 当前仅支持交付方案中的保格式压缩或明确格式转换。", params: {} };

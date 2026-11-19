@@ -27,11 +27,11 @@ function adviceFor(resultValue, winner = { source_selected: false, format: "PNG"
   });
 }
 
-test("preserve-format PNG with limited benefit offers user-controlled JPG and WebP directions", () => {
+test("preserve-format PNG offers user-controlled JPG and lossless WebP", () => {
   const advice = adviceFor(result());
   assert.equal(advice.kind, "LIMITED_PNG");
   assert.deepEqual(advice.actions.map((item) => item.targetFormat), ["JPEG", "WEBP"]);
-  assert.match(advice.detail, /实际结果以重新处理后的质量检查为准/);
+  assert.match(advice.detail, /须通过质量检查/);
   assert.doesNotMatch(`${advice.title}${advice.detail}`, /预计|一定更小|\d+\s*(?:KB|MB|%)/i);
 });
 
@@ -58,7 +58,7 @@ test("KEEP_ORIGINAL explains the outcome without inventing cross-format candidat
   });
   assert.equal(webpAdvice.kind, "KEEP_ORIGINAL");
   assert.deepEqual(webpAdvice.actions, []);
-  assert.match(webpAdvice.title, /未生成更小且符合质量要求的新文件/);
+  assert.equal(webpAdvice.title, "未找到更小且通过质量检查的结果，已保留原图");
 
   const jpgAdvice = adviceFor(result({ source_format: "JPEG", output_format: "JPEG" }), {
     source_selected: true,

@@ -57,7 +57,7 @@ export function buildCompressionAdvice({ result, winner, operationMode, targetFo
   const pixels = imagePixels(result.source_dimensions);
   const hasAlpha = result?.alpha_details?.alpha_present === true;
   const base = keepOriginal
-    ? "当前图片已较紧凑，未生成更小且符合质量要求的新文件。"
+    ? "未找到更小且通过质量检查的结果，已保留原图"
     : `当前保持 ${sourceFormat} 格式，压缩收益有限。`;
 
   if (sourceFormat === "PNG" && sourceBytes >= MIN_USEFUL_SOURCE_BYTES && pixels >= MIN_USEFUL_PIXELS) {
@@ -65,13 +65,13 @@ export function buildCompressionAdvice({ result, winner, operationMode, targetFo
       kind: keepOriginal ? "KEEP_ORIGINAL" : "LIMITED_PNG",
       title: base,
       detail: hasAlpha
-        ? "如需保留透明区域且更看重文件体积，可尝试 WebP。"
-        : "如更看重文件体积，可尝试 JPG 或 WebP；实际结果以重新处理后的质量检查为准。",
+        ? "如需保留透明区域，可尝试无损 WebP；仍须通过全部像素与颜色信息不变的验证。"
+        : "可手动选择 JPG 或 WebP；JPG 可能产生像素差异，实际结果须通过质量检查，不保证固定压缩比例。",
       actions: hasAlpha
-        ? [{ targetFormat: "WEBP", label: "选择 WebP 格式" }]
+        ? [{ targetFormat: "WEBP", label: "选择无损 WebP 格式" }]
         : [
             { targetFormat: "JPEG", label: "选择 JPG 格式" },
-            { targetFormat: "WEBP", label: "选择 WebP 格式" },
+            { targetFormat: "WEBP", label: "选择无损 WebP 格式" },
           ],
     };
   }
@@ -80,7 +80,7 @@ export function buildCompressionAdvice({ result, winner, operationMode, targetFo
     return {
       kind: "KEEP_ORIGINAL",
       title: base,
-      detail: "如交付环境支持 WebP，可将其作为另一个方向尝试；不保证一定更小。",
+      detail: "如交付环境支持 WebP，可尝试无损 WebP；不保证一定更小。",
       actions: [{ targetFormat: "WEBP", label: "选择 WebP 格式" }],
     };
   }

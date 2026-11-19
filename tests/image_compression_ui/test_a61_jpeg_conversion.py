@@ -112,15 +112,97 @@ class JpegConversionTests(unittest.TestCase):
         self.assertEqual(raised.exception.failure_code,'JPG_NO_VALID_CANDIDATE')
         self.assertEqual(list(output.iterdir()),[])
 
-    def test_normal_search_evaluates_full_pixels_above_analysis_bound(self):
-        # Exercise the old 4 MP failure branch with a small, fast fixture.
-        # Lower only the analysis dispatch boundary, never quality thresholds.
+    def test_lossless_verification_is_independent_of_jpeg_analysis_bound(self):
+        with patch('engine.image_compression.jpg_quality_gate.MAX_ANALYSIS_PIXELS', 200_000):
+            data, _ = self.convert('PNG', params={'target_format':'WEBP'})
+        result = data['result']
+        self.assertTrue(result['output_created'])
+        self.assertFalse(result['lossy'])
+        self.assertEqual(result['winner']['quality_gate']['status'], 'PASS')
+        self.assertEqual(result['output_dimensions'], {'width':640,'height':360})
+
+    def test_fractional_png_dpi_survives_explicit_jpeg_without_weakening_metadata_gate(self):
+        from engine.output.metadata_writer import _read_effective_dpi
+        stream = io.BytesIO()
+        _business_image().save(stream, format='PNG', dpi=(96, 96))
+        original = stream.getvalue()
+        expected = _read_effective_dpi(original)
+        self.assertAlmostEqual(expected[0], 96.012, places=4)
+        intake = self.intake_bytes(original, 'fractional-dpi.png')
+        response = self.client.post('/api/image-compression/run', json={
+            'source_token': intake['source_token'], 'operation_mode': 'DELIVERY_OPTIMIZATION',
+            'params': {'target_format': 'JPEG'},
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()['data']['result']
+        output = Path(result['output_path']).read_bytes()
+        actual = _read_effective_dpi(output)
+        self.assertAlmostEqual(actual[0], expected[0], places=4)
+        self.assertAlmostEqual(actual[1], expected[1], places=4)
+        self.assertEqual(result['winner']['quality_gate']['status'], 'PASS')
+        record = self.state['task_registry'][result['task_id']]
+        winner = next(item for item in record['candidate_options'] if item['recommended'])
+        self.assertTrue(winner['metadata_details']['dpi_unchanged'])
+
+    def test_jpeg_recompression_preserves_only_declared_resolution(self):
+        from engine.output.metadata_writer import _read_effective_dpi, set_jpeg_jfif_density
+
+        for unit, density, exif_dpi, expected in (
+            (0, (1, 1), None, None),
+            (1, (300, 240), None, (300.0, 240.0)),
+            (2, (39, 40), (300, 300), (99.06, 101.6)),
+            (0, (1, 1), (96.25, 120.5), (96.25, 120.5)),
+        ):
+            with self.subTest(unit=unit, density=density, exif_dpi=exif_dpi):
+                exif = Image.Exif()
+                exif[274] = 1  # EXIF with no resolution makes Pillow report its 72 DPI fallback.
+                if exif_dpi:
+                    exif[282], exif[283], exif[296] = *exif_dpi, 2
+                stream = io.BytesIO()
+                _business_image().save(stream, format='JPEG', quality=100, subsampling=0, exif=exif)
+                original = set_jpeg_jfif_density(stream.getvalue(), unit, density)
+                self.assertEqual(_read_effective_dpi(original), expected)
+                if expected is None:
+                    with Image.open(io.BytesIO(original)) as opened:
+                        self.assertEqual(opened.info.get('dpi'), (72, 72))
+                intake = self.intake_bytes(original, 'resolution.jpg', 'image/jpeg')
+                response = self.client.post('/api/image-compression/run', json={
+                    'source_token': intake['source_token'], 'operation_mode': 'DELIVERY_OPTIMIZATION',
+                    'params': {'target_format': 'SMART_COMPRESSION'},
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                result = response.json()['data']['result']
+                self.assertTrue(result['output_created'], result)
+                self.assertEqual(result['winner']['quality_gate']['status'], 'PASS')
+                output = Path(result['output_path']).read_bytes()
+                self.assertEqual(_read_effective_dpi(output), expected)
+                with Image.open(io.BytesIO(output)) as opened:
+                    self.assertEqual(opened.info.get('jfif_unit'), unit)
+                    self.assertEqual(opened.info.get('jfif_density'), density)
+
+    def test_genuinely_different_jpeg_dpi_is_rejected_before_publish(self):
+        from engine.output.metadata_writer import _read_effective_dpi
+        from engine.output.publish_safety import OutputMetadataStageError, publish_image_bytes_with_metadata
+
+        original, wrong = io.BytesIO(), io.BytesIO()
+        image = _business_image()
+        image.save(original, format='JPEG', dpi=(300, 240))
+        image.save(wrong, format='JPEG', dpi=(301, 240))
+        self.assertEqual(_read_effective_dpi(original.getvalue()), (300.0, 240.0))
+        self.assertEqual(_read_effective_dpi(wrong.getvalue()), (301.0, 240.0))
+        output = self.root / 'wrong-dpi.jpg'
+        with self.assertRaisesRegex(OutputMetadataStageError, 'DPI_METADATA_NOT_PRESERVED'):
+            publish_image_bytes_with_metadata(wrong.getvalue(), output, source_data=original.getvalue())
+        self.assertFalse(output.exists())
+
+    def test_jpeg_search_checks_full_pixels_above_analysis_bound(self):
         with patch('engine.image_compression.jpg_quality_gate.MAX_ANALYSIS_PIXELS', 200_000):
             data, _ = self.convert('PNG')
         result = data['result']
         self.assertTrue(result['output_created'])
+        self.assertTrue(result['lossy'])
         self.assertEqual(result['winner']['quality_gate']['status'], 'PASS')
-        self.assertEqual(result['output_dimensions'], {'width':640,'height':360})
+        self.assertEqual(result['output_dimensions'], {'width': 640, 'height': 360})
 
     def test_metadata_reader_avoids_jpeg_pixel_decode_but_writer_still_checks_pixels(self):
         import engine.output.metadata_writer as writer
@@ -155,7 +237,7 @@ class WebpBatchConversionTests(unittest.TestCase):
         self.open()
         stream = io.BytesIO()
         _business_image().save(stream,format='WEBP',lossless=True)
-        batch_id = self.create([('graphic.webp',stream.getvalue(),'image/webp')], target_format='JPEG')
+        batch_id = self.create([('graphic.webp',stream.getvalue(),'image/webp')], target_format='PNG')
         data = self.until(batch_id)
         item = data['items'][0]
         self.assertEqual(item['status'],'COMPLETED',item)

@@ -7,23 +7,27 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import errno
 import logging
+import os
 import re
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from fastapi import Body, File, Form, HTTPException, UploadFile
 
+from backend.batch_capacity import batch_size_field, require_batch_capacity
 from engine.image_compression.common import sha256_file as file_sha
 from engine.image_compression.delivery_options import (
     PRESERVE_FORMAT_TARGET_FORMAT,
     SMART_COMPRESSION_TARGET_FORMAT,
     SUPPORTED_TARGET_FORMATS,
 )
-from engine.output.publish_safety import publish_verified_file_copy_no_overwrite
+from engine.output.publish_safety import OutputIdentityMismatchError, publish_verified_file_copy_no_overwrite
 from engine.storage.shared_task_registry import SharedTaskRegistryError
 from engine.storage.batch_results import BATCH_SCHEMA, item_identity, mapping, value
 
@@ -33,7 +37,6 @@ BATCH_KIND = "compression_batch"
 DEFAULT_WORKERS = 2
 MAX_WORKERS = 3
 MAX_FILES = 100
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 # Do not run several large, full-resolution quality analyses at once.
 ACTIVE_PIXEL_BUDGET = 8_000_000
 TERMINAL = {"COMPLETED", "KEEP_ORIGINAL", "FAILED", "CANCELED"}
@@ -68,7 +71,8 @@ def result_outcome(record, item):
     if record.get("winner_scheme_id") == "keep_original":
         if record.get("result_id") or record.get("public_output_count") != 0 or result.get("output_created"):
             raise ValueError("BATCH_KEEP_ORIGINAL_CONTRACT_INVALID")
-        return {"status": "KEEP_ORIGINAL", "final_bytes": item["original_bytes"], "result_id": "", "output_path": "", "output_sha256": ""}
+        return {"status": "KEEP_ORIGINAL", "final_bytes": item["original_bytes"], "result_id": "", "output_path": "", "output_sha256": "",
+                "output_format": result.get("source_format") or item["source"].get("format", "")}
     candidates = [c for c in record.get("candidate_options", []) if c.get("status") == "AVAILABLE"]
     if (len(candidates) != 1 or record.get("public_output_count") != 1
             or not result.get("output_created") or not result.get("delivery_eligible")
@@ -91,6 +95,7 @@ def result_outcome(record, item):
     return {"status": "COMPLETED", "final_bytes": result["output_size_bytes"],
             "output_path": str(output),
             "result_id": record["result_id"], "output_sha256": result["output_sha256"],
+            "output_format": result.get("output_format") or output.suffix.lstrip(".").upper(),
             "format_conversion": format_conversion}
 
 
@@ -118,12 +123,39 @@ def retained_result_view(record, item):
                                 task_result.get("output_path"), task_result.get("result_file")))):
         raise ValueError("RESULT_IDENTITY_MISMATCH")
     return {**record, "candidate_options": generated["candidates"],
-            "request": {"target_format": generated.get("target_format")},
+            "request": {"target_format": generated.get("target_format"),
+                        "allow_opaque_png_to_jpeg": generated.get("allow_opaque_png_to_jpeg") is True},
             "effective_target_format": generated.get("effective_target_format"),
             "format_policy": generated.get("format_policy"),
             "format_conversion": generated.get("format_conversion"),
             "winner_scheme_id": generated["winner_scheme_id"],
             "public_output_count": generated["public_output_count"]}
+
+
+class BatchSourceUnavailable(ValueError):
+    pass
+
+
+class BatchWriteUnavailable(OSError):
+    pass
+
+
+def is_batch_write_failure(exc):
+    return isinstance(exc, BatchWriteUnavailable) or (
+        isinstance(exc, HTTPException) and isinstance(exc.detail, dict)
+        and exc.detail.get("code") == "OUTPUT_DIRECTORY_INVALID"
+        and exc.detail.get("failed_stage") == "output_directory_writable_check"
+    )
+
+
+@contextmanager
+def batch_write_attempt():
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EPERM, errno.ENOSPC, errno.EROFS, errno.EBUSY}:
+            raise BatchWriteUnavailable(exc.errno, str(exc)) from exc
+        raise
 
 
 class BatchJob:
@@ -135,8 +167,12 @@ class BatchJob:
     def source(self):
         source = dict(self.item["source"])
         source["path"] = contained(source["path"], self.service.cache_root())
-        if file_sha(source["path"]) != source["sha256"]:
-            raise ValueError("SOURCE_IDENTITY_MISMATCH")
+        try:
+            sha256 = file_sha(source["path"])
+        except OSError as exc:
+            raise BatchSourceUnavailable("SOURCE_UNAVAILABLE") from exc
+        if sha256 != source["sha256"]:
+            raise BatchSourceUnavailable("SOURCE_IDENTITY_MISMATCH")
         return source
 
     async def checked_source(self):
@@ -165,7 +201,8 @@ class BatchJob:
         if receipt is None:
             stage = contained(Path(self.batch["cache_directory"]) / self.item["id"] / uuid.uuid4().hex,
                               self.service.cache_root())
-            stage.mkdir(parents=True, exist_ok=False)
+            with batch_write_attempt():
+                stage.mkdir(parents=True, exist_ok=False)
             generated = await producer(stage)
             if generated["source"]["sha256"] != source["sha256"]:
                 raise ValueError("SOURCE_IDENTITY_MISMATCH")
@@ -211,7 +248,8 @@ class BatchJob:
                     raise ValueError("RESULT_IDENTITY_MISMATCH")
             else:
                 # The publisher re-reads the persisted copy and rejects any SHA mismatch.
-                await asyncio.to_thread(publish_verified_file_copy_no_overwrite, private, [target], expected_sha256=expected)
+                with batch_write_attempt():
+                    await asyncio.to_thread(publish_verified_file_copy_no_overwrite, private, [target], expected_sha256=expected)
                 newly_published = True
             try:
                 await asyncio.to_thread(lambda: self.source)  # Source must also remain bound across the publication.
@@ -305,10 +343,10 @@ class CompressionBatchService:
             result = result.to_dict() if hasattr(result, "to_dict") else result
             if isinstance(result, Mapping) and result.get("output_created"):
                 contained(result["output_path"], batch["output_directory"])
-            item.update(result_outcome(record, item), error="", recovery_active=False)
+            item.update(result_outcome(record, item), error="", recovery_active=False, retryable=False)
         except Exception as exc:
             code = str(exc)
-            item.update(status="FAILED", result_id="", final_bytes=None, output_sha256="", recovery_active=False,
+            item.update(status="FAILED", result_id="", final_bytes=None, output_sha256="", recovery_active=False, retryable=False,
                         error=code if re.fullmatch(r"[A-Z0-9_]+", code) else "BATCH_REGISTERED_RESULT_UNAVAILABLE")
         return True
 
@@ -335,6 +373,7 @@ class CompressionBatchService:
                 continue
             batch = copy.deepcopy(record)
             batch["target_format"] = normalize_target_format(batch.get("target_format"), allow_legacy=True)
+            batch["allow_opaque_png_to_jpeg"] = batch.get("allow_opaque_png_to_jpeg") is True and batch["target_format"] == SMART_COMPRESSION_TARGET_FORMAT
             contained(batch["cache_directory"], self.cache_root())
             self.reconcile_batch(batch)
             for item in batch["items"]:
@@ -376,7 +415,7 @@ class CompressionBatchService:
                     pixels = int(item["source"]["width"]) * int(item["source"]["height"])
                     if self.active and sum(info[1] for info in self.active.values()) + pixels > ACTIVE_PIXEL_BUDGET:
                         continue
-                    item.update(status="PROCESSING", started_at=item.get("started_at") or time.time(), finished_at=None, error="", recovery_active=False)
+                    item.update(status="PROCESSING", started_at=item.get("started_at") or time.time(), finished_at=None, error="", recovery_active=False, retryable=False)
                     try:
                         self.persist(batch)
                     except SharedTaskRegistryError:
@@ -410,15 +449,18 @@ class CompressionBatchService:
         try:
             if self.reconcile_item(batch, item):
                 return
-            if str(Path(self.output_directory()).resolve()) != batch["output_directory"]:
-                raise ValueError("BATCH_OUTPUT_DIRECTORY_CHANGED")
             job = BatchJob(self, batch, item)
             await job.checked_source()  # Check the saved Source before using any existing Result.
+            with batch_write_attempt():
+                output_directory = str(Path(self.output_directory()).resolve())
+            if output_directory != batch["output_directory"]:
+                raise ValueError("BATCH_OUTPUT_DIRECTORY_CHANGED")
             existing = self.registry.get(item["task_id"], {})
             if existing.get("status") != "completed":
                 await self.execute({
                     "operation_mode": "DELIVERY_OPTIMIZATION",
-                    "params": {"target_format": normalize_target_format(batch.get("target_format"))},
+                    "params": {"target_format": normalize_target_format(batch.get("target_format")),
+                               "allow_opaque_png_to_jpeg": batch.get("allow_opaque_png_to_jpeg") is True},
                 }, batch_job=job)
                 existing = self.registry.get(item["task_id"], {})
             item.update(result_outcome(existing, item), error="")
@@ -426,6 +468,10 @@ class CompressionBatchService:
             code = str(getattr(exc, "failure_code", "") or str(exc))
             if self.reconcile_item(batch, item):
                 batch["control"] = "PAUSED"
+            elif isinstance(exc, BatchSourceUnavailable):
+                item.update(status="FAILED", retryable=False, error=code)
+            elif is_batch_write_failure(exc):
+                item.update(status="FAILED", retryable=True, error="文件写入暂时受阻，请检查目录权限、占用和磁盘空间，再重试失败项。")
             elif isinstance(exc, (OSError, SharedTaskRegistryError)) and item.get("prepared"):
                 # A validated artifact may already have been published. Keep its
                 # receipt and identity recoverable, never report an orphan as FAILED
@@ -461,16 +507,28 @@ class CompressionBatchService:
         for item in batch["items"]:
             final = item.get("final_bytes")
             original = item["original_bytes"]
+            source_preview = self.source_preview_url(
+                item.get("source") or {}, item["name"], item["status"] == "KEEP_ORIGINAL",
+            )
             items.append({"id": item["id"], "name": item["name"], "status": item["status"],
                           **item_identity(batch["batch_id"], item["id"], "image_compression", item.get("source_id", "")),
                           "task_id": item["task_id"], "result_id": item.get("result_id", ""),
                           "output_path": item.get("output_path", ""), "output_sha256": item.get("output_sha256", ""),
                           "originalBytes": original, "finalBytes": final,
                           "formatConversion": item.get("format_conversion") is True,
+                          "sourceFormat": item.get("source", {}).get("format", ""),
+                          "outputFormat": (
+                              item.get("output_format") or Path(item.get("output_path") or "").suffix.lstrip(".").upper()
+                              if item["status"] == "COMPLETED"
+                              else item.get("source", {}).get("format", "") if item["status"] == "KEEP_ORIGINAL"
+                              else ""
+                          ),
+                          "retryable": item["status"] == "FAILED" and item.get("retryable") is True,
                           "savedPercent": (original-final)*100/original if final is not None and original else None,
                           "taskId": item["task_id"], "resultId": item.get("result_id", ""),
                           "sourceSha256": item.get("source", {}).get("sha256", ""),
-                          "sourcePreviewUrl": self.source_preview_url(item.get("source") or {}, item["name"]),
+                          "sourcePreviewUrl": source_preview,
+                          "sourceThumbnailUrl": f"{source_preview}/thumbnail" if source_preview else "",
                           "outputSha256": item.get("output_sha256", ""), "error": item.get("error", ""),
                           "elapsedSeconds": max(0, int((item.get("finished_at") or time.time())-item["started_at"])) if item.get("started_at") else 0})
         counts = {state: sum(i["status"] == state for i in items) for state in TERMINAL | {"QUEUED", "PROCESSING"}}
@@ -492,6 +550,7 @@ class CompressionBatchService:
         ) if batch["control"] == "IMPORTING" else ""
         return {"batchId": batch["batch_id"], "serverSessionId": self.session_id, "revision": batch.get("revision", 0), "items": items, "state": state, "control": batch["control"],
                 "targetFormat": normalize_target_format(batch.get("target_format")),
+                "allowOpaquePngToJpeg": batch.get("allow_opaque_png_to_jpeg") is True,
                 "running": bool(counts["PROCESSING"] or (counts["QUEUED"] and batch["control"] == "RUNNING")),
                 "workers": batch["workers"], "recoverable": True,
                 "preparedCount": prepared_count, "preparingName": preparing_name}
@@ -506,11 +565,13 @@ class CompressionBatchService:
 
 
 def register_batch_compression_routes(app, *, registry, roots, output_directory, intake, execute, source_preview_url,
-                                      release_intake=None):
+                                      release_intake=None, original_delivery_root=None, original_delivery_name=None,
+                                      original_delivery_copy=None, batch_output_items):
     service = CompressionBatchService(
         registry=registry, roots=roots, output_directory=output_directory,
         intake=intake, execute=execute, source_preview_url=source_preview_url,
     )
+    original_delivery_lock = asyncio.Lock()
 
     @app.on_event("startup")
     async def recover_compression_batches():
@@ -521,12 +582,30 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
     async def drain_compression_batches():
         await service.shutdown()
 
+    def check_batch_capacity(source_bytes, largest_source_bytes):
+        output_root = Path(output_directory()).resolve()
+        require_batch_capacity(
+            (service.cache_root(), source_bytes + largest_source_bytes, "原图缓存"),
+            (output_root, source_bytes, "压缩输出"),
+        )
+        return output_root
+
+    @app.post("/api/image-compression/batches/preflight")
+    async def compression_batch_preflight(payload: dict = Body(...)):
+        source_bytes = batch_size_field(payload, "source_bytes")
+        largest = batch_size_field(payload, "largest_source_bytes")
+        if not 0 < largest <= source_bytes:
+            raise HTTPException(400, detail={"code": "BATCH_SIZE_INVALID", "message": "批次文件体积无效，请重新选择图片。"})
+        await asyncio.to_thread(check_batch_capacity, source_bytes, largest)
+        return {"success": True}
+
     @app.post("/api/image-compression/batches")
     async def create_batch(
         files: list[UploadFile] = File(...),
         batch_id: str = Form(...),
         workers: int = Form(DEFAULT_WORKERS),
         target_format: str = Form(SMART_COMPRESSION_TARGET_FORMAT),
+        allow_opaque_png_to_jpeg: bool = Form(False),
     ):
         service.load()
         if not re.fullmatch(r"compression_batch_[a-f0-9]{32}", batch_id) or not 1 <= len(files) <= MAX_FILES or not 1 <= workers <= MAX_WORKERS:
@@ -540,10 +619,15 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
             ) from exc
         if batch_id in service.batches:
             raise HTTPException(409, detail="批次已登记，请恢复此批次，不能重复创建。")
+        sizes = [file.size or 0 for file in files]
+        output_root = await asyncio.to_thread(check_batch_capacity, sum(sizes), max(sizes))
+        if batch_id in service.batches:
+            raise HTTPException(409, detail="批次已登记，请恢复此批次，不能重复创建。")
         cache = contained(service.cache_root() / batch_id, service.cache_root())
         batch = {"record_kind": BATCH_KIND, "batch_id": batch_id, "control": "IMPORTING", "workers": workers,
                  "target_format": target_format,
-                 "created_at": time.time(), "cache_directory": str(cache), "output_directory": str(Path(output_directory()).resolve()), "items": []}
+                 "allow_opaque_png_to_jpeg": allow_opaque_png_to_jpeg and target_format == SMART_COMPRESSION_TARGET_FORMAT,
+                 "created_at": time.time(), "cache_directory": str(cache), "output_directory": str(output_root), "items": []}
         for file in files:
             batch["items"].append({"id": uuid.uuid4().hex, "task_id": f"compression_{uuid.uuid4().hex[:16]}",
                                    "reserved_result_id": f"compression_result_{uuid.uuid4().hex[:16]}",
@@ -552,7 +636,7 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
         service.persist(batch)
         for upload, item in zip(files, batch["items"]):
             try:
-                content = await upload.read(MAX_UPLOAD_BYTES + 1)
+                content = await upload.read()
                 source = await asyncio.to_thread(intake, content, upload.filename or "")
                 del content
                 snapshot = contained(cache / item["id"] / Path(source["path"]).name, cache)
@@ -567,7 +651,7 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
                         LOGGER.warning("Batch intake copy could not be released early: batch_id=%s item_id=%s",
                                        batch_id, item["id"], exc_info=True)
             except Exception:
-                item.update(status="FAILED", error="图片无法完整解码、格式不支持或超过50MB限制，请检查原图。")
+                item.update(status="FAILED", error="图片无法完整解码、格式不支持或读取失败，请重新选择有效的原图。")
             finally:
                 await upload.close()
             service.persist(batch)
@@ -584,6 +668,16 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
         if service.reconcile_batch(batch):
             service.persist(batch)
         return batch
+
+    @app.get("/api/image-compression/batches")
+    async def recent_batches():
+        service.load()
+        recent = sorted(service.batches.values(), key=lambda batch: batch["created_at"], reverse=True)[:20]
+        return {"success": True, "data": {"batches": [
+            {"batchId": batch["batch_id"], "createdAt": batch["created_at"],
+             "firstName": batch["items"][0]["name"], "count": len(batch["items"])}
+            for batch in recent if batch["items"]
+        ]}}
 
     @app.get("/api/image-compression/batches/{batch_id}/import-progress")
     async def batch_import_progress(batch_id: str):
@@ -609,14 +703,148 @@ def register_batch_compression_routes(app, *, registry, roots, output_directory,
         service.ensure_running()
         return {"success": True, "data": service.public(batch)}
 
+    def require_original_item(batch_id, item_id):
+        batch = get_batch(batch_id)
+        item = next((item for item in batch["items"] if item["id"] == item_id), None)
+        if item is None or item["status"] != "KEEP_ORIGINAL":
+            raise HTTPException(404, detail={"code": "BATCH_ORIGINAL_NOT_FOUND", "message": "此项没有已登记的保留原图。"})
+        if original_delivery_root is None or original_delivery_copy is None or original_delivery_name is None:
+            raise HTTPException(503, detail={"code": "BATCH_ORIGINAL_ROOT_UNAVAILABLE", "message": "文件交付目录暂不可用，请检查正式目录。"})
+        return batch, item
+
+    def original_target(root, file_name):
+        target = contained(root / file_name, root)
+        if target.parent != root or target.name != file_name:
+            raise ValueError("BATCH_ORIGINAL_TARGET_INVALID")
+        return target
+
+    async def checked_original_source(batch, item):
+        try:
+            source = await BatchJob(service, batch, item).checked_source()
+            contained(source["path"], Path(batch["cache_directory"]) / item["id"])
+            if result_outcome(registry.get(item["task_id"], {}), item)["status"] != "KEEP_ORIGINAL":
+                raise ValueError("BATCH_KEEP_ORIGINAL_CONTRACT_INVALID")
+            return source
+        except (ValueError, OSError, KeyError) as exc:
+            raise HTTPException(409, detail={"code": "BATCH_ORIGINAL_UNAVAILABLE", "message": "已登记原图缺失、无法读取或内容已变化，请重新选择有效的原图。"}) from exc
+
+    @app.get("/api/image-compression/batches/{batch_id}/delivery/eligibility")
+    async def batch_delivery_eligibility(batch_id: str):
+        batch = get_batch(batch_id)
+        original_ids = []
+        for item in batch["items"]:
+            if item["status"] != "KEEP_ORIGINAL":
+                continue
+            try:
+                await checked_original_source(batch, item)
+            except HTTPException:
+                continue
+            original_ids.append(item["id"])
+        return {"success": True, "data": {
+            "items": batch_output_items(batch_id), "originalItemIds": original_ids,
+        }}
+
+    @app.post("/api/image-compression/batches/{batch_id}/delivery/originals/{item_id}")
+    async def deliver_batch_original(batch_id: str, item_id: str, payload: dict = Body(...)):
+        if set(payload) != {"confirmed"} or payload["confirmed"] is not True:
+            raise HTTPException(400, detail={"code": "BATCH_ORIGINAL_CONFIRMATION_REQUIRED", "message": "请先确认生成原图交付副本。"})
+        async with original_delivery_lock:
+            batch, item = require_original_item(batch_id, item_id)
+            source = await checked_original_source(batch, item)
+            root = original_delivery_root()
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                receipt = item.get("original_delivery")
+                if receipt is None:
+                    name = Path(original_delivery_name(item["name"]))
+                    source_suffix = Path(source["path"]).suffix.lower()
+                    suffix = name.suffix.lower()
+                    if (PureWindowsPath(name.name).is_reserved()
+                            or (suffix != source_suffix and {suffix, source_suffix} != {".jpg", ".jpeg"})):
+                        raise HTTPException(409, detail={"code": "BATCH_ORIGINAL_NAME_INVALID", "message": "原图文件名无法安全交付，请重命名后重新导入。"})
+                    reserved = {other["original_delivery"]["file_name"].casefold()
+                                for row in service.batches.values() for other in row["items"] if other.get("original_delivery")}
+                    stem, suffix = name.stem[:100], name.suffix
+                    target = original_target(root, f"{stem}{suffix}")
+                    sequence = 2
+                    while target.exists() or target.name.casefold() in reserved:
+                        target = original_target(root, f"{stem}_{sequence:02d}{suffix}")
+                        sequence += 1
+                    receipt = {"file_name": target.name, "sha256": source["sha256"], "committed": False}
+                    item["original_delivery"] = receipt
+                    try:
+                        service.persist(batch)
+                    except SharedTaskRegistryError:
+                        item.pop("original_delivery")
+                        raise
+                target = original_target(root, receipt["file_name"])
+                if receipt["sha256"] != source["sha256"]:
+                    raise ValueError("BATCH_ORIGINAL_DELIVERY_IDENTITY_MISMATCH")
+                if target.exists():
+                    if await asyncio.to_thread(file_sha, target) != source["sha256"]:
+                        raise ValueError("BATCH_ORIGINAL_DELIVERY_IDENTITY_MISMATCH")
+                elif receipt["committed"]:
+                    raise ValueError("BATCH_ORIGINAL_DELIVERY_MISSING")
+                else:
+                    await asyncio.to_thread(original_delivery_copy, Path(source["path"]), target,
+                                            registered_output_sha256=source["sha256"])
+                if not receipt["committed"]:
+                    receipt["committed"] = True
+                    try:
+                        service.persist(batch)
+                    except SharedTaskRegistryError:
+                        receipt["committed"] = False
+                        raise
+            except OutputIdentityMismatchError as exc:
+                raise HTTPException(409, detail={"code": "BATCH_ORIGINAL_UNAVAILABLE", "message": "复制时原图内容已变化，请重新选择有效的原图。"}) from exc
+            except ValueError as exc:
+                raise HTTPException(409, detail={"code": "BATCH_ORIGINAL_DELIVERY_CHANGED", "message": "已登记的交付副本缺失或内容变化，请先核对交付目录。"}) from exc
+            except (OSError, SharedTaskRegistryError) as exc:
+                raise HTTPException(503, detail={"code": "BATCH_ORIGINAL_COPY_PENDING", "message": "暂无法确认原图副本，请检查交付目录后重新确认。"}) from exc
+            return {"success": True, "data": {"itemId": item_id, "deliveryPath": str(target),
+                    "deliveryFileName": target.name, "deliverySha256": source["sha256"]}}
+
+    @app.post("/api/image-compression/batches/{batch_id}/delivery/originals/{item_id}/open-folder")
+    async def open_batch_original_folder(batch_id: str, item_id: str):
+        _, item = require_original_item(batch_id, item_id)
+        receipt = item.get("original_delivery")
+        if not receipt or not receipt["committed"]:
+            raise HTTPException(404, detail={"code": "BATCH_ORIGINAL_COPY_MISSING", "message": "这张原图尚无已确认的交付副本。"})
+        try:
+            root = original_delivery_root()
+            target = original_target(root, receipt["file_name"])
+            if await asyncio.to_thread(file_sha, target) != receipt["sha256"]:
+                raise ValueError("BATCH_ORIGINAL_DELIVERY_IDENTITY_MISMATCH")
+            os.startfile(str(root))
+        except (OSError, ValueError, AttributeError) as exc:
+            raise HTTPException(409, detail={"code": "BATCH_ORIGINAL_OPEN_FAILED", "message": "无法打开交付目录，请确认原图副本仍可访问。"}) from exc
+        return {"success": True, "data": {"opened": True}}
+
     @app.post("/api/image-compression/batches/{batch_id}/control")
     async def batch_control(batch_id: str, payload: dict = Body(...)):
         batch = get_batch(batch_id)
         action = payload.get("action")
-        if set(payload) != {"action"} or action not in {"pause", "resume", "cancel"}:
-            raise HTTPException(400, detail="仅支持暂停、继续或取消。")
+        if set(payload) != {"action"} or action not in {"pause", "resume", "cancel", "retry_failed"}:
+            raise HTTPException(400, detail="仅支持暂停、继续、取消或重试失败项。")
         if batch["control"] == "IMPORTING":
             raise HTTPException(409, detail="正在保存原图，请等待导入完成。")
+        if action == "retry_failed":
+            if any(item["status"] not in TERMINAL for item in batch["items"]):
+                return {"success": True, "data": service.public(batch)}
+            retry_items = [item for item in batch["items"] if item["status"] == "FAILED"
+                           and item.get("retryable") is True and item.get("source")]
+            if retry_items:
+                before = copy.deepcopy(batch)
+                batch["control"] = "RUNNING"
+                for item in retry_items:
+                    item.update(status="QUEUED", error="", retryable=False, started_at=None, finished_at=None)
+                try:
+                    service.persist(batch)
+                except SharedTaskRegistryError:
+                    batch.update(before)
+                    raise HTTPException(503, detail="暂时无法保存重试状态，请检查任务登记目录。")
+                service.ensure_running()
+            return {"success": True, "data": service.public(batch)}
         if action == "resume" and batch["control"] == "CANCELED":
             raise HTTPException(409, detail="已取消项不会重新执行；请新建批次。")
         batch["control"] = {"pause": "PAUSED", "resume": "RUNNING", "cancel": "CANCELED"}[action]

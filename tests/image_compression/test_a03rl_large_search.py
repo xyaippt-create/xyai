@@ -151,7 +151,7 @@ class NativeRoiTests(unittest.TestCase):
 
 
 class LargeSearchControllerTests(unittest.TestCase):
-    def run_search(self, trial, lossless_bytes=8_000_000):
+    def run_search(self, trial, lossless_bytes=8_000_000, max_full_encodings=200):
         # Only controller decisions are stubbed here; native metrics and the
         # persisted-image gate are independently exercised above and in runtime.
         plans = [{"subsampling": mode, "quality": 80, "roi_last_pass": 80, "roi_first_fail": 79}
@@ -163,6 +163,7 @@ class LargeSearchControllerTests(unittest.TestCase):
                 evaluation_root=None, width=3840, height=2160, size_profile_id="VERY_LARGE",
                 size_profile=delivery_options.SIZE_SEARCH_PROFILE["VERY_LARGE"],
                 content_risk_id="TEXT_LINE_HIGH_RISK", lossless_bytes=lossless_bytes,
+                max_full_encodings=max_full_encodings,
             )
 
     @staticmethod
@@ -196,6 +197,13 @@ class LargeSearchControllerTests(unittest.TestCase):
         self.assertIsNone(summary["lowest_safe_quality"])
         self.assertIsNone(summary["best_passing_bytes"])
         self.assertEqual(summary["stop_reason"], "FULL_RESOLUTION_REJECTED_BOTH_MODES")
+
+    def test_exhausted_budget_reports_only_completed_full_resolution_trials(self):
+        candidates, summary = self.run_search(self.trial, lossless_bytes=100_000, max_full_encodings=3)
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(summary["full_image_encode_count"], 3)
+        self.assertEqual(summary["stop_reason"], "FULL_RESOLUTION_BUDGET_EXHAUSTED")
+        self.assertEqual(summary["best_passing_bytes"], min(item["file_size"] for item in candidates))
 
     def test_small_medium_and_high_gain_paths_keep_the_legacy_search(self):
         for profile, source_bytes, lossless in (("SMALL", 400_000, 399_000), ("MEDIUM", 1_800_000, 1_790_000),

@@ -36,7 +36,7 @@ class TargetFormatApiTests(unittest.TestCase):
     tearDown = api_tests.ImageCompressionApiStage4Tests.tearDown
     intake_bytes = api_tests.ImageCompressionApiStage4Tests.intake_bytes
 
-    def run_route(self, source_format, target_format, *, alpha=False, optimized=False):
+    def run_route(self, source_format, target_format, *, alpha=False, optimized=False, allow_jpeg=False):
         suffix = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}[source_format]
         mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}[source_format]
         source = image_bytes(source_format, alpha=alpha, optimized=optimized)
@@ -44,7 +44,7 @@ class TargetFormatApiTests(unittest.TestCase):
         response = self.client.post("/api/image-compression/run", json={
             "source_token": intake["source_token"],
             "operation_mode": "DELIVERY_OPTIMIZATION",
-            "params": {"target_format": target_format},
+            "params": {"target_format": target_format, **({"allow_opaque_png_to_jpeg": True} if allow_jpeg else {})},
         })
         self.assertEqual(response.status_code, 200, response.text)
         data = response.json()["data"]
@@ -67,7 +67,7 @@ class TargetFormatApiTests(unittest.TestCase):
         self.assertEqual(result["public_output_count"], int(result["output_created"]))
         self.assertEqual(len(result["candidates"]), result["public_output_count"])
         self.assertEqual(sum(bool(item.get("output_path")) for item in record["candidate_options"]), result["public_output_count"])
-        if not (target_format == "SMART_COMPRESSION" and source_format == "PNG" and not alpha):
+        if not (allow_jpeg and target_format == "SMART_COMPRESSION" and source_format == "PNG" and not alpha):
             self.assertTrue(all(item["format"] == expected_candidate for item in record["candidate_options"]))
         self.assertEqual(result["source_sha256"], hashlib.sha256(source).hexdigest())
 
@@ -105,7 +105,13 @@ class TargetFormatApiTests(unittest.TestCase):
                 self.assertEqual(record["format_policy"], "PRESERVE_SOURCE_FORMAT")
 
     def test_smart_mode_compares_only_opaque_png_across_formats(self):
-        opaque = self.run_route("PNG", "SMART_COMPRESSION")
+        default = self.run_route("PNG", "SMART_COMPRESSION")
+        default_record = self.state["task_registry"][default["result"]["task_id"]]
+        self.assertFalse(default_record["request"]["allow_opaque_png_to_jpeg"])
+        self.assertFalse(default_record["smart_compression_details"]["comparison_performed"])
+        self.assertEqual({item["format"] for item in default_record["candidate_options"]}, {"PNG"})
+
+        opaque = self.run_route("PNG", "SMART_COMPRESSION", allow_jpeg=True)
         opaque_record = self.state["task_registry"][opaque["result"]["task_id"]]
         self.assertEqual({item["format"] for item in opaque_record["candidate_options"]}, {"PNG", "JPG"})
         self.assertTrue(opaque_record["smart_compression_details"]["comparison_performed"])
@@ -117,14 +123,14 @@ class TargetFormatApiTests(unittest.TestCase):
             )
             self.assertTrue(opaque_record["format_conversion"])
 
-        transparent = self.run_route("PNG", "SMART_COMPRESSION", alpha=True)
+        transparent = self.run_route("PNG", "SMART_COMPRESSION", alpha=True, allow_jpeg=True)
         transparent_record = self.state["task_registry"][transparent["result"]["task_id"]]
         self.assertEqual({item["format"] for item in transparent_record["candidate_options"]}, {"PNG"})
         self.assertFalse(transparent_record["smart_compression_details"]["comparison_performed"])
 
         for source_format, expected_candidate in (("JPEG", "JPG"), ("WEBP", "WEBP")):
             with self.subTest(source=source_format):
-                data = self.run_route(source_format, "SMART_COMPRESSION")
+                data = self.run_route(source_format, "SMART_COMPRESSION", allow_jpeg=True)
                 record = self.state["task_registry"][data["result"]["task_id"]]
                 self.assertEqual({item["format"] for item in record["candidate_options"]}, {expected_candidate})
                 self.assertFalse(record["format_conversion"])
@@ -201,14 +207,30 @@ class BatchTargetFormatTests(unittest.TestCase):
 
     def test_batch_smart_opaque_png_uses_shared_cross_format_decision(self):
         self.open()
-        batch_id = self.create([self.upload("PNG")], target_format="SMART_COMPRESSION")
+        batch_id = self.create([self.upload("PNG")], target_format="SMART_COMPRESSION", allow_opaque_png_to_jpeg=True)
         data = self.until(batch_id)
         item = data["items"][0]
         self.assertIn(item["status"], {"COMPLETED", "KEEP_ORIGINAL"})
         record = self.registry[item["taskId"]]
         self.assertEqual(record["request"]["target_format"], "SMART_COMPRESSION")
+        self.assertTrue(record["request"]["allow_opaque_png_to_jpeg"])
+        self.assertTrue(data["allowOpaquePngToJpeg"])
         self.assertTrue(record["smart_compression_details"]["comparison_performed"])
         self.assertEqual({candidate["format"] for candidate in record["candidate_options"]}, {"PNG", "JPG"})
+        self.close()
+        self.open()
+        self.assertTrue(self.status(batch_id)["allowOpaquePngToJpeg"])
+
+    def test_old_batches_without_option_default_to_off(self):
+        self.open()
+        batch_id = self.create([self.upload("PNG")], target_format="SMART_COMPRESSION")
+        self.until(batch_id)
+        record = self.registry[batch_id]
+        record.pop("allow_opaque_png_to_jpeg")
+        self.registry[batch_id] = record
+        self.close()
+        self.open()
+        self.assertFalse(self.status(batch_id)["allowOpaquePngToJpeg"])
 
 
 if __name__ == "__main__":
