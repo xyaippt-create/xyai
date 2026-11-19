@@ -147,6 +147,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
       fill={color} fillOpacity=".08" stroke={color} strokeWidth={i === index ? 2.5 : 1.5} vectorEffect="non-scaling-stroke" />;
   }
   return <fieldset className="print-layer-tools" disabled={busy || checking} aria-labelledby="print-layer-title">
+    <div className="print-layer-body">
     <div className="print-panel-heading">
       <div className="hdde-color-section-title"><span aria-hidden="true">3</span><h2 id="print-layer-title">分层编辑</h2></div>
       <label className="print-zoom">标注视图<select value={zoom} onChange={e=>setZoom(Number(e.target.value))}>
@@ -193,7 +194,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
         <button type="button" onClick={()=>{update({...recipe,regions:recipe.regions.filter((_,i)=>i!==index)});setFlat(flat.filter((_,i)=>i!==index));setIndex(-1);}}>删除选区</button>
       </div>}
     </div>}
-    {(kind==="subject" || recipe.subject.length>0) && <div className="print-actions">
+    {(kind==="subject" || recipe.subject.length>0) && <div className="print-subject-controls">
       <label><input type="checkbox" checked={recipe.snap} onChange={e=>update({...recipe,snap:e.target.checked})}/>主体边缘吸附</label>
       <button type="button" disabled={!recipe.subject.length} onClick={()=>update({...recipe,subject:recipe.subject.slice(0,-1),cutouts:recipe.subject.length<=3?[]:recipe.cutouts})}>撤销轮廓点</button>
       <button type="button" disabled={!recipe.subject.length} onClick={()=>{update({...recipe,subject:[],cutouts:[]});setHole([]);setKind("subject");}}>清除主体</button>
@@ -204,15 +205,16 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
       <button type="button" disabled={!recipe.cutouts.length} onClick={()=>update({...recipe,cutouts:recipe.cutouts.slice(0,-1)})}>移除上处镂空</button>
     </div>}
     </div></div>
-    <div className="print-actions print-layer-footer">
-      <button type="button" className="hdde-secondary-action" onClick={()=>inspect()} disabled={!!hole.length || (!recipe.regions.length && !recipe.subject.length)}>检查分层选区</button>
-      <label className="hdde-secondary-action print-picker">载入分层方案<input type="file" aria-label="载入分层方案" accept=".json" onChange={e=>importPlan(e.target)}/></label>
-      {preview && <button type="button" onClick={exportPlan}>保存分层方案</button>}
-    </div>
     {checking && <p role="status">正在提取轮廓…</p>}
     {preview && <><img className="print-mask-preview" src={preview.preview} alt="分层选区预览"/>
       <p role="status">蓝色为文字轮廓，橙色为纹理字，绿色为主体。已提取 {preview.contours} 条闭合轮廓。</p></>}
     {flat.some(f=>!f) && <p role="alert">选区 {flat.map((f,i)=>f?null:i+1).filter(Boolean).join("、")} 的底色是渐变或照片。分层会把这块底色换成单一纸色，并按字色重画文字，会改变原图设计；这类海报建议直接用等比出图。</p>}
     {error && <p role="alert">{error}</p>}
+    </div>
+    <div className="print-actions print-layer-footer">
+      <button type="button" className="hdde-secondary-action" onClick={()=>inspect()} disabled={!!hole.length || (!recipe.regions.length && !recipe.subject.length)}>检查分层选区</button>
+      <label className="hdde-secondary-action print-picker">载入分层方案<input type="file" aria-label="载入分层方案" accept=".json" onChange={e=>importPlan(e.target)}/></label>
+      {preview && <button type="button" onClick={exportPlan}>保存分层方案</button>}
+    </div>
   </fieldset>;
 }

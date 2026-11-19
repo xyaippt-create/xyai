@@ -36,7 +36,7 @@ function PrintSource({ loading, source, busy, error, onSelect, pickerRef }) {
       setDropError(""); onSelect(event.dataTransfer.files[0]);
     }}>
     <div className="hdde-color-section-title"><span aria-hidden="true">1</span>
-      <div><h2 id="print-original">选择图片</h2><p>选择一张 JPG、PNG 或 WebP 原图。</p></div>
+      <div><h2 id="print-original">{source ? "已选原图" : "选择图片"}</h2>{!source && <p>选择一张 JPG、PNG 或 WebP 原图。</p>}</div>
     </div>
     <div className={`hdde-color-dropzone${source ? " has-file" : ""}`}>
       {picker}
@@ -53,28 +53,34 @@ function PrintSource({ loading, source, busy, error, onSelect, pickerRef }) {
   </section>;
 }
 
-function PrintSizeSummary({ result, custom }) {
-  if (!result || result.error) return null;
+function PrintSizeSummary({ result, custom, children }) {
+  if (!result || result.error) return children || null;
   const up = result.scale > 1;
   const scale = up && result.scale < 1.005 ? "不足 1.01" : display(result.scale);
   return <div className="print-result" aria-live="polite" role="status">
     <div className="print-panel-heading"><h3>{custom ? "画布尺寸预检" : "尺寸预检"}</h3>
-      <span className="print-verdict" data-upscale={up}>{up ? `需放大 ${scale} 倍` : "原图像素充足"}</span>
+      <span className="print-verdict" data-upscale={up}>{up ? `需放大 ${scale} 倍${result.soft ? " · 细节偏软" : ""}` : "原图像素充足"}</span>
     </div>
     <dl>
       <div><dt>目标像素</dt><dd>{result.pixelWidth} × {result.pixelHeight} px</dd></div>
       <div><dt>喷绘尺寸</dt><dd>{display(result.cmWidth)} × {display(result.cmHeight)} cm</dd></div>
-      <div><dt>原图有效精度</dt><dd>{display(result.effectivePpi)} PPI</dd></div>
-      <div><dt>缩放倍数</dt><dd>{scale} 倍</dd></div>
-      {up && <>
-        <div><dt>标称精度</dt><dd>{display(result.nominalPpi)} PPI</dd></div>
-        <div><dt>{result.reconstructed ? "超清后有效精度" : "出图有效精度"}</dt><dd>约 {display(result.detailPpi)} PPI</dd></div>
-      </>}
     </dl>
-    {up && <p className="print-detail-note" data-soft={result.soft}>
-      {result.reconstructed ? "出图时先用 4K 超清重建细节（最多 3 倍），再补到目标像素。" : "原图超过 400 万像素，将直接插值放大。"}
-      {result.soft && ` 仍需插值放大约 ${display(result.interpolation)} 倍，细节会偏软，建议降低 PPI、缩小喷绘尺寸或换更大的原图。`}
-    </p>}
+    <details className="print-precision">
+      <summary>精度详情</summary>
+      <dl>
+        <div><dt>原图有效精度</dt><dd>{display(result.effectivePpi)} PPI</dd></div>
+        <div><dt>缩放倍数</dt><dd>{scale} 倍</dd></div>
+        {up && <>
+          <div><dt>标称精度</dt><dd>{display(result.nominalPpi)} PPI</dd></div>
+          <div><dt>{result.reconstructed ? "超清后有效精度" : "出图有效精度"}</dt><dd>约 {display(result.detailPpi)} PPI</dd></div>
+        </>}
+      </dl>
+      {up && <p className="print-detail-note" data-soft={result.soft}>
+        {result.reconstructed ? "出图时先用 4K 超清重建细节（最多 3 倍），再补到目标像素。" : "原图超过 400 万像素，将直接插值放大。"}
+        {result.soft && ` 仍需插值放大约 ${display(result.interpolation)} 倍，细节会偏软，建议降低 PPI、缩小喷绘尺寸或换更大的原图。`}
+      </p>}
+    </details>
+    {children}
   </div>;
 }
 
@@ -119,7 +125,7 @@ function busiestPoint(image, boxWidth, boxHeight) {
   return at;
 }
 
-function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, layered, unavailable, actionHost, pickerRef }) {
+function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, layered, unavailable, actionHost, intakeStatusHost, pickerRef }) {
   const [requestId] = useState(() => crypto.randomUUID());
   const [output, setOutput] = useState(null);
   const [error, setError] = useState("");
@@ -250,7 +256,7 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
 
   const description = output ? (layered && !reviewed ? "请先核对成品局部，再另存副本。" : "成品已生成，可另存交付副本。") :
     busy ? (plan?.reconstructed ? "已提交，正在超清重建并生成喷绘成品，约需 1 分钟…" : "已提交，正在生成并登记喷绘成品…") :
-    unavailable || "规格已就绪，可以提交出图。";
+    unavailable;
   const saveBlocked = !previewReady || (layered && (!reviewed || !currentDetail));
   function selectPoint(x, y) {
     pointMoved.current = true;
@@ -285,8 +291,9 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
         <button type="button" className="hdde-primary-action hdde-color-run" disabled={busy || !!unavailable} onClick={generate}>
           {busy ? "正在出图…" : "提交出图"}
         </button>}
-      <p className="hdde-color-task-state" role="status">{description}</p>
     </>, actionHost)}
+    {description && actionHost && createPortal(
+      <p className="hdde-color-task-state" role="status">{description}</p>, intakeStatusHost || actionHost)}
     {!output && !(layered && source) && <section className="hdde-color-card hdde-color-outcome-empty print-intake-preview" aria-labelledby="print-preview-title">
       <div className="hdde-color-section-title"><span aria-hidden="true">3</span><div>
         <h2 id="print-preview-title">预览与结果</h2><p>{source ? "当前显示原图。提交后可在这里核对成品局部。" : "选择原图后可在这里预览，出图后可核对成品细节。"}</p>
@@ -366,22 +373,35 @@ function PrintOutput({ source, plan, ppi, busy, setBusy, onNavigate, layers, lay
   </>;
 }
 
-function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, children, readError, onSelect, layered, setLayered, sizeLabel}) {
+function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, children, readError, onSelect, layered, setLayered, sizeLabel, planAt, onPpiChange}) {
   const pickerRef = useRef(null);
   const [actionHost, setActionHost] = useState(null);
+  const [intakeStatusHost, setIntakeStatusHost] = useState(null);
   const [recipe, setRecipe] = useState(null);
   const [custom, setCustom] = useState(false);
   const [cw, setCw] = useState("80"), [ch, setCh] = useState("120");
-  const paper = layered && custom
-    ? {pixelWidth:Math.round(Number(cw)*ppi/2.54), pixelHeight:Math.round(Number(ch)*ppi/2.54)} : plan;
-  const sizeAllowed = paper && [paper.pixelWidth,paper.pixelHeight].every(n =>
-    Number.isSafeInteger(n) && n > 0 && n <= 32768) && paper.pixelWidth * paper.pixelHeight <= MAX_PRINT_PIXELS;
-  const sizeError = "请调整出图尺寸，目标单边最多 32768 px，总像素最多 8000 万。";
+  const paperAt = p => layered && custom
+    ? {pixelWidth:Math.round(Number(cw)*p/2.54), pixelHeight:Math.round(Number(ch)*p/2.54)} : (p === ppi ? plan : planAt?.(p));
+  const fits = d => Boolean(d && !d.error) && [d.pixelWidth,d.pixelHeight].every(n =>
+    Number.isSafeInteger(n) && n > 0 && n <= 32768) && d.pixelWidth * d.pixelHeight <= MAX_PRINT_PIXELS;
+  const paper = paperAt(ppi);
+  const sizeAllowed = fits(paper);
+  // Pixel size grows linearly with PPI, so estimate the ceiling and step down to the first value that fits.
+  let maxPpi = null;
+  if (source && paper && !paper.error && !sizeAllowed && ppi > 1) {
+    const w = paper.pixelWidth, h = paper.pixelHeight;
+    let p = Math.floor(ppi * Math.min(Math.sqrt(MAX_PRINT_PIXELS / (w * h)), 32768 / Math.max(w, h)));
+    for (let i = 0; i < 20 && p >= 1 && !fits(paperAt(p)); i++) p -= 1;
+    if (p >= 1 && p < ppi && fits(paperAt(p))) maxPpi = p;
+  }
+  const sizeError = maxPpi
+    ? `当前尺寸太大，超过单张最多 8000 万像素。按这个尺寸最高约 ${maxPpi} PPI。`
+    : "请调整出图尺寸，目标单边最多 32768 px，总像素最多 8000 万。";
   let unavailable = "";
   if (!source) unavailable = readError ? "请重新选择原图。" : (loading ? "正在读取原图…" : "等待选择图片");
   else if (plan.error) unavailable = plan.error;
   else if (!sizeAllowed) unavailable = sizeError;
-  else if (layered && !recipe) unavailable = "请先标记并检查分层选区，然后提交出图。";
+  else if (layered && !recipe) unavailable = "请先标记并检查选区。";
   let summary = plan;
   if (plan && !plan.error && !sizeAllowed) summary = {error:sizeError};
   if (layered && custom && source && sizeAllowed && !plan.error) {
@@ -390,10 +410,10 @@ function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, c
       ...detailEstimate(source, fit, Number(ppi), ppi/fit)};
   }
   return <>
-    <HddePageHeader title="喷绘出图" description="按成品尺寸检查原图精度，生成喷绘文件并核对局部细节。"
+    <HddePageHeader title="喷绘出图" description={source ? undefined : "按成品尺寸检查原图精度，生成喷绘文件并核对局部细节。"}
       meta={<HddeStatusPill tone={source ? "positive" : "neutral"}>{readError ? "原图读取失败" : source ? "原图已载入" : loading ? "正在读取原图" : "待选原图"}</HddeStatusPill>}/>
     <div className="hdde-color-flow hdde-desktop-columns print-flow">
-      <div className="hdde-color-intake">
+      <div className={`hdde-color-intake${layered && source ? " print-layer-intake" : ""}`}>
         <div className="hdde-reference-tabs print-mode-tabs" role="group" aria-label="出图方式">
           {["等比出图","分层出图"].map((label, index) => {
             const useLayers = index === 1;
@@ -405,23 +425,33 @@ function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, c
         <div className="hdde-color-intake-body">
           <PrintSource loading={loading} source={source} busy={busy} error={readError} onSelect={onSelect} pickerRef={pickerRef}/>
           <section className="hdde-color-card hdde-color-controls print-panel print-spec" aria-labelledby="print-spec">
-            <div className="hdde-color-section-title"><span aria-hidden="true">2</span><h2 id="print-spec">喷绘规格</h2></div>
-            <details className="hdde-color-output-path print-settings" open={Boolean(source)}>
-              <summary>尺寸与精度<span>{layered && custom ? `${cw} × ${ch} cm` : sizeLabel} · {ppi || "—"} PPI</span></summary>
+            <details className="print-settings" open={Boolean(source)}>
+              <summary>
+                <h2 id="print-spec" className="hdde-color-section-title"><span aria-hidden="true">2</span>喷绘规格
+                  <small>{layered && custom ? `${cw} × ${ch} cm` : sizeLabel} · {ppi || "—"} PPI</small>
+                </h2>
+              </summary>
               <fieldset className="print-spec-controls" disabled={busy} aria-label="喷绘参数">
                 {children}
                 {layered && source && <>
-                  <label>成品画布<select value={custom?"paper":"source"} onChange={e=>setCustom(e.target.value==="paper")}>
+                  <label className="print-inline-field">成品画布<select value={custom?"paper":"source"} onChange={e=>setCustom(e.target.value==="paper")}>
                     <option value="source">沿用预检尺寸</option><option value="paper">指定宽高，等比居中留边</option>
                   </select></label>
-                  {custom && <div className="print-fields">
-                    <label>画布宽度（cm）<input type="number" step="any" min="0" value={cw} onChange={e=>setCw(e.target.value)}/></label>
-                    <label>画布高度（cm）<input type="number" step="any" min="0" value={ch} onChange={e=>setCh(e.target.value)}/></label>
+                  {custom && <div className="print-canvas-dimensions">
+                    <label>宽<input aria-label="画布宽度（cm）" type="number" step="any" min="0" value={cw} onChange={e=>setCw(e.target.value)}/></label>
+                    <label>高<input aria-label="画布高度（cm）" type="number" step="any" min="0" value={ch} onChange={e=>setCh(e.target.value)}/></label>
+                    <span>cm</span>
                   </div>}
                 </>}
               </fieldset>
             </details>
-            <PrintSizeSummary result={summary} custom={layered && custom}/>
+            {maxPpi && !busy && <div className="print-max-ppi" role="group" aria-label="出图尺寸超限">
+              <span>{ppi} PPI 超出上限，当前尺寸最高 {maxPpi} PPI</span>
+              <button type="button" className="hdde-secondary-action" onClick={() => onPpiChange?.(String(maxPpi))}>改为 {maxPpi} PPI</button>
+            </div>}
+            <PrintSizeSummary result={summary} custom={layered && custom}>
+              {layered && source && <div className="print-intake-status" ref={setIntakeStatusHost}/>}
+            </PrintSizeSummary>
           </section>
         </div>
         <div className="hdde-color-execution" ref={setActionHost}/>
@@ -429,7 +459,7 @@ function PrintWorkflow({loading, source, plan, ppi, busy, setBusy, onNavigate, c
       <div className="hdde-color-outcome print-outcome" data-stage={layered && source ? "layers" : "intake"}>
         <PrintOutput key={JSON.stringify([layered,paper?.pixelWidth,paper?.pixelHeight,ppi,recipe])} source={source}
           plan={paper} ppi={ppi} busy={busy} setBusy={setBusy} onNavigate={onNavigate} layers={recipe} layered={layered}
-          unavailable={unavailable} actionHost={actionHost} pickerRef={pickerRef}/>
+          unavailable={unavailable} actionHost={actionHost} intakeStatusHost={intakeStatusHost} pickerRef={pickerRef}/>
         {layered && source && <section id="print-layer-section" className="hdde-color-card print-panel print-layer-section" aria-label="分层编辑">
           <PrintLayerEditor source={source} onReady={setRecipe} busy={busy}/>
         </section>}
@@ -509,20 +539,21 @@ export default function PrintPreflightPage({ onNavigate, continueResultId = "" }
   return <div className="print-preflight hdde-color-page hdde-page-frame hdde-page-stack">
     <PrintWorkflow key={source?.url || "empty"} source={source} loading={Boolean(file || continueResultId)} plan={result} readError={readError}
       ppi={Number(ppi)} busy={busy} setBusy={setBusy} onNavigate={onNavigate} onSelect={selectFile} layered={layered} setLayered={setLayered}
+      planAt={p => source && planPrintSize(source, { mode, axis, cm, ppi: p })} onPpiChange={setPpi}
       sizeLabel={mode === "8k" ? "长边 7680 px" : `${axis === "width" ? "宽" : "高"} ${cm || "—"} cm`}>
-      <label>计算方式<select value={mode} onChange={e=>setMode(e.target.value)}>
+      <label className="print-inline-field">计算方式<select value={mode} onChange={e=>setMode(e.target.value)}>
         <option value="physical">按喷绘尺寸计算</option><option value="8k">按 8K 长边估算（7680 px）</option>
       </select></label>
-      {mode === "physical" && <div className="print-fields">
-        <label>指定边<select value={axis} onChange={e=>setAxis(e.target.value)}>
+      {mode === "physical" && <div className="print-size-row">
+        <span>喷绘尺寸</span>
+        <select aria-label="指定边" value={axis} onChange={e=>setAxis(e.target.value)}>
           <option value="width">宽度</option><option value="height">高度</option>
-        </select></label>
-        <label>喷绘{axis === "width" ? "宽度" : "高度"}（cm）
-          <input type="number" step="any" min="0" value={cm} onChange={e=>setCm(e.target.value)}/>
-        </label>
+        </select>
+        <input aria-label={`喷绘${axis === "width" ? "宽度" : "高度"}（cm）`} type="number" step="any" min="0" value={cm} onChange={e=>setCm(e.target.value)}/>
+        <span>cm</span>
       </div>}
       <div className="print-density">
-        <label>目标 PPI（像素/英寸）<input type="number" step="any" min="0" value={ppi} onChange={e=>setPpi(e.target.value)}/></label>
+        <label className="print-inline-field">目标 PPI<input aria-label="目标 PPI（像素/英寸）" type="number" step="any" min="0" value={ppi} onChange={e=>setPpi(e.target.value)}/></label>
         <div className="print-presets" role="group" aria-label="常用目标精度">
           {[100,150,300].map(value => <button type="button" key={value} aria-pressed={Number(ppi) === value}
             aria-label={`${value} PPI`} onClick={()=>setPpi(String(value))}>{value}</button>)}
