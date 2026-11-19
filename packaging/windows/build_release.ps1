@@ -47,8 +47,9 @@ if (-not $BuildId) {
 if ($BuildId -notmatch '^[A-Za-z0-9_.-]+$') {
     throw "BuildId may contain only letters, digits, dot, underscore and hyphen."
 }
-$PackageBaseName = "影界HDDE_${PublicVersion}_$($Version.release_name)_内测_${BuildId}_Setup"
+$PackageBaseName = "HDDE_V$($Version.version)_${BuildId}_Setup"
 $ReleaseRoot = Join-Path $ProjectRoot "build\w60_03\$($Version.version)\$BuildId"
+$FrontendDist = Join-Path $ReleaseRoot "dist"
 $AppDist = Join-Path $ReleaseRoot "app"
 $PyInstallerWork = Join-Path $ReleaseRoot "pyinstaller"
 $InstallerOutput = Join-Path $ProjectRoot "packaging\windows\release\$PublicVersion\installer"
@@ -56,8 +57,11 @@ $ProvenanceManifest = Join-Path $ReleaseRoot "package-provenance-manifest.json"
 $ExtractedInstallerRoot = Join-Path $ReleaseRoot "installer-extracted"
 $ExtractedProvenanceManifest = Join-Path $ReleaseRoot "installer-extracted-app-provenance-manifest.json"
 $InstallerContentManifest = Join-Path $ReleaseRoot "installer-content-manifest.json"
+# ISCC writes the Setup file incrementally; an interrupted compile leaves a truncated exe.
+# Compile into the build tree and move into the release folder only after every gate passes.
+$InstallerStaging = Join-Path $ReleaseRoot "installer-staging"
 
-foreach ($OutputPath in @($AppDist, $PyInstallerWork, $ProvenanceManifest, $ExtractedInstallerRoot, $ExtractedProvenanceManifest, $InstallerContentManifest)) {
+foreach ($OutputPath in @($FrontendDist, $AppDist, $PyInstallerWork, $ProvenanceManifest, $ExtractedInstallerRoot, $ExtractedProvenanceManifest, $InstallerContentManifest, $InstallerStaging)) {
     if (Test-Path -LiteralPath $OutputPath) {
         throw "Isolated W60-03 output already exists and will not be deleted: $OutputPath"
     }
@@ -65,18 +69,20 @@ foreach ($OutputPath in @($AppDist, $PyInstallerWork, $ProvenanceManifest, $Extr
 New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
 
 Push-Location $ProjectRoot
+$PreviousFrontendDist = $env:HDDE_PACKAGING_FRONTEND_DIR
 try {
-    & npm.cmd run build
+    $env:HDDE_PACKAGING_FRONTEND_DIR = $FrontendDist
+    & npm.cmd run build -- --outDir $FrontendDist --manifest
     if ($LASTEXITCODE -ne 0) { throw "Frontend production build failed with exit code $LASTEXITCODE." }
 
-    & $Python -c "from pathlib import Path; from runtime.production_frontend import validate_production_frontend; validate_production_frontend(Path('dist')); print('PRODUCTION_FRONTEND=PASS')"
+    & $Python -c "import os; from pathlib import Path; from runtime.production_frontend import validate_production_frontend; validate_production_frontend(Path(os.environ['HDDE_PACKAGING_FRONTEND_DIR'])); print('PRODUCTION_FRONTEND=PASS')"
     if ($LASTEXITCODE -ne 0) { throw "Frontend artifact validation failed with exit code $LASTEXITCODE." }
 
     & $Python -m PyInstaller --noconfirm --distpath $AppDist --workpath $PyInstallerWork $SpecPath
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed with exit code $LASTEXITCODE." }
 
-    $PackagedAppTree = Join-Path $AppDist "影界 HDDE"
-    $PackagedExe = Join-Path $PackagedAppTree "影界 HDDE.exe"
+    $PackagedAppTree = Join-Path $AppDist "HDDE"
+    $PackagedExe = Join-Path $PackagedAppTree "HDDE.exe"
     if (-not (Test-Path -LiteralPath $PackagedExe -PathType Leaf)) {
         throw "Frozen runtime output is missing: $PackagedExe"
     }
@@ -132,18 +138,19 @@ try {
         exit 2
     }
 
-    New-Item -ItemType Directory -Force -Path $InstallerOutput | Out-Null
     $ExpectedInstaller = Join-Path $InstallerOutput "$PackageBaseName.exe"
     if (Test-Path -LiteralPath $ExpectedInstaller) {
         throw "Final installer already exists and will not be overwritten: $ExpectedInstaller"
     }
-    & $InnoCandidates "/DSourceDir=$PackagedAppTree" "/DOutputDir=$InstallerOutput" "/DProductVersion=$($Version.version)" "/DInstallerVersion=$InstallerVersion" "/DDisplayVersion=$($Version.display_version)" "/DPackageBaseName=$PackageBaseName" "/DWebView2Bootstrapper=$WebView2BootstrapperPath" $InstallerScript
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed with exit code $LASTEXITCODE." }
+    New-Item -ItemType Directory -Path $InstallerStaging | Out-Null
+    $StagedInstaller = Join-Path $InstallerStaging "$PackageBaseName.exe"
+    & $InnoCandidates "/DSourceDir=$PackagedAppTree" "/DOutputDir=$InstallerStaging" "/DProductVersion=$($Version.version)" "/DInstallerVersion=$InstallerVersion" "/DDisplayVersion=$($Version.display_version)" "/DPackageBaseName=$PackageBaseName" "/DWebView2Bootstrapper=$WebView2BootstrapperPath" $InstallerScript
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed with exit code $LASTEXITCODE. Staged output left at: $InstallerStaging" }
 
-    if (-not (Test-Path -LiteralPath $ExpectedInstaller -PathType Leaf)) {
-        throw "Installer build produced no expected Setup executable: $ExpectedInstaller"
+    if (-not (Test-Path -LiteralPath $StagedInstaller -PathType Leaf)) {
+        throw "Installer build produced no expected Setup executable: $StagedInstaller"
     }
-    $Installer = Get-Item -LiteralPath $ExpectedInstaller
+    $Installer = Get-Item -LiteralPath $StagedInstaller
     & $InstallerExtractorPath --extract --silent --output-dir $ExtractedInstallerRoot $Installer.FullName
     if ($LASTEXITCODE -ne 0) { throw "Installer content extraction failed with exit code $LASTEXITCODE." }
 
@@ -156,6 +163,18 @@ try {
     $SystemUtilityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1"
     Import-Module -Name $SystemUtilityModule -Force -ErrorAction Stop
     $Hash = Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Installer.FullName -Algorithm SHA256
+
+    # Publish: same-volume rename, so the release folder only ever sees a complete, gated file.
+    New-Item -ItemType Directory -Force -Path $InstallerOutput | Out-Null
+    if (Test-Path -LiteralPath $ExpectedInstaller) {
+        throw "Final installer appeared during the build and will not be overwritten: $ExpectedInstaller"
+    }
+    Move-Item -LiteralPath $Installer.FullName -Destination $ExpectedInstaller
+    $Installer = Get-Item -LiteralPath $ExpectedInstaller
+    $PublishedHash = Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Installer.FullName -Algorithm SHA256
+    if ($PublishedHash.Hash -ne $Hash.Hash) {
+        throw "Published installer hash differs from the gated staged file: $ExpectedInstaller"
+    }
     Write-Output "INSTALLER_BUILD=PASS"
     Write-Output "PACKAGE_PATH=$($Installer.FullName)"
     Write-Output "PACKAGE_SIZE=$($Installer.Length)"
@@ -166,5 +185,6 @@ try {
     Write-Output "WEBVIEW2_BUNDLED=YES"
 }
 finally {
+    $env:HDDE_PACKAGING_FRONTEND_DIR = $PreviousFrontendDist
     Pop-Location
 }

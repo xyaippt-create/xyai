@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ _STATIC_RESOURCES = (
     "engine/batch_watermark/fonts/THIRD_PARTY_NOTICES.md",
     "models/local_retouch/inpainting_lama_2025jan.onnx",
     "models/local_retouch/README.md",
+    "models/local_retouch/LICENSE-Apache-2.0.txt",
     "models/text_detection/text_detection_cn_ppocrv3_2023may.onnx",
     "models/text_detection/README.md",
     "models/text_detection/LICENSE-Apache-2.0.txt",
@@ -62,7 +64,12 @@ _STATIC_RESOURCES = (
     "visual_style_rules/README.md",
     "external_tools/realesrgan-ncnn-vulkan/realesrgan-ncnn-vulkan.exe",
     "external_tools/realesrgan-ncnn-vulkan/vcomp140.dll",
-    "external_tools/realesrgan-ncnn-vulkan/vcomp140d.dll",
+    "external_tools/realesrgan-ncnn-vulkan/THIRD_PARTY_NOTICES.md",
+    "external_tools/realesrgan-ncnn-vulkan/LICENSE-Real-ESRGAN.txt",
+    "external_tools/realesrgan-ncnn-vulkan/LICENSE-Real-ESRGAN-ncnn-vulkan.txt",
+    "external_tools/realesrgan-ncnn-vulkan/LICENSE-ncnn.txt",
+    "external_tools/realesrgan-ncnn-vulkan/LICENSE-libwebp.txt",
+    "external_tools/realesrgan-ncnn-vulkan/PATENTS-libwebp.txt",
     "external_tools/realesrgan-ncnn-vulkan/models/realesr-animevideov3-x2.bin",
     "external_tools/realesrgan-ncnn-vulkan/models/realesr-animevideov3-x2.param",
     "external_tools/realesrgan-ncnn-vulkan/models/realesr-animevideov3-x3.bin",
@@ -96,6 +103,9 @@ _KNOWN_SOURCE_EXCLUSIONS = {
     "external_tools/realesrgan-ncnn-vulkan/onepiece_demo.mp4",
     "external_tools/realesrgan-ncnn-vulkan/README_windows.md",
     "external_tools/realesrgan-ncnn-vulkan/realesrgan-ncnn-vulkan-20220424-windows.zip",
+    # Microsoft debug OpenMP runtime: not redistributable and not needed by the
+    # executable (verified 2026-11-16); kept in the source folder, never packaged.
+    "external_tools/realesrgan-ncnn-vulkan/vcomp140d.dll",
 }
 
 _GENERATED_DIST_PATTERNS = (
@@ -131,15 +141,33 @@ def _matches_generated_dist(relative: str) -> bool:
 
 def discover_program_resources(project_root: str | Path) -> list[ProgramResource]:
     root = Path(project_root).resolve()
-    allowed = set(_STATIC_RESOURCES)
-    dist_root = root / "dist"
+    configured_dist = os.environ.get("HDDE_PACKAGING_FRONTEND_DIR")
+    dist_root = Path(configured_dist).absolute() if configured_dist else root / "dist"
+    _validate_source_path(root, dist_root)
     if not dist_root.is_dir():
         raise ProgramResourceError(f"PRODUCTION_FRONTEND_MISSING: {dist_root}")
-    for path in dist_root.rglob("*"):
-        if path.is_file():
-            relative = path.relative_to(root).as_posix()
-            if _matches_generated_dist(relative):
-                allowed.add(relative)
+    dist_prefix = dist_root.relative_to(root).as_posix()
+    allowed = {
+        f"{dist_prefix}/{relative.removeprefix('dist/')}" if relative.startswith("dist/") else relative: relative
+        for relative in _STATIC_RESOURCES
+    }
+    exclusions = set(_KNOWN_SOURCE_EXCLUSIONS)
+    if configured_dist:
+        manifest = dist_root / ".vite" / "manifest.json"
+        _validate_source_path(root, manifest)
+        entries = json.loads(manifest.read_text(encoding="utf-8"))
+        for entry in entries.values():
+            for name in (entry["file"], *entry.get("css", []), *entry.get("assets", [])):
+                if not re.fullmatch(r"assets/[A-Za-z0-9_-]+\.(?:js|css|otf)", name):
+                    raise ProgramResourceError(f"UNALLOWLISTED_FRONTEND_ASSET: {name}")
+                allowed[f"{dist_prefix}/{name}"] = f"dist/{name}"
+        exclusions.add(manifest.relative_to(root).as_posix())
+    else:
+        for path in dist_root.rglob("*"):
+            if path.is_file():
+                relative = path.relative_to(root).as_posix()
+                if _matches_generated_dist(relative):
+                    allowed[relative] = relative
 
     missing = [relative for relative in sorted(allowed) if not (root / relative).is_file()]
     if missing:
@@ -147,7 +175,7 @@ def discover_program_resources(project_root: str | Path) -> list[ProgramResource
 
     observed: set[str] = set()
     for managed in _MANAGED_ROOTS:
-        managed_root = root / managed
+        managed_root = dist_root if managed == "dist" else root / managed
         if not managed_root.is_dir():
             raise ProgramResourceError(f"PROGRAM_RESOURCE_ROOT_MISSING: {managed}")
         observed.update(
@@ -156,7 +184,7 @@ def discover_program_resources(project_root: str | Path) -> list[ProgramResource
             if path.is_file()
         )
 
-    unexpected = sorted(observed - allowed - _KNOWN_SOURCE_EXCLUSIONS)
+    unexpected = sorted(observed - allowed.keys() - exclusions)
     if unexpected:
         raise ProgramResourceError("UNALLOWLISTED_PROGRAM_RESOURCE: " + ", ".join(unexpected))
 
@@ -164,7 +192,7 @@ def discover_program_resources(project_root: str | Path) -> list[ProgramResource
     for relative in sorted(allowed):
         source = root / relative
         _validate_source_path(root, source)
-        resources.append(ProgramResource(relative, relative))
+        resources.append(ProgramResource(relative, allowed[relative]))
     return resources
 
 

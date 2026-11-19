@@ -8,6 +8,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -120,6 +121,29 @@ class PackagedRuntimeContractTests(unittest.TestCase):
         finally:
             listener.close()
 
+    def test_loopback_health_probe_does_not_initialize_tls(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"healthy": true}')
+
+            def log_message(self, *args):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                with patch("ssl.create_default_context", side_effect=FileNotFoundError):
+                    self.assertEqual(
+                        packaged_launcher._read_json(server.server_port, "/api/health"),
+                        {"healthy": True},
+                    )
+            finally:
+                server.shutdown()
+                thread.join()
+
     def test_readiness_requires_health_version_runtime_and_bound_port(self):
         port = 49152
         health = {
@@ -167,8 +191,7 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                 return self
 
             def fire(self, *args):
-                for callback in self.callbacks:
-                    callback(*args)
+                return any(callback(*args) is False for callback in self.callbacks)
 
         class FakeWindow:
             def __init__(self, url):
@@ -177,7 +200,10 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                 self.events = type("Events", (), {})()
                 self.events.shown = FakeEvent()
                 self.events.loaded = FakeEvent()
+                self.events.closing = FakeEvent()
                 self.events.closed = FakeEvent()
+                self.exposed = {}
+                self.dialogs = []
 
             def get_current_url(self):
                 return self.url
@@ -186,15 +212,26 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                 return {"path": self.url.split(":49152", 1)[1], "title": "影界 HDDE", "readyState": "complete"}
 
             def destroy(self):
+                if self.events.closing.fire():
+                    return
                 self.destroyed = True
+                self.events.closed.fire()
+
+            def expose(self, callback):
+                self.exposed[callback.__name__] = callback
+
+            def create_confirmation_dialog(self, title, message):
+                self.dialogs.append((title, message))
+                return False
 
         class FakeWebview:
             renderer = "edgechromium"
 
-            def __init__(self):
+            def __init__(self, exercise_exit=None):
                 self.window = None
                 self.create_kwargs = {}
                 self.start_kwargs = {}
+                self.exercise_exit = exercise_exit
 
             def create_window(self, _title, url, **kwargs):
                 self.window = FakeWindow(url)
@@ -211,7 +248,10 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                         self.window.events.loaded.fire(self.window)
                         if self.window.destroyed:
                             raise AssertionError("A later page load closed the desktop")
-                self.window.events.closed.fire()
+                if self.exercise_exit:
+                    self.exercise_exit(self.window)
+                else:
+                    self.window.events.closed.fire()
 
         fake = FakeWebview()
         stopped = threading.Event()
@@ -237,6 +277,30 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                     storage_root=Path(directory), webview_module=invalid,
                 )
             self.assertTrue(invalid.window.destroyed)
+
+        state = dict(compression_running=1, retouch_running=0, watermark_running=0, other_running=0, retouch_candidates=1)
+        stopped = threading.Event()
+
+        def check_exit(window):
+            window.exposed["set_retouch_candidate_pending"](True)
+            window.destroy()
+            self.assertFalse(window.destroyed)
+            self.assertFalse(stopped.is_set())
+            self.assertIn("恢复批次", window.dialogs[0][1])
+            self.assertIn("恢复历史批次", window.dialogs[0][1])
+            self.assertIn("单图修复候选尚未另存", window.dialogs[0][1])
+            state.update(compression_running=0, retouch_candidates=0)
+            window.exposed["set_retouch_candidate_pending"](False)
+            window.destroy()
+            self.assertTrue(window.destroyed)
+            self.assertTrue(stopped.is_set())
+            self.assertEqual(len(window.dialogs), 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            packaged_launcher.run_desktop_window(
+                "http://127.0.0.1:49152/processing", stopped, lambda: False,
+                storage_root=Path(directory), webview_module=FakeWebview(check_exit), get_exit_state=lambda: state,
+            )
 
     def test_packaged_source_never_opens_a_system_browser(self):
         source = (ROOT / "runtime" / "packaged_launcher.py").read_text(encoding="utf-8")
@@ -293,11 +357,17 @@ class PackagedRuntimeContractTests(unittest.TestCase):
         self.assertIn('packaged_main.py', spec)
         self.assertIn('program_resources.py', spec)
         self.assertIn('webview.platforms.edgechromium', spec)
-        self.assertIn('name="影界 HDDE"', spec)
+        self.assertIn('name="HDDE"', spec)
         self.assertNotIn("gui.app", spec)
         self.assertNotIn("VisualMasterPro.spec", spec)
         self.assertNotIn('collect_submodules("webview")', spec)
         self.assertIn('hookspath=[str(Path(SPECPATH) / "hooks")]', spec)
+        # Colour correction reads these through cv2.data.haarcascades; without them the packaged
+        # level pick fails and automatic correction silently loses face protection.
+        self.assertIn('collect_data_files("cv2", subdir="data"', spec)
+        for cascade in ("haarcascade_frontalface_default.xml", "haarcascade_frontalface_alt2.xml", "haarcascade_profileface.xml"):
+            self.assertIn(cascade, spec)
+            self.assertTrue((Path(__import__("cv2").data.haarcascades) / cascade).is_file(), cascade)
         hook = (ROOT / "packaging" / "windows" / "hooks" / "hook-webview.py").read_text(encoding="utf-8")
         self.assertIn("Microsoft.Web.WebView2.Core.dll", hook)
         self.assertIn("Microsoft.Web.WebView2.WinForms.dll", hook)
@@ -323,17 +393,38 @@ class PackagedRuntimeContractTests(unittest.TestCase):
         build_script = (ROOT / "packaging" / "windows" / "build_release.ps1").read_text(encoding="utf-8")
         self.assertNotIn(r"D:\影界文件", script)
         self.assertNotIn("[UninstallDelete]", script)
+        # Upgrades replace only the program tree of an existing HDDE install; user data is outside {app}.
+        self.assertIn('Type: filesandordirs; Name: "{app}\\_internal"; Check: IsExistingHddeInstall', script)
+        self.assertIn("FileExists(ExpandConstant('{app}\\HDDE.exe'))", script)
         self.assertNotIn("V0.5.9", script)
         self.assertIn("OutputBaseFilename={#PackageBaseName}", script)
-        self.assertIn("影界 HDDE.exe", script)
+        self.assertIn("HDDE.exe", script)
+        self.assertIn("DefaultDirName={code:DefaultInstallDir}", script)
+        self.assertIn(r"{localappdata}\Programs\HDDE", script)
+        self.assertIn("UsePreviousAppDir=no", script)
+        self.assertIn("IsAsciiInstallPath(WizardDirValue)", script)
         self.assertIn("--shutdown", script)
         self.assertIn("MicrosoftEdgeWebView2Setup.exe", script)
         self.assertIn("PrepareToInstall", script)
         self.assertIn("HasWebView2RuntimeFiles", script)
         self.assertIn("GetVersionNumbersString", script)
-        self.assertIn("$Version.release_name", build_script)
+        self.assertIn("HDDE_V$($Version.version)", build_script)
         self.assertIn(r"packaging\windows\release\$PublicVersion\installer", build_script)
         self.assertIn("installer_data_gate.py", build_script)
+
+    def test_caption_icon_hiding_sets_form_show_icon_and_tolerates_missing_form(self):
+        self.assertFalse(packaged_launcher.hide_window_caption_icon(object()))
+
+        class FakeForm:
+            ShowIcon = True
+
+            def Invoke(self, action):
+                action()
+
+        window = type("FakeWindow", (), {"native": FakeForm()})()
+        with patch.dict("sys.modules", {"System": type("System", (), {"Action": staticmethod(lambda fn: fn)})}):
+            self.assertTrue(packaged_launcher.hide_window_caption_icon(window))
+        self.assertFalse(window.native.ShowIcon)
 
 
 if __name__ == "__main__":

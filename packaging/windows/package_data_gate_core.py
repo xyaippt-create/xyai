@@ -23,7 +23,7 @@ from PyInstaller.loader.pyimod01_archive import ZlibArchiveReader
 from program_resources import expected_app_tree_resources
 
 
-APP_EXE_NAME = "影界 HDDE.exe"
+APP_EXE_NAME = "HDDE.exe"
 IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 ZIP_SUFFIXES = {".zip", ".whl"}
 APP_RESOURCE_PREFIXES = (

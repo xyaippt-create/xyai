@@ -28,9 +28,11 @@ AppVerName=影界 HDDE {#DisplayVersion}
 VersionInfoVersion={#InstallerVersion}
 VersionInfoProductVersion={#InstallerVersion}
 VersionInfoDescription=影界 HDDE 内测版安装程序
-DefaultDirName={localappdata}\Programs\影界 HDDE
+DefaultDirName={code:DefaultInstallDir}
+UsePreviousAppDir=no
+DisableDirPage=no
 DefaultGroupName=影界 HDDE
-UninstallDisplayIcon={app}\影界 HDDE.exe
+UninstallDisplayIcon={app}\HDDE.exe
 OutputDir={#OutputDir}
 OutputBaseFilename={#PackageBaseName}
 SetupIconFile={#SourceDir}\_internal\dist\branding\hdde\hdde.ico
@@ -43,22 +45,59 @@ CloseApplications=yes
 RestartApplications=no
 WizardStyle=modern
 
+[InstallDelete]
+; Replace the program tree as a whole on upgrade, so files a newer build no longer ships
+; (old frontend chunks, removed modules) do not pile up. Settings, WebView data and the
+; formal data root all live outside {app}; only an existing HDDE install is touched.
+Type: filesandordirs; Name: "{app}\_internal"; Check: IsExistingHddeInstall
+
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#WebView2Bootstrapper}"; Flags: dontcopy
 
 [Icons]
-Name: "{group}\影界 HDDE"; Filename: "{app}\影界 HDDE.exe"; WorkingDir: "{app}"
-Name: "{group}\退出影界 HDDE"; Filename: "{app}\影界 HDDE.exe"; Parameters: "--shutdown"; WorkingDir: "{app}"
-Name: "{autodesktop}\影界 HDDE"; Filename: "{app}\影界 HDDE.exe"; WorkingDir: "{app}"
+Name: "{group}\影界 HDDE"; Filename: "{app}\HDDE.exe"; WorkingDir: "{app}"
+Name: "{group}\退出影界 HDDE"; Filename: "{app}\HDDE.exe"; Parameters: "--shutdown"; WorkingDir: "{app}"
+Name: "{autodesktop}\影界 HDDE"; Filename: "{app}\HDDE.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\影界 HDDE.exe"; Description: "启动影界 HDDE"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\HDDE.exe"; Description: "启动影界 HDDE"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const
   WebView2ClientKey = 'Software\Microsoft\EdgeUpdate\Clients\{F1E7E9C9-AF2C-4AA4-8A41-1B81F49BFCF7}';
   WebView2BootstrapperName = 'MicrosoftEdgeWebView2Setup.exe';
+  InstallPathError = '安装目录只支持英文字符、数字和 ASCII 符号。请选择不含中文的完整路径。';
+
+function IsAsciiInstallPath(const Directory: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 1 to Length(Directory) do
+    if (Ord(Directory[Index]) < 32) or (Ord(Directory[Index]) > 126) then
+      exit;
+  Result := Directory <> '';
+end;
+
+function IsExistingHddeInstall(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\HDDE.exe'));
+end;
+
+function DefaultInstallDir(Param: String): String;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\HDDE');
+  if not IsAsciiInstallPath(Result) then
+    Result := ExpandConstant('{sd}\HDDE');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := (CurPageID <> wpSelectDir) or IsAsciiInstallPath(WizardDirValue);
+  if not Result then
+    SuppressibleMsgBox(InstallPathError, mbError, MB_OK, IDOK);
+end;
 
 function HasUsableWebView2Version(RootKey: Integer): Boolean;
 var
@@ -114,6 +153,11 @@ var
   ResultCode: Integer;
 begin
   Result := '';
+  if not IsAsciiInstallPath(WizardDirValue) then
+  begin
+    Result := InstallPathError;
+    exit;
+  end;
   if IsWebView2RuntimeInstalled() then
     exit;
 

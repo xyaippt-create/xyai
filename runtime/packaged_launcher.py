@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+import http.client
 import json
+import logging
 import os
 import signal
 import socket
@@ -11,8 +13,6 @@ import sys
 import threading
 import time
 import traceback
-import urllib.error
-import urllib.request
 from ctypes import wintypes
 from pathlib import Path
 from types import ModuleType
@@ -48,6 +48,22 @@ def write_startup_error(exc: BaseException) -> None:
         )
     except Exception:
         return
+
+
+def hide_window_caption_icon(window: Any) -> bool:
+    """Hide the title-bar icon; the taskbar and Alt+Tab icons are unchanged."""
+
+    # pywebview's EdgeChromium window is a WinForms Form; uxtheme NODRAWICON has no effect on it.
+    native = getattr(window, "native", None)
+    if os.name != "nt" or native is None:
+        return False
+    try:
+        from System import Action
+
+        native.Invoke(Action(lambda: setattr(native, "ShowIcon", False)))
+        return True
+    except Exception:
+        return False
 
 
 class _WindowsEvent:
@@ -88,6 +104,14 @@ class _WindowsEvent:
         kernel32.WaitForSingleObject.restype = wintypes.DWORD
         return kernel32.WaitForSingleObject(self.handle, 0) == 0
 
+    def take_signal(self) -> bool:
+        if not self.is_signaled():
+            return False
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.ResetEvent.argtypes = [wintypes.HANDLE]
+        kernel32.ResetEvent.restype = wintypes.BOOL
+        return bool(kernel32.ResetEvent(self.handle))
+
     def close(self) -> None:
         if self.handle:
             ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self.handle)
@@ -127,11 +151,17 @@ def reserve_loopback_socket(preferred_port: int = 0) -> socket.socket:
         raise
 
 
-def _read_json(url: str) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=1) as response:
-        if response.status != 200:
-            raise PackagedRuntimeError(f"Backend 返回非预期状态：{response.status}")
-        payload = json.loads(response.read().decode("utf-8"))
+def _read_json(port: int, path: str) -> dict[str, Any]:
+    # The owned backend only serves loopback HTTP; no system proxy or TLS setup is needed.
+    connection = http.client.HTTPConnection(HOST, port, timeout=1)
+    try:
+        connection.request("GET", path)
+        with connection.getresponse() as response:
+            if response.status != 200:
+                raise PackagedRuntimeError(f"Backend 返回非预期状态：{response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        connection.close()
     if not isinstance(payload, dict):
         raise PackagedRuntimeError("Backend 返回了无效 JSON。")
     return payload
@@ -167,19 +197,19 @@ def _runtime_contract_valid(payload: dict[str, Any], port: int) -> bool:
     )
 
 
-def _wait_until_ready(base_url: str, port: int, server, timeout: float = 60.0) -> dict[str, Any]:
+def _wait_until_ready(port: int, server, timeout: float = 60.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_error = ""
     while time.monotonic() < deadline:
         if not server_thread_alive(server):
             raise PackagedRuntimeError("正式 Backend 在就绪前退出。")
         try:
-            health = _read_json(f"{base_url}/api/health")
-            runtime = _read_json(f"{base_url}/api/runtime/status")
+            health = _read_json(port, "/api/health")
+            runtime = _read_json(port, "/api/runtime/status")
             if _health_contract_valid(health, port) and _runtime_contract_valid(runtime, port):
                 return {"health": health, "runtime": runtime}
             last_error = "Backend 已响应，但健康、版本或正式运行状态合同未成立。"
-        except (OSError, ValueError, urllib.error.URLError, PackagedRuntimeError) as exc:
+        except (OSError, ValueError, http.client.HTTPException, PackagedRuntimeError) as exc:
             last_error = str(exc)
         time.sleep(0.2)
     raise PackagedRuntimeError(f"正式 Backend 未在 {timeout:g} 秒内就绪：{last_error}")
@@ -252,6 +282,50 @@ def _write_validation_evidence(path: Path | None, **fields: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def desktop_exit_message(state: dict[str, Any] | None, unsaved_candidate: bool) -> str:
+    messages = []
+    if state is None:
+        messages.append("无法确认当前任务状态。退出可能中断处理。")
+    else:
+        if any(state[key] for key in ("compression_running", "retouch_running", "watermark_running", "other_running")):
+            messages.append("仍有任务正在处理，退出可能中断尚未完成的工作。")
+        if state["compression_running"]:
+            messages.append("已保存原图的压缩批次可在「图片交付 → 批量压缩 → 恢复批次」中找回。")
+        if state["retouch_candidates"]:
+            messages.append(f"有 {state['retouch_candidates']} 张批量修复候选待确认另存。")
+        if state["retouch_running"] or state["retouch_candidates"]:
+            messages.append("已记录的批量修复进度和候选可从「瑕疵修复 → 恢复历史批次」找回。")
+        if state["watermark_running"]:
+            messages.append("批量水印已写入的成品会保留。重新打开后请在处理中心的历史任务中核对原批次。")
+    if unsaved_candidate:
+        messages.append("当前单图修复候选尚未另存。退出后需重新处理，选择取消可返回另存。")
+    return "\n\n".join([*messages, "确定退出影界 HDDE？"]) if messages else ""
+
+
+def read_desktop_exit_state(port: int) -> dict[str, int] | None:
+    try:
+        payload = _read_json(port, "/api/app/desktop-exit-state")
+        data = payload.get("data")
+        fields = ("compression_running", "retouch_running", "watermark_running", "other_running", "retouch_candidates")
+        if payload.get("success") is True and isinstance(data, dict) and all(type(data.get(key)) is int and data[key] >= 0 for key in fields):
+            return data
+    except (OSError, ValueError, PackagedRuntimeError, http.client.HTTPException):
+        pass
+    return None
+
+
+def confirm_desktop_exit(window, message: str) -> bool:
+    native = getattr(window, "native", None)
+    if native is not None:
+        from System.Windows.Forms import DialogResult, MessageBox, MessageBoxButtons, MessageBoxDefaultButton, MessageBoxIcon
+
+        return MessageBox.Show(
+            native, message, "退出影界 HDDE", MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2,
+        ) == DialogResult.OK
+    return window.create_confirmation_dialog("退出影界 HDDE", message)
+
+
 def run_desktop_window(
     url: str,
     stop_requested: threading.Event,
@@ -260,6 +334,7 @@ def run_desktop_window(
     storage_root: Path,
     evidence_path: Path | None = None,
     webview_module=None,
+    get_exit_state: Callable[[], dict[str, int] | None] | None = None,
 ) -> None:
     if webview_module is None:
         import webview as webview_module
@@ -277,8 +352,15 @@ def run_desktop_window(
     )
     if window is None:
         raise PackagedRuntimeError("无法创建影界 HDDE 桌面窗口。")
+    desktop_window = window
+    unsaved_candidate = False
+
+    def set_retouch_candidate_pending(pending):
+        nonlocal unsaved_candidate
+        unsaved_candidate = pending is True
 
     def on_shown(window=None):
+        hide_window_caption_icon(desktop_window)
         renderer = str(getattr(webview_module, "renderer", "") or "")
         _write_validation_evidence(evidence_path, window_shown=True, renderer=renderer, window_title=WINDOW_TITLE)
         if renderer != "edgechromium":
@@ -320,18 +402,43 @@ def run_desktop_window(
         stop_requested.set()
         _write_validation_evidence(evidence_path, window_closed=True)
 
+    confirming = False
+
+    def on_closing():
+        nonlocal confirming
+        if confirming:
+            return False
+        if not initial_load_checked or errors:
+            return True
+        confirming = True
+        try:
+            state = get_exit_state()
+            message = desktop_exit_message(state, unsaved_candidate)
+            if not message:
+                return True
+            try:
+                confirmed = confirm_desktop_exit(window, message)
+            except Exception:
+                logging.getLogger(__name__).exception("Desktop exit confirmation could not be shown")
+                return False
+            _write_validation_evidence(evidence_path, exit_confirmation=confirmed, exit_work=state, unsaved_single_candidate=unsaved_candidate)
+            return confirmed
+        finally:
+            confirming = False
+
     def watch_owned_runtime():
         while not stop_requested.wait(0.2):
             if should_close():
-                stop_requested.set()
                 try:
                     window.destroy()
                 except Exception:
                     pass
-                return
 
     window.events.shown += on_shown
     window.events.loaded += on_loaded
+    if get_exit_state is not None:
+        window.expose(set_retouch_candidate_pending)
+        window.events.closing += on_closing
     window.events.closed += on_closed
     storage_root.mkdir(parents=True, exist_ok=True)
     webview_module.start(
@@ -372,11 +479,12 @@ def run_packaged_runtime(
     server = None
     thread = None
     stop_requested = threading.Event()
+    close_requested = threading.Event()
     evidence_path: Path | None = None
     previous_handlers: dict[int, Any] = {}
 
     def handle_stop(_signum, _frame):
-        stop_requested.set()
+        close_requested.set()
 
     try:
         listener = reserve_loopback_socket(preferred_port)
@@ -418,7 +526,7 @@ def run_packaged_runtime(
 
         thread.start()
         base_url = f"http://{HOST}:{port}"
-        ready = _wait_until_ready(base_url, port, server)
+        ready = _wait_until_ready(port, server)
         _write_validation_evidence(
             evidence_path,
             process_id=os.getpid(),
@@ -428,12 +536,27 @@ def run_packaged_runtime(
             health_version=ready["health"]["data"]["version"],
             runtime_status=ready["runtime"]["data"]["status"],
         )
+        backend_exit_seen = False
+
+        def consume_close_request():
+            nonlocal backend_exit_seen
+            if close_requested.is_set():
+                close_requested.clear()
+                return True
+            if lifecycle.take_signal():
+                return True
+            if not backend_exit_seen and not server_thread_alive(server):
+                backend_exit_seen = True
+                return True
+            return False
+
         run_desktop_window(
             f"{base_url}{DEFAULT_PAGE}",
             stop_requested,
-            lambda: lifecycle.is_signaled() or not server_thread_alive(server),
+            consume_close_request,
             storage_root=(runtime_root / "webview") if runtime_root is not None else runtime_settings_path().parent / "webview",
             evidence_path=evidence_path,
+            get_exit_state=lambda: read_desktop_exit_state(port),
         )
         server.should_exit = True
         thread.join(timeout=15)

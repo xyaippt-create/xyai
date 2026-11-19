@@ -152,6 +152,19 @@ class ProgramResourceAllowlistTests(unittest.TestCase):
         self.assertNotIn("external_tools/realesrgan-ncnn-vulkan/input.jpg", sources)
         self.assertNotIn("external_tools/realesrgan-ncnn-vulkan/input2.jpg", sources)
         self.assertNotIn("external_tools/realesrgan-ncnn-vulkan/onepiece_demo.mp4", sources)
+        # Microsoft debug runtime is not redistributable; licence notices must ship.
+        self.assertNotIn("external_tools/realesrgan-ncnn-vulkan/vcomp140d.dll", sources)
+        self.assertIn("external_tools/realesrgan-ncnn-vulkan/vcomp140.dll", sources)
+        for notice in (
+            "THIRD_PARTY_NOTICES.md",
+            "LICENSE-Real-ESRGAN.txt",
+            "LICENSE-Real-ESRGAN-ncnn-vulkan.txt",
+            "LICENSE-ncnn.txt",
+            "LICENSE-libwebp.txt",
+            "PATENTS-libwebp.txt",
+        ):
+            self.assertIn(f"external_tools/realesrgan-ncnn-vulkan/{notice}", sources)
+        self.assertIn("models/local_retouch/LICENSE-Apache-2.0.txt", sources)
         self.assertFalse(any("__pycache__" in item or item.endswith(".pyc") for item in sources))
 
     def test_minimal_app_tree_generates_reproducible_manifest(self):
