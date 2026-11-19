@@ -25,6 +25,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, MutableMapping
@@ -116,6 +117,7 @@ SMART_DELIVERY_ELIGIBILITY_INVALIDATING_CODES = frozenset({
     "COLOR_RESULT_NOT_ACCEPTED",
 })
 OUTPUT_CENTER_THUMBNAIL_MAX_EDGE = 768
+BATCH_SOURCE_THUMBNAIL_MAX_EDGE = 160
 OUTPUT_CENTER_THUMBNAIL_CACHE_VERSION = "v2"
 OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS = 40_000_000
 OUTPUT_CENTER_THUMBNAIL_MAX_CONCURRENCY = 4
@@ -139,6 +141,7 @@ CONTINUE_PROCESSOR_SPECS = (
     {"key": "image_compression", "label": "图片压缩"},
     {"key": "local_retouch", "label": "瑕疵修复"},
     {"key": "batch_watermark", "label": "添加水印"},
+    {"key": "print_output", "label": "喷绘出图"},
 )
 CONTINUE_FEATURE_PROCESSORS = {
     "image_processing": "image_enhancement",
@@ -148,6 +151,7 @@ CONTINUE_FEATURE_PROCESSORS = {
     "image_compression": "image_compression",
     "local_retouch": "local_retouch",
     "batch_watermark": "batch_watermark",
+    "print_output": "print_output",
 }
 
 
@@ -492,6 +496,7 @@ def register_image_compression_routes(
 
     from fastapi import Body, File, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, Response
+    from backend.print_output_api import MAX_PIXELS as PRINT_OUTPUT_MAX_PIXELS
 
     from engine.image_compression.common import apply_delivery_gate, read_image_info
     from engine.image_compression.contracts import (
@@ -534,7 +539,7 @@ def register_image_compression_routes(
         plan_reference,
         render_reference_level,
     )
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     token_registry: dict[str, dict[str, Any]] = {}
     expired_feedback_tokens: set[str] = set()
@@ -590,6 +595,7 @@ def register_image_compression_routes(
             return False
         return False
     output_center_thumbnail_semaphore = asyncio.Semaphore(OUTPUT_CENTER_THUMBNAIL_MAX_CONCURRENCY)
+    large_thumbnail_semaphore = asyncio.Semaphore(1)
     output_center_thumbnail_locks: dict[str, threading.Lock] = {}
     output_center_thumbnail_locks_guard = threading.Lock()
     smart_delivery_plan_registry: dict[str, dict[str, Any]] = {}
@@ -600,6 +606,7 @@ def register_image_compression_routes(
     smart_delivery_eligibility_lock = threading.RLock()
     smart_delivery_hash_cache: dict[tuple[str, int, int, int], str] = {}
     smart_delivery_executing_plans: set[str] = set()
+    active_single_compressions: set[object] = set()
 
     def emit_runtime_event(event: str, **fields: Any) -> None:
         if runtime_event_logger is None:
@@ -788,6 +795,11 @@ def register_image_compression_routes(
                 "label": "批量水印",
                 "paths": [output_root / "批量水印"],
             },
+            {
+                "category": "print_output",
+                "label": "喷绘出图",
+                "paths": [output_root / "喷绘出图"],
+            },
         ]
 
     def output_center_active_records(
@@ -971,7 +983,12 @@ def register_image_compression_routes(
             smart_delivery_eligibility_registry[normalized_result_id] = record
         return dict(record)
 
-    def output_center_record_meta(record: Mapping[str, Any] | None, formal_root: Path) -> dict[str, Any]:
+    def output_center_record_meta(
+        record: Mapping[str, Any] | None,
+        formal_root: Path,
+        *,
+        result_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         if not record:
             return {}
         result = record.get("result")
@@ -999,6 +1016,8 @@ def register_image_compression_routes(
         )
         task_id = str(record.get("task_id") or result.get("task_id") or "")
         result_id = str(record.get("result_id") or result.get("result_id") or "")
+        if result_ids is not None and result_id not in result_ids:
+            return {}
         delivery_eligibility = load_delivery_eligibility(result_id)
         registered_output_sha256 = str(
             record.get("output_sha256")
@@ -1038,7 +1057,8 @@ def register_image_compression_routes(
             except (OSError, ValueError):
                 result_file = None
         compare_url = ""
-        if source and task_id and task_family == "color_correction":
+        # A retained Result can outlive its Task. Its comparison uses the indexed files.
+        if source and task_id and task_family == "color_correction" and record.get("record_kind") != "result":
             query = f"task_id={quote(task_id, safe='')}&from=outputs"
             if batch_id:
                 query += f"&batch={quote(batch_id, safe='')}"
@@ -1151,8 +1171,6 @@ def register_image_compression_routes(
             common_reason = result_reuse_denial(record_meta)
         elif not str(record_meta.get("registered_output_sha256") or ""):
             common_reason = "当前 Result 缺少完整性校验记录。"
-        elif int(size_bytes) > MAX_UPLOAD_BYTES:
-            common_reason = "当前成品超过处理器的 50MB 输入限制。"
 
         eligibility: list[dict[str, Any]] = []
         for spec in CONTINUE_PROCESSOR_SPECS:
@@ -1164,6 +1182,9 @@ def register_image_compression_routes(
             if common_reason:
                 status = "UNAVAILABLE"
                 reason = common_reason
+            elif key not in {"image_compression", "local_retouch"} and int(size_bytes) > MAX_UPLOAD_BYTES:
+                status = "UNAVAILABLE"
+                reason = "当前成品超过处理器的 50MB 输入限制。"
             elif image_format == "WEBP" and key in {"image_enhancement", "local_retouch", "batch_watermark"}:
                 status = "UNAVAILABLE"
                 reason = "该处理器当前仅支持 PNG / JPG；当前 WebP 可继续压缩。"
@@ -1173,6 +1194,9 @@ def register_image_compression_routes(
             elif key == "local_retouch" and int(width) * int(height) > LOCAL_RETOUCH_REUSE_MAX_PIXELS:
                 status = "UNAVAILABLE"
                 reason = "当前图片像素总量超过瑕疵修复输入限制。"
+            elif key == "print_output" and width * height > PRINT_OUTPUT_MAX_PIXELS:
+                status = "UNAVAILABLE"
+                reason = "当前成品超过喷绘出图的 8000 万像素输入限制。"
             elif key == "image_enhancement" and max(int(width), int(height)) >= 3840:
                 status = "UNAVAILABLE"
                 reason = "当前成品已达到 4K 长边规格，无需重复增强。"
@@ -1213,6 +1237,8 @@ def register_image_compression_routes(
         user_dirs: Mapping[str, Any] | None = None,
         *,
         cache_root: Path | None = None,
+        max_edge: int = OUTPUT_CENTER_THUMBNAIL_MAX_EDGE,
+        source_sha256: str = "",
     ) -> dict[str, Any]:
         if cache_root is None:
             if user_dirs is None:
@@ -1220,12 +1246,10 @@ def register_image_compression_routes(
             cache_root = output_center_thumbnail_cache_root(user_dirs)
         source = path.resolve()
         stat = source.stat()
-        signature = hashlib.sha256(
-            (
-                f"{OUTPUT_CENTER_THUMBNAIL_CACHE_VERSION}|{OUTPUT_CENTER_THUMBNAIL_MAX_EDGE}|"
-                f"{source}|{stat.st_size}|{stat.st_mtime_ns}"
-            ).encode("utf-8")
-        ).hexdigest()
+        identity = f"{OUTPUT_CENTER_THUMBNAIL_CACHE_VERSION}|{max_edge}|{source}|{stat.st_size}|{stat.st_mtime_ns}"
+        if source_sha256:
+            identity += f"|{source_sha256}"
+        signature = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         source_contract = IMAGE_FILE_CONTRACTS.get(source.suffix.lower())
         if source_contract is None:
             raise ValueError("unsupported output format")
@@ -1243,15 +1267,24 @@ def register_image_compression_routes(
             "thumbnail_format": str(thumbnail_contract["pil_format"]),
         }
 
-    def ensure_output_center_thumbnail(path: Path) -> tuple[Path, dict[str, Any], bool]:
-        entry = output_center_thumbnail_entry(path)
+    def ensure_output_center_thumbnail(
+        path: Path, *, max_edge: int = OUTPUT_CENTER_THUMBNAIL_MAX_EDGE,
+        max_pixels: int = OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS,
+        source_data: bytes | None = None, source_sha256: str = "",
+    ) -> tuple[Path, dict[str, Any], bool]:
+        if source_data is not None:
+            # Finish creating the shared cache directory before resolving the
+            # directory and its children on concurrent cold requests.
+            user_dirs = (output_center_user_dirs_provider or user_dirs_provider)()
+            output_center_thumbnail_cache_root(user_dirs).mkdir(parents=True, exist_ok=True)
+        entry = output_center_thumbnail_entry(path, max_edge=max_edge, source_sha256=source_sha256)
         cache_path = Path(entry["cache_path"])
         def valid_cache() -> bool:
             try:
                 if not cache_path.is_file() or not 0 < cache_path.stat().st_size <= 8 * 1024 * 1024:
                     return False
                 info = read_image_header(cache_path)
-                if max(int(info["width"]), int(info["height"])) > OUTPUT_CENTER_THUMBNAIL_MAX_EDGE:
+                if max(int(info["width"]), int(info["height"])) > max_edge:
                     return False
                 if info["format"] != entry["thumbnail_format"]:
                     return False
@@ -1267,21 +1300,23 @@ def register_image_compression_routes(
         with lock:
             if valid_cache():
                 return cache_path, entry, True
-            info = read_image_header(path)
-            pixel_limit = min(OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS, Image.MAX_IMAGE_PIXELS or OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS)
-            if int(info["width"]) * int(info["height"]) > pixel_limit:
-                raise ValueError("source exceeds the thumbnail pixel budget")
+            pixel_limit = min(max_pixels, Image.MAX_IMAGE_PIXELS or max_pixels)
+            if source_data is None:
+                info = read_image_header(path)
+                if int(info["width"]) * int(info["height"]) > pixel_limit:
+                    raise ValueError("source exceeds the thumbnail pixel budget")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = cache_path.with_name(f".{cache_path.stem}.{uuid.uuid4().hex}.tmp{cache_path.suffix}")
             try:
-                with Image.open(path) as opened:
+                with Image.open(path if source_data is None else io.BytesIO(source_data)) as opened:
                     image_format = "JPEG" if opened.format == "JPG" else str(opened.format or "").upper()
                     if image_format not in OUTPUT_CENTER_IMAGE_FORMATS:
                         raise ValueError("unsupported output format")
-                    opened.thumbnail(
-                        (OUTPUT_CENTER_THUMBNAIL_MAX_EDGE, OUTPUT_CENTER_THUMBNAIL_MAX_EDGE),
-                        Image.Resampling.LANCZOS,
-                    )
+                    if opened.width * opened.height > pixel_limit:
+                        raise ValueError("source exceeds the thumbnail pixel budget")
+                    opened.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+                    if source_data is not None:
+                        ImageOps.exif_transpose(opened, in_place=True)
                     thumbnail_format = str(entry["thumbnail_format"])
                     if thumbnail_format == "PNG":
                         opened.save(temporary, format="PNG")
@@ -1316,6 +1351,10 @@ def register_image_compression_routes(
         sort_order: str,
         category: str,
         scope: str = "all",
+        batch_id: str = "",
+        record_kind: str = "all",
+        list_revision: str = "",
+        selected_id: str = "",
     ) -> dict[str, Any]:
         light_items: list[dict[str, Any]] = []
         seen_paths: set[Path] = set()
@@ -1325,6 +1364,8 @@ def register_image_compression_routes(
         for source in sources:
             for raw_directory in source["paths"]:
                 directory = Path(raw_directory).resolve()
+                if source["category"] == "print_output" and directory != raw_directory:
+                    continue
                 if not directory.is_dir():
                     continue
                 try:
@@ -1341,6 +1382,8 @@ def register_image_compression_routes(
                         continue
                     try:
                         resolved = path.resolve()
+                        if source["category"] == "print_output" and resolved != path:
+                            continue
                         if resolved in seen_paths:
                             continue
                         stat = resolved.stat()
@@ -1360,6 +1403,7 @@ def register_image_compression_routes(
                         **output_center_index.get(item_id, {}),
                         "output_path": resolved,
                         "category": source["category"],
+                        "pixel_count": info["width"] * info["height"],
                     }
                     light_items.append({
                         "id": item_id,
@@ -1429,6 +1473,14 @@ def register_image_compression_routes(
                     "processing_type": source["category"], "processing_label": source["label"],
                     "created_at": str(fact.get("created_at") or ""), "_missing": fact,
                 })
+        # A print PNG becomes a product only after its task has committed.
+        unregistered_print_ids = {
+            item["id"] for item in light_items if item["processing_type"] == "print_output"
+            and os.path.normcase(str(item["path"])) not in active_result_paths
+        }
+        if unregistered_print_ids:
+            live_item_ids.difference_update(unregistered_print_ids)
+            light_items = [item for item in light_items if item["id"] not in unregistered_print_ids]
         for stale_item_id in set(output_center_index) - live_item_ids:
             output_center_index.pop(stale_item_id, None)
 
@@ -1439,6 +1491,11 @@ def register_image_compression_routes(
         hidden = {str(record.get("item_id") or "") for record in removal_facts
                   if str(record.get("item_id") or "").startswith("batch_item:") or not record.get("removed_result_id")
                   or os.path.normcase(str(record.get("output_path") or "")) not in active_result_paths}
+        # Honor removals made while saved retouch results were listed as singles.
+        hidden.update(output_child_record_id(child) for batch in batches if batch["feature_type"] == "local_retouch"
+                      for child in batch["items"] if child["result_id"] in removed_results)
+        # Retouch batches can receive more saved items after a list removal.
+        hidden.difference_update(batch["id"] for batch in batches if batch["feature_type"] == "local_retouch")
         suppressed_paths = set()
         claims: dict[str, list[dict[str, Any]]] = {}
         result_claims: dict[str, int] = {}
@@ -1485,7 +1542,7 @@ def register_image_compression_routes(
         scope_counts = {key: sum(i["list_scope"] == key for i in light_items) for key in ("current", "history")}
         if scope != "all":
             light_items = [item for item in light_items if item["list_scope"] == scope]
-        light_items.sort(key=lambda item: item["created_at"], reverse=sort_order != "oldest")
+        light_items.sort(key=lambda item: (item["created_at"], item["id"]), reverse=sort_order != "oldest")
         categories = [
             {
                 "key": source["category"],
@@ -1497,6 +1554,8 @@ def register_image_compression_routes(
         categories = [item for item in categories if item["count"] > 0]
         normalized_category = str(category or "all").strip()
         filtered_items = light_items
+        if batch_id:
+            filtered_items = [item for item in filtered_items if item.get("batch_id") == batch_id]
         if normalized_category and normalized_category != "all":
             filtered_items = [item for item in filtered_items if item["processing_type"] == normalized_category]
         normalized_query = str(query or "").strip().casefold()
@@ -1508,9 +1567,34 @@ def register_image_compression_routes(
                 or normalized_query in item["processing_label"].casefold()
                 or any(normalized_query in child["file_name"].casefold() for child in item.get("items", []))
             ]
+        if record_kind != "all":
+            filtered_items = [
+                item for item in filtered_items
+                if (item.get("card_type") == "batch") == (record_kind == "batch")
+            ]
         total_count = len(filtered_items)
         page_limit = None if limit is None else max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
+        revision = hashlib.sha256(json.dumps([
+            scope, normalized_category, normalized_query, sort_order, record_kind, batch_id,
+            [
+                [item["id"], item["created_at"], bool(item.get("_missing")), [
+                    [output_child_record_id(child), child["result_id"], child["status"]]
+                    for child in item.get("items", [])
+                ]]
+                for item in filtered_items
+            ],
+        ], separators=(",", ":")).encode("utf-8")).hexdigest()
+        if list_revision and list_revision != revision:
+            raise HTTPException(409, detail={
+                "code": "OUTPUT_CENTER_LIST_CHANGED",
+                "message": "成品列表已变化，请重新读取当前列表。",
+            })
+        selection_matches = bool(selected_id) and any(
+            item["id"] == selected_id
+            or any(output_child_record_id(child) == selected_id for child in item.get("items", []))
+            for item in filtered_items
+        )
         page_items = (
             filtered_items[page_offset:]
             if page_limit is None
@@ -1522,6 +1606,9 @@ def register_image_compression_routes(
             "selected_paths": selected_paths,
             "scope_counts": scope_counts,
             "scope": scope,
+            "list_revision": revision,
+            "selected_id": selected_id,
+            "selection_matches": selection_matches,
             "item_scopes": {item["id"]: item["list_scope"] for item in page_items},
             "selected_files": {
                 key: [item for item in candidates if item["path"] in selected_paths]
@@ -1551,6 +1638,12 @@ def register_image_compression_routes(
         sort_order: str = "newest",
         category: str = "all",
         scope: str = "all",
+        batch_id: str = "",
+        record_kind: str = "all",
+        list_revision: str = "",
+        selected_id: str = "",
+        item_ids: set[str] | None = None,
+        result_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         user_dirs = (output_center_user_dirs_provider or user_dirs_provider)()
         formal_root = Path(
@@ -1567,8 +1660,19 @@ def register_image_compression_routes(
             sort_order=sort_order,
             category=category,
             scope=scope,
+            batch_id=batch_id,
+            record_kind=record_kind,
+            list_revision=list_revision,
+            selected_id=selected_id,
         )
         selected_paths = page["selected_paths"]
+        # Keep the complete inventory for visibility and batch claim checks.
+        # Only the requested files need previews, metadata and batch SHA verification.
+        if item_ids is not None:
+            selected_paths = selected_paths.intersection(
+                output_center_index[item_id]["output_path"]
+                for item_id in item_ids if item_id in output_center_index
+            )
         try:
             thumbnail_cache_root = output_center_thumbnail_cache_root(user_dirs)
         except (OSError, ValueError, RuntimeError):
@@ -1618,6 +1722,9 @@ def register_image_compression_routes(
                         skipped_unavailable += 1
                         continue
                     seen_paths.add(resolved)
+                    record_meta = output_center_record_meta(active_records.get(resolved), formal_root, result_ids=result_ids)
+                    if result_ids is not None and not record_meta:
+                        continue
                     try:
                         if thumbnail_cache_root is None:
                             raise RuntimeError("output center thumbnail cache is unavailable")
@@ -1626,7 +1733,6 @@ def register_image_compression_routes(
                     except (OSError, ValueError, RuntimeError):
                         thumbnail = None
                         thumbnail_status = "unavailable"
-                    record_meta = output_center_record_meta(active_records.get(resolved), formal_root)
                     source_path = record_meta.get("source_path")
                     compare_url = str(record_meta.get("compare_url") or "")
                     mapping_source = "task_registry" if source_path else ""
@@ -1640,6 +1746,9 @@ def register_image_compression_routes(
                         and record_meta.get("feature_key")
                         and record_meta.get("result_file") == resolved
                     )
+                    if source["category"] == "print_output" and not unified_result:
+                        output_center_index.pop(item_id, None)
+                        continue
                     continue_eligibility = build_continue_eligibility(
                         record_meta=record_meta,
                         result_records=result_records,
@@ -1664,6 +1773,7 @@ def register_image_compression_routes(
                         "output_path": resolved,
                         "source_path": source_path,
                         "category": source["category"],
+                        "pixel_count": info["width"] * info["height"],
                         "result_id": record_meta.get("result_id") or "",
                         "task_id": record_meta.get("task_id") or "",
                         "feature_key": record_meta.get("feature_key") or "",
@@ -1770,6 +1880,8 @@ def register_image_compression_routes(
                         ),
                     })
         for missing in page["missing_items"]:
+            if result_ids is not None or (item_ids is not None and missing["id"] not in item_ids):
+                continue
             fact = missing["_missing"]
             items.append({
                 **{key: missing[key] for key in ("id", "file_name", "processing_type", "processing_label", "created_at")},
@@ -1785,10 +1897,13 @@ def register_image_compression_routes(
             })
         hydrated = {str(output_center_index[item["id"]]["output_path"]): item for item in items}
         items = [item for item in items if item["id"] in page["single_ids"]]
+        scoped = item_ids is not None or result_ids is not None
         for batch in page["selected_batches"]:
             children = []
             for child in batch["items"]:
                 bound = hydrated.get(str(Path(child["output_path"]).resolve())) if child["output_path"] else None
+                if scoped and bound is None:
+                    continue
                 valid = (bound is not None and not child.get("binding_error")
                          and child["status"] == "COMPLETED" and bool(child["output_sha256"])
                          and bound["result_id"] == child["result_id"] and bound["task_id"] == child["task_id"])
@@ -1804,21 +1919,40 @@ def register_image_compression_routes(
                              "file_name": bound["file_name"], "output_file_name": bound["file_name"], "available": True}
                 elif child["status"] == "COMPLETED":
                     child = {**child, "availability_reason": child.get("binding_error") or "正式文件缺失或与登记的 Result / SHA 不一致。"}
+                elif (child["status"] == "KEEP_ORIGINAL" and child["feature_type"] == "image_compression"
+                      and child["source_path"] and user_dirs.get("tmp_dir")):
+                    source = Path(child["source_path"])
+                    cache = Path(user_dirs["tmp_dir"]).resolve() / "compression-batches"
+                    try:
+                        if source.resolve().parent == cache / child["batch_id"] / child["batch_item_id"]:
+                            preview = batch_source_preview_url(
+                                {"path": source, "sha256": child["source_sha256"]}, child["file_name"], False,
+                            )
+                            if preview:
+                                child["source_thumbnail_url"] = f"{preview}/thumbnail"
+                    except (OSError, RuntimeError, ValueError):
+                        pass  # The Source can be unavailable without hiding the batch record.
                 child["record_id"] = output_child_record_id(child)
                 child.setdefault("id", child["record_id"])
                 child["file_status"] = "MISSING" if child["status"] == "COMPLETED" and not child["available"] and output_file_missing(child["output_path"]) else "PRESENT" if child["available"] else "UNAVAILABLE"
                 child["list_scope"] = batch["list_scope"]
                 children.append(child)
+            if scoped and not children:
+                continue
             batch = {key: val for key, val in batch.items() if key != "_paths"}
             batch["items"] = children
             batch["summary"]["unavailable"] = sum(i["status"] == "COMPLETED" and not i["available"] for i in children)
             items.append(batch)
-        items.sort(key=lambda item: item["created_at"], reverse=sort_order != "oldest")
+        page_order = {item_id: index for index, item_id in enumerate(page["item_scopes"])}
+        items.sort(key=lambda item: page_order[item["id"]])
         for item in items:
             item["list_scope"] = page["item_scopes"][item["id"]]
         return {
             "items": items,
             "scope": page["scope"],
+            "list_revision": page["list_revision"],
+            "selected_id": page["selected_id"],
+            "selection_matches": page["selection_matches"],
             "scope_counts": page["scope_counts"],
             "categories": page["categories"],
             "count": page["total_count"],
@@ -1902,14 +2036,34 @@ def register_image_compression_routes(
     def windows_filename_key(value: str) -> str:
         return unicodedata.normalize("NFC", str(value or "")).casefold()
 
-    def result_id_is_registered(result_id: str) -> bool:
-        if load_delivery_eligibility(result_id) is not None:
-            return True
+    def unavailable_delivery_reason(result_id: str) -> str | None:
         records = shared_task_registry if shared_task_registry is not None else task_registry
-        return any(
-            isinstance(record, Mapping) and str(record.get("result_id") or "") == result_id
+        matches = [
+            record
             for record in list(records.values())
-        )
+            if isinstance(record, Mapping) and record.get("result_id") == result_id
+        ]
+        if not matches and load_delivery_eligibility(result_id) is None:
+            return None
+        # Explain a registered single-image result without admitting it to the plan.
+        paths = set()
+        for record in matches:
+            if record.get("feature_key") != "image_compression" or not record.get("task_id") or record.get("batch_id"):
+                continue
+            registered_path = record.get("result_file") or record.get("output_path")
+            if isinstance(registered_path, (str, Path)) and registered_path:
+                paths.add(Path(registered_path))
+        if len(paths) == 1:
+            path = paths.pop()
+            compression_dirs = next(
+                source["paths"] for source in output_center_sources() if source["category"] == "compression"
+            )
+            if path.is_absolute() and ".." not in path.parts:
+                if path.parent not in compression_dirs:
+                    return f"「{path.name}」的输出位置不在当前正式压缩目录。请将图片交付的输出位置设为当前正式目录下的「输出/图片压缩」，再用原图重新处理。"
+                if output_file_missing(path):
+                    return f"「{path.name}」的成品文件缺失。请将同一份成品放回原位置后重新安全检查，或用原图重新处理。"
+        return "正式结果不存在或不满足统一结果合同。"
 
     def cached_output_sha256(path: Path) -> str:
         """Reuse a plan hash while the file's stat identity is unchanged.
@@ -2009,7 +2163,10 @@ def register_image_compression_routes(
             )
 
         rules = normalize_smart_delivery_rules(raw_rules)
-        snapshot = build_output_center_snapshot()
+        snapshot = build_output_center_snapshot(
+            item_ids=set(selection_ids) if item_mode else None,
+            result_ids=set(selection_ids) if result_mode else None,
+        )
         snapshot_items = [
             *snapshot["items"],
             # Batch Results are nested under their batch card. Only a child whose file
@@ -2032,18 +2189,19 @@ def register_image_compression_routes(
             for result_id in selection_ids:
                 public_item = snapshot_by_result_id.get(result_id)
                 if public_item is None:
-                    if result_id_is_registered(result_id):
+                    reason = unavailable_delivery_reason(result_id)
+                    if reason is not None:
                         # Only a real Result loses eligibility; arbitrary request ids
                         # must not create persistent facts from a read-only check.
                         persist_delivery_eligibility(
                             result_id,
                             eligible=False,
                             code="UNIFIED_RESULT_NOT_FOUND",
-                            reason="正式结果不存在或不满足统一结果合同。",
+                            reason=reason,
                         )
                     raise HTTPException(
                         status_code=404,
-                        detail={"code": "UNIFIED_RESULT_NOT_FOUND", "message": "正式结果不存在或不满足统一结果合同。"},
+                        detail={"code": "UNIFIED_RESULT_NOT_FOUND", "message": reason or "正式结果不存在或不满足统一结果合同。"},
                     )
                 selected_items.append(public_item)
             item_ids = [item["id"] for item in selected_items]
@@ -2465,7 +2623,7 @@ def register_image_compression_routes(
                 return {"built_in_default_root": built_in, "saved_default_root": saved}
         return output_settings()
 
-    def validate_output_root(value: str, *, source: str) -> dict[str, Any]:
+    def validate_output_root(value: str, *, source: str, batch_write_failure: bool = False) -> dict[str, Any]:
         raw = str(value or "").strip().strip('"').strip()
         if not raw or "\x00" in raw:
             raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "输出目录为空或包含非法字符。"})
@@ -2478,7 +2636,10 @@ def register_image_compression_routes(
         checked = dict(output_dir_validator(raw) or {}) if output_dir_validator else {}
         if output_dir_validator:
             if not checked.get("valid"):
-                raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": str(checked.get("message") or "输出目录不可用。")})
+                detail = {"code": "OUTPUT_DIRECTORY_INVALID", "message": str(checked.get("message") or "输出目录不可用。")}
+                if batch_write_failure and checked.get("failed_stage") == "output_directory_writable_check":
+                    detail["failed_stage"] = "output_directory_writable_check"
+                raise HTTPException(status_code=400, detail=detail)
             target = Path(str(checked.get("normalized_path") or raw)).resolve()
         else:
             try:
@@ -2529,11 +2690,12 @@ def register_image_compression_routes(
             raise HTTPException(status_code=400, detail={"code": "OUTPUT_DIRECTORY_INVALID", "message": "颜色校正输出路径不是可用目录。"})
         return {**checked, "valid": True, "writable": True, "normalized_path": str(target), "source": source}
 
-    def effective_output_root(payload: Mapping[str, Any]) -> dict[str, Any]:
+    def effective_output_root(payload: Mapping[str, Any], *, batch_write_failure: bool = False) -> dict[str, Any]:
         current = str(payload.get("current_task_output_root") or "").strip()
         settings = output_settings()
         selected = current or settings["saved_default_root"]
-        return validate_output_root(selected, source="current_task" if current else "saved_default")
+        return validate_output_root(selected, source="current_task" if current else "saved_default",
+                                    batch_write_failure=batch_write_failure)
 
     def effective_color_output_root(payload: Mapping[str, Any]) -> dict[str, Any]:
         current = str(payload.get("current_task_output_root") or "").strip()
@@ -4588,7 +4750,7 @@ def register_image_compression_routes(
                         "visual_review": "REQUIRED_FOR_CHANGED_OUTPUT",
                     },
                 ],
-                "limits": {"max_upload_bytes": MAX_UPLOAD_BYTES, "max_upload_label": _format_bytes(MAX_UPLOAD_BYTES)},
+                "limits": {"max_upload_bytes": None, "max_upload_label": "不限制文件体积"},
                 "defaults": {
                     "resize_strategy": "SHORT_SIDE",
                     "resize_target_short_side": 1080,
@@ -4665,19 +4827,42 @@ def register_image_compression_routes(
         suffix = Path(filename).suffix.lower()
         if suffix not in COMPRESSION_INTAKE_EXTENSIONS:
             raise HTTPException(status_code=415, detail="仅支持 PNG、JPG、JPEG、WebP 文件。")
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="文件超过本地安全接收上限 50 MB。")
         intake_root = Path(user_dirs["tmp_dir"]).resolve() / "image-compression-intake"
         task_dir = intake_root / f"intake_{uuid.uuid4().hex}"
         task_dir.mkdir(parents=True, exist_ok=True)
         stored = task_dir / filename
         try:
             stored.write_bytes(content)
+        except OSError as exc:
+            logger.exception(
+                "Compression intake failed: stage=intake_write filename=%s bytes=%s stored_path=%s",
+                filename, len(content), stored,
+            )
+            shutil.rmtree(task_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=error_result(
+                "系统未能保存导入副本，尚未进行图片校验，请查看诊断日志。",
+                code="SOURCE_INTAKE_WRITE_FAILED",
+            )) from exc
+        try:
             info = read_image_info(stored, allow_webp=True)
         except Exception as exc:
+            code = getattr(exc, "failure_code", None) or "SOURCE_VALIDATION_INTERNAL_FAILED"
+            cause = exc.__cause__ or exc
+            if isinstance(cause, (PermissionError, FileNotFoundError, MemoryError)):
+                code = "SOURCE_INTAKE_READ_FAILED"
+            logger.exception(
+                "Compression intake failed: stage=source_validation code=%s filename=%s bytes=%s stored_path=%s",
+                code, filename, len(content), stored,
+            )
             shutil.rmtree(task_dir, ignore_errors=True)
-            code = getattr(exc, "failure_code", None) or "SOURCE_DECODE_FAILED"
-            raise HTTPException(status_code=400, detail=error_result("图片无法通过完整解码校验。", code=code)) from exc
+            message = {
+                "MULTI_FRAME_SOURCE_UNSUPPORTED": "这张图片包含多个独立画面或动画，当前不能安全压缩。",
+                "SOURCE_FORMAT_UNSUPPORTED": "文件内容不是受支持的 PNG、JPG 或 WebP 图片，请检查原文件。",
+                "SOURCE_INTAKE_READ_FAILED": "系统未能读取或解码导入副本，请查看诊断日志；原始文件未修改。",
+                "SOURCE_VALIDATION_INTERNAL_FAILED": "系统未能完成导入校验，请查看诊断日志；原始文件未修改。",
+            }.get(code, "原图或其内嵌图像无法完整解码，请检查文件是否完整；原始文件未修改。")
+            status = 500 if code in {"SOURCE_INTAKE_READ_FAILED", "SOURCE_VALIDATION_INTERNAL_FAILED"} else 400
+            raise HTTPException(status_code=status, detail=error_result(message, code=code)) from exc
         expected_format = {".png": "PNG", ".webp": "WEBP"}.get(suffix, "JPEG")
         if info["format"] != expected_format:
             shutil.rmtree(task_dir, ignore_errors=True)
@@ -4721,19 +4906,19 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/intake")
     async def image_compression_intake(file: UploadFile = File(...)):
-        content = await file.read(MAX_UPLOAD_BYTES + 1)
-        # Full decode + hashing of up to 50 MB must not stall other requests.
+        content = await file.read()
+        # Full decode and hashing must not stall other requests.
         data = await asyncio.to_thread(create_compression_intake, content, str(file.filename or ""))
         return {"code": 200, "status": "success", "success": True, "data": data}
 
-    def create_reusable_result_intake(result_id: str) -> dict[str, Any]:
+    def create_reusable_result_intake(result_id: str, *, max_bytes: int | None = MAX_UPLOAD_BYTES) -> dict[str, Any]:
         user_dirs = require_compression_directory()
         try:
             reusable = resolve_reusable_result_source(
                 shared_task_registry,
                 str(result_id or ""),
                 Path(user_dirs["app_data_root"]),
-                max_bytes=MAX_UPLOAD_BYTES,
+                max_bytes=max_bytes,
                 allowed_suffixes=COMPRESSION_INTAKE_EXTENSIONS,
             )
             content = Path(reusable["source_result_path"]).read_bytes()
@@ -4761,7 +4946,7 @@ def register_image_compression_routes(
                 status_code=400,
                 detail={"code": "RESULT_REUSE_REQUEST_INVALID", "message": "继续处理请求字段不正确。"},
             )
-        data = await asyncio.to_thread(create_reusable_result_intake, str(payload.get("result_id") or ""))
+        data = await asyncio.to_thread(create_reusable_result_intake, str(payload.get("result_id") or ""), max_bytes=None)
         return {"code": 200, "status": "success", "success": True, "data": data}
 
     @app.post("/api/image-processing/preflight")
@@ -4816,7 +5001,7 @@ def register_image_compression_routes(
             raise HTTPException(status_code=400, detail="不支持的压缩能力模式。")
 
         allowed_params = {
-            DELIVERY_OPTIMIZATION_MODE: {"target_format"},
+            DELIVERY_OPTIMIZATION_MODE: {"target_format", "allow_opaque_png_to_jpeg"},
             OperationMode.LOSSLESS_COMPRESSION.value: set(),
             OperationMode.RESIZE_REDUCTION.value: {"target_short_side", "scale_ratio", "target_width", "target_height"},
             OperationMode.UPLOAD_ADAPTATION.value: {"max_width", "max_height", "max_file_size_bytes"},
@@ -4831,6 +5016,10 @@ def register_image_compression_routes(
                 status_code=400,
                 detail="目标格式仅支持 SMART_COMPRESSION、PRESERVE_FORMAT、JPEG、PNG 或 WEBP。",
             )
+        allow_opaque_png_to_jpeg = params.get("allow_opaque_png_to_jpeg", False)
+        if not isinstance(allow_opaque_png_to_jpeg, bool):
+            raise HTTPException(status_code=400, detail="allow_opaque_png_to_jpeg 必须为布尔值。")
+        allow_opaque_png_to_jpeg = allow_opaque_png_to_jpeg and target_format == SMART_COMPRESSION_TARGET_FORMAT
 
         def positive_int(name: str) -> int | None:
             value = params.get(name)
@@ -4849,7 +5038,8 @@ def register_image_compression_routes(
             "output_directory": str(output_dir),
             "preserve_format": bool(
                 mode != DELIVERY_OPTIMIZATION_MODE
-                or target_format == PRESERVE_FORMAT_TARGET_FORMAT
+                or (target_format in {SMART_COMPRESSION_TARGET_FORMAT, PRESERVE_FORMAT_TARGET_FORMAT}
+                    and not (allow_opaque_png_to_jpeg and source.get("format") == "PNG"))
                 or target_format == source.get("format")
             ),
             "quality_policy": (
@@ -4881,14 +5071,14 @@ def register_image_compression_routes(
         }
         if mode == DELIVERY_OPTIMIZATION_MODE:
             request["target_format"] = target_format
+            request["allow_opaque_png_to_jpeg"] = allow_opaque_png_to_jpeg
             request["request_context"] = {
                 **dict(request.get("request_context") or {}),
                 "target_format_policy": (
-                    "SMART_SAFE_FORMAT_SELECTION"
-                    if target_format == SMART_COMPRESSION_TARGET_FORMAT
-                    else
-                    "PRESERVE_SOURCE_FORMAT"
-                    if target_format == PRESERVE_FORMAT_TARGET_FORMAT
+                    "SMART_OPAQUE_PNG_JPEG"
+                    if allow_opaque_png_to_jpeg and source.get("format") == "PNG"
+                    else "PRESERVE_SOURCE_FORMAT"
+                    if target_format in {SMART_COMPRESSION_TARGET_FORMAT, PRESERVE_FORMAT_TARGET_FORMAT}
                     else "USER_SELECTED_TARGET_FORMAT"
                 ),
             }
@@ -5044,7 +5234,12 @@ def register_image_compression_routes(
 
     @app.post("/api/image-compression/run")
     async def image_compression_run(payload: dict = Body(default_factory=dict)):
-        return await execute_compression(payload)
+        operation = object()
+        active_single_compressions.add(operation)
+        try:
+            return await execute_compression(payload)
+        finally:
+            active_single_compressions.discard(operation)
 
     async def execute_compression(payload: dict, *, batch_job=None):
         user_dirs = require_compression_directory()
@@ -5059,7 +5254,7 @@ def register_image_compression_routes(
         task_created_at = batch_job.batch["created_at"] if batch_job is not None else now_provider()
         preflight_output = Path(user_dirs["tmp_dir"]).resolve() / "image-compression-preflight"
         request = build_task_request(payload, source, task_id, preflight_output)
-        output_root = effective_output_root(payload)
+        output_root = effective_output_root(payload, batch_write_failure=batch_job is not None)
         effective_root = Path(output_root["normalized_path"])
         output_dir = function_output_dir(str(request["operation_mode"]), effective_root)
         request["output_directory"] = str(output_dir)
@@ -5150,6 +5345,7 @@ def register_image_compression_routes(
                         source_filename=str(source.get("filename") or Path(source["path"]).name),
                         moment=datetime.fromtimestamp(task_created_at),
                         target_format=str(request["target_format"]),
+                        allow_opaque_png_to_jpeg=request["allow_opaque_png_to_jpeg"],
                     )
 
                 generated = (await batch_job.generate(generate_into, output_dir)
@@ -6615,6 +6811,9 @@ def register_image_compression_routes(
         return {"scope_counts": counts, "removed_cards": cards, "updated_batches": batches}
 
     def persist_output_record_removals(records):
+        records = list(records)
+        records.extend(child for batch in tuple(records) if batch.get("feature_type") == "local_retouch"
+                       for child in batch.get("items", []))
         removed = set()
         by_id = {}
         for record in records:
@@ -6667,9 +6866,15 @@ def register_image_compression_routes(
         sort: str = "newest",
         category: str = "all",
         scope: str = "all",
+        record_kind: str = "all",
+        batch_id: str = "",
+        list_revision: str = "",
+        selected_id: str = "",
     ):
         if scope not in {"all", "current", "history"}:
             raise HTTPException(422, detail="列表范围无效。")
+        if record_kind not in {"all", "single", "batch"}:
+            raise HTTPException(422, detail="输出记录类型无效。")
         sort_order = "oldest" if sort == "oldest" else "newest"
         data = build_output_center_snapshot(
             limit=limit,
@@ -6678,6 +6883,10 @@ def register_image_compression_routes(
             sort_order=sort_order,
             category=category,
             scope=scope,
+            record_kind=record_kind,
+            batch_id=batch_id,
+            list_revision=list_revision,
+            selected_id=selected_id,
         )
         return {"code": 200, "status": "success", "success": True, "data": data}
 
@@ -6705,6 +6914,22 @@ def register_image_compression_routes(
             },
         }
 
+    @app.get("/api/output-center/items/{item_id}/comparison")
+    async def output_center_comparison(item_id: str):
+        snapshot = build_output_center_snapshot(item_ids={item_id})
+        for card in snapshot["items"]:
+            for item in card.get("items", [card]):
+                if item["id"] == item_id and item.get("compare_available"):
+                    fields = (
+                        "file_name", "processing_type", "processing_label", "width", "height",
+                        "format", "size_bytes", "source_preview_url", "preview_url",
+                    )
+                    return {"success": True, "data": {key: item[key] for key in fields}}
+        raise HTTPException(404, detail={
+            "code": "OUTPUT_SOURCE_MAPPING_UNAVAILABLE",
+            "message": "当前成品没有可靠的原图映射，无法进入前后对比。",
+        })
+
     @app.get("/api/output-center/results/{result_id}/lineage")
     async def output_center_result_lineage(result_id: str):
         try:
@@ -6723,11 +6948,20 @@ def register_image_compression_routes(
     async def output_center_thumbnail(item_id: str):
         item = require_output_center_item(item_id)
         source_path = Path(item["output_path"]).resolve()
+        max_pixels = OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS
+        large_slot = nullcontext()
+        if item["category"] == "print_output" or (
+            item["category"] == "compression" and item.get("pixel_count", 0) > OUTPUT_CENTER_THUMBNAIL_MAX_PIXELS
+        ):
+            max_pixels = PRINT_OUTPUT_MAX_PIXELS
+            # Compression can preserve the full print dimensions. Share one large decode slot.
+            large_slot = large_thumbnail_semaphore
         try:
-            async with output_center_thumbnail_semaphore:
+            async with large_slot, output_center_thumbnail_semaphore:
                 cache_path, entry, cache_hit = await asyncio.to_thread(
                     ensure_output_center_thumbnail,
                     source_path,
+                    max_pixels=max_pixels,
                 )
         except (OSError, ValueError, RuntimeError, Image.DecompressionBombError) as exc:
             raise HTTPException(
@@ -6818,6 +7052,30 @@ def register_image_compression_routes(
     def delivery_request_fact_key(idempotency_key: str) -> str:
         return f"{SMART_DELIVERY_REQUEST_FACT_PREFIX}{idempotency_key}"
 
+    def delivery_selection_identity(mode: str, ids: Any) -> tuple[str, tuple[str, ...]]:
+        values = tuple(str(value or "").strip() for value in ids) if isinstance(ids, (list, tuple)) else ()
+        if (
+            mode not in {"item_ids", "result_ids"} or not values or len(values) > SMART_DELIVERY_MAX_ITEMS
+            or not all(values) or len(set(values)) != len(values)
+        ):
+            raise HTTPException(status_code=400, detail={
+                "code": "SMART_DELIVERY_IDEMPOTENCY_SCOPE_INVALID",
+                "message": "查询或提交交付时必须提供完整且唯一的成品清单。",
+            })
+        return mode, tuple(sorted(values))
+
+    def check_delivery_request_selection(record: Mapping[str, Any], selection: tuple[str, tuple[str, ...]]) -> None:
+        if "selection_mode" in record:
+            bound = (record["selection_mode"], tuple(record.get("selection_ids") or ()))
+        else:
+            # Request facts written by older builds identify one formal Result.
+            bound = ("result_ids", (str(record.get("result_id") or ""),))
+        if bound != selection:
+            raise HTTPException(status_code=409, detail={
+                "code": "SMART_DELIVERY_IDEMPOTENCY_CONFLICT",
+                "message": "原交付请求绑定的成品清单不同，未创建新的交付副本。",
+            })
+
     def load_delivery_request(idempotency_key: str) -> dict[str, Any] | None:
         if not idempotency_key:
             return None
@@ -6904,10 +7162,16 @@ def register_image_compression_routes(
         )
 
     @app.get("/api/smart-delivery/requests/{idempotency_key}")
-    async def smart_delivery_request_status(idempotency_key: str, result_id: str = ""):
+    async def smart_delivery_request_status(
+        idempotency_key: str, result_id: str = "", selection_mode: str = "", selection_ids: str = "",
+    ):
         normalized_key = normalize_delivery_idempotency_key(idempotency_key)
         normalized_result_id = str(result_id or "").strip()
-        if not normalized_result_id:
+        if selection_mode or selection_ids:
+            selection = delivery_selection_identity(selection_mode, selection_ids.split(","))
+        elif normalized_result_id:
+            selection = delivery_selection_identity("result_ids", [normalized_result_id])
+        else:
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -6925,14 +7189,7 @@ def register_image_compression_routes(
                         "message": "服务端尚未登记该交付请求。",
                     },
                 )
-            if str(record.get("result_id") or "") != normalized_result_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "code": "SMART_DELIVERY_IDEMPOTENCY_CONFLICT",
-                        "message": "交付请求身份与 Result 不匹配。",
-                    },
-                )
+            check_delivery_request_selection(record, selection)
             return replay_delivery_request(record)
 
     def delivery_task_record(source_task_id: str) -> tuple[Mapping[str, Any] | None, str]:
@@ -7061,36 +7318,13 @@ def register_image_compression_routes(
         idempotency_key = normalize_delivery_idempotency_key(
             payload.get("idempotency_key") or payload.get("delivery_request_id")
         )
-        idempotency_result_id = ""
         if idempotency_key:
-            planned_result_ids = [
-                str(entry.get("source_result_id") or "").strip()
-                for entry in list(plan.get("entries") or [])
-            ]
-            if (
-                str(plan.get("selection_mode") or "") != "result_ids"
-                or len(planned_result_ids) != 1
-                or not planned_result_ids[0]
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "code": "SMART_DELIVERY_IDEMPOTENCY_SCOPE_INVALID",
-                        "message": "批量交付请求身份必须绑定且只绑定一个正式 Result。",
-                    },
-                )
-            idempotency_result_id = planned_result_ids[0]
+            selection_mode = str(plan.get("selection_mode") or "")
+            selection = delivery_selection_identity(selection_mode, plan.get(selection_mode))
             with smart_delivery_request_lock:
                 existing_request = load_delivery_request(idempotency_key)
                 if existing_request is not None:
-                    if str(existing_request.get("result_id") or "") != idempotency_result_id:
-                        raise HTTPException(
-                            status_code=409,
-                            detail={
-                                "code": "SMART_DELIVERY_IDEMPOTENCY_CONFLICT",
-                                "message": "交付请求身份已经绑定到另一个 Result，未创建新的 Delivery。",
-                            },
-                        )
+                    check_delivery_request_selection(existing_request, selection)
                     return replay_delivery_request(existing_request)
         refreshed = build_smart_delivery_plan(
             plan["item_ids"] if plan["selection_mode"] == "item_ids" else None,
@@ -7131,7 +7365,9 @@ def register_image_compression_routes(
             delivery_request_record = {
                 "record_kind": "delivery_request",
                 "idempotency_key": idempotency_key,
-                "result_id": idempotency_result_id,
+                "result_id": selection[1][0] if selection_mode == "result_ids" and len(selection[1]) == 1 else "",
+                "selection_mode": selection_mode,
+                "selection_ids": list(selection[1]),
                 "delivery_id": delivery_id,
                 "status": "PROCESSING",
                 "delivery_sha256": "",
@@ -7143,14 +7379,7 @@ def register_image_compression_routes(
             with smart_delivery_request_lock:
                 concurrent_request = load_delivery_request(idempotency_key)
                 if concurrent_request is not None:
-                    if str(concurrent_request.get("result_id") or "") != idempotency_result_id:
-                        raise HTTPException(
-                            status_code=409,
-                            detail={
-                                "code": "SMART_DELIVERY_IDEMPOTENCY_CONFLICT",
-                                "message": "交付请求身份已经绑定到另一个 Result，未创建新的 Delivery。",
-                            },
-                        )
+                    check_delivery_request_selection(concurrent_request, selection)
                     return replay_delivery_request(concurrent_request)
                 persist_delivery_request(delivery_request_record)
         results: list[dict[str, Any]] = []
@@ -7379,6 +7608,8 @@ def register_image_compression_routes(
             # Recent runs only: older ones are rebuilt from their persisted delivery fact.
             while len(smart_delivery_run_registry) > SMART_DELIVERY_RUN_CACHE_SIZE:
                 smart_delivery_run_registry.pop(next(iter(smart_delivery_run_registry)))
+            delivery_facts = {}
+            delivery_task_updates = {}
             if shared_task_registry is not None:
                 first_error = next(
                     (dict(item.get("_error_context") or {}) for item in results if item.get("_error_context")),
@@ -7433,12 +7664,13 @@ def register_image_compression_routes(
                         for item in results
                     ],
                 }
-                shared_task_registry[batch_naming_delivery_fact_key(delivery_id)] = delivery_fact
+                delivery_facts[batch_naming_delivery_fact_key(delivery_id)] = delivery_fact
             for result in results:
                 source_task_id = str(result.get("task_id") or "")
                 task_record, task_record_key = delivery_task_record(source_task_id)
                 if not isinstance(task_record, dict):
                     continue
+                task_record = delivery_task_updates.get(source_task_id) or delivery_facts.get(task_record_key) or task_record
                 delivery_trace = {
                     **delivery_operation,
                     "delivery_id": delivery_id,
@@ -7464,16 +7696,29 @@ def register_image_compression_routes(
                         "error_id": str((result.get("_error_context") or {}).get("error_id") or ""),
                     },
                 }
-                task_record["delivery_id"] = delivery_id
-                task_record.setdefault("deliveries", []).append(delivery_trace)
+                task_record = {
+                    **task_record, "delivery_id": delivery_id,
+                    "deliveries": [*task_record.get("deliveries", []), delivery_trace],
+                }
                 task_result = task_record.get("task_result")
                 if isinstance(task_result, dict):
-                    task_result["delivery_id"] = delivery_id
+                    task_record["task_result"] = {**task_result, "delivery_id": delivery_id}
                 if source_task_id in task_registry:
-                    task_registry[source_task_id] = task_record
+                    delivery_task_updates[source_task_id] = task_record
                 if shared_task_registry is not None and task_record_key:
-                    shared_task_registry[task_record_key] = task_record
-            if any(result.get("failure_code") == RESULT_IDENTITY_MISMATCH for result in results):
+                    delivery_facts[task_record_key] = task_record
+            if delivery_facts:
+                persist_facts = getattr(shared_task_registry, "persist_facts", None)
+                if callable(persist_facts):
+                    persist_facts(delivery_facts)
+                else:
+                    shared_task_registry.update(delivery_facts)
+            task_registry.update(delivery_task_updates)
+            # A keyed multi-file request must keep the per-file receipt even if one
+            # source failed identity validation after other copies were published.
+            if (len(results) == 1 or not idempotency_key) and any(
+                result.get("failure_code") == RESULT_IDENTITY_MISMATCH for result in results
+            ):
                 failure_detail = {
                     "code": RESULT_IDENTITY_MISMATCH,
                     "message": "实际复制字节与 Result 登记身份不一致，交付文件未发布。",
@@ -7613,6 +7858,35 @@ def register_image_compression_routes(
     async def smart_delivery_open_file(delivery_id: str, result_id: str):
         return open_smart_delivery_target(delivery_id, result_id)
 
+    def read_batch_preview_source(item):
+        path = Path(item["path"]).resolve()
+        cache_root = Path(require_compression_directory()["tmp_dir"]).resolve() / "compression-batches"
+        expected = item.get("batch_source_sha256")
+        try:
+            if expected and cache_root in path.parents:
+                data = path.read_bytes()
+                if hashlib.sha256(data).hexdigest() == expected:
+                    return path, data
+        except OSError:
+            pass
+        raise HTTPException(status_code=404, detail="原图预览不可用。")
+
+    @app.get("/api/image-compression/preview/{token}/thumbnail")
+    async def batch_source_thumbnail(token: str):
+        require_compression_directory()
+        item = require_token(token, role="source_preview")
+        try:
+            async with output_center_thumbnail_semaphore:
+                path, data = await asyncio.to_thread(read_batch_preview_source, item)
+                cache_path, entry, _ = await asyncio.to_thread(
+                    ensure_output_center_thumbnail, path, max_edge=BATCH_SOURCE_THUMBNAIL_MAX_EDGE,
+                    source_data=data, source_sha256=item["batch_source_sha256"],
+                )
+        except (OSError, ValueError, RuntimeError, Image.DecompressionBombError) as exc:
+            logger.warning("Batch source thumbnail generation failed: %s", exc)
+            raise HTTPException(status_code=422, detail="缩略图暂时不可用。") from exc
+        return FileResponse(cache_path, media_type=entry["media_type"], headers={"Cache-Control": "private, no-store"})
+
     @app.get("/api/image-compression/preview/{token}")
     async def image_compression_preview(token: str):
         require_compression_directory()
@@ -7620,6 +7894,9 @@ def register_image_compression_routes(
         path = Path(item["path"]).resolve()
         if item.get("role") not in {"source_preview", "output_preview"}:
             raise HTTPException(status_code=403, detail="预览令牌用途不正确。")
+        if item.get("batch_source_sha256"):
+            path, data = await asyncio.to_thread(read_batch_preview_source, item)
+            return Response(data, media_type=image_media_type(path), headers={"Cache-Control": "private, no-store"})
         return FileResponse(
             path,
             media_type=image_media_type(path),
@@ -7689,7 +7966,7 @@ def register_image_compression_routes(
 
     batch_preview_tokens: dict[tuple[str, str], str] = {}
 
-    def batch_source_preview_url(source, filename):
+    def batch_source_preview_url(source, filename, verify_for_delivery):
         path = Path(str(source.get("path") or "")).resolve()
         source_sha256 = str(source.get("sha256") or "")
         cache_root = Path(require_compression_directory()["tmp_dir"]).resolve() / "compression-batches"
@@ -7698,22 +7975,43 @@ def register_image_compression_routes(
         key = (str(path), source_sha256)
         token = batch_preview_tokens.get(key, "")
         token_item = token_registry.get(token)
-        if not token_item or token_item.get("expires_at", 0) <= now_provider():
-            if _sha256_file(path) != source_sha256:
+        active_token = token_item is not None and token_item.get("expires_at", 0) > now_provider()
+        # Preview routes verify the exact bytes they serve. Only KEEP_ORIGINAL
+        # also uses this URL as a list-time signal that the source can be delivered.
+        if verify_for_delivery and (not active_token or not token_item.get("batch_source_validated")):
+            try:
+                if _sha256_file(path) != source_sha256:
+                    return ""
+            except OSError:
                 return ""
-            token = issue_token(path, role="source_preview", filename=filename)
+            if active_token:
+                token_item["batch_source_validated"] = True
+        if not active_token:
+            token = issue_token(
+                path, role="source_preview", filename=filename,
+                batch_source_sha256=source_sha256, batch_source_validated=verify_for_delivery,
+            )
             # Forget entries whose authorization has already been pruned.
             for stale_key in [k for k, v in batch_preview_tokens.items() if v not in token_registry]:
                 batch_preview_tokens.pop(stale_key, None)
             batch_preview_tokens[key] = token
         return preview_url(token)
 
+    def compression_batch_output_items(batch_id):
+        return [
+            item for batch in build_output_center_snapshot(batch_id=batch_id)["items"]
+            for item in batch.get("items", []) if item["status"] == "COMPLETED"
+        ]
+
     batch_service = register_batch_compression_routes(
         app, registry=shared_task_registry, roots=require_compression_directory,
         output_directory=lambda: function_output_dir(
-            DELIVERY_OPTIMIZATION_MODE, Path(effective_output_root({})["normalized_path"])),
+            DELIVERY_OPTIMIZATION_MODE, Path(effective_output_root({}, batch_write_failure=True)["normalized_path"])),
         intake=batch_intake, execute=execute_compression, source_preview_url=batch_source_preview_url,
         release_intake=release_batch_intake,
+        original_delivery_root=smart_delivery_root, original_delivery_name=_safe_name,
+        original_delivery_copy=copy_delivery_item,
+        batch_output_items=compression_batch_output_items,
     )
     state = {
         "batch_service": batch_service,
@@ -7725,6 +8023,8 @@ def register_image_compression_routes(
         "color_batch_queue": color_batch_queue,
         "output_center_index": output_center_index,
         "smart_delivery_run_registry": smart_delivery_run_registry,
+        "active_single_compressions": active_single_compressions,
+        "smart_delivery_executing_plans": smart_delivery_executing_plans,
         "server_session_id": server_session_id,
         "remove_task_runtime_references": remove_task_runtime_references,
     }

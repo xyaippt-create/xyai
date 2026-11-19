@@ -92,3 +92,34 @@ class ResultLineageTests(unittest.TestCase):
         self.registry[first['task_id']]=root
         with self.assertRaises(ResultReuseError) as cycle:result_lineage(self.registry,second['result_id'])
         self.assertEqual(cycle.exception.code,'RESULT_LINEAGE_CYCLE')
+
+    def test_legacy_reference_with_own_top_level_task_keeps_nested_parent_edge(self):
+        first,_=self.compression_round(short_side=120)
+        second,_=self.compression_round(first['result_id'],short_side=80)
+        third,_=self.compression_round(second['result_id'],short_side=60)
+        trace=result_lineage(self.registry,third['result_id'])
+        for task in (second,third):
+            record=self.registry[task['task_id']]
+            nested=record.get('task_result') or {}
+            self.assertEqual(nested.get('source_origin'),'EXISTING_RESULT')
+            legacy={k:v for k,v in record.items() if k not in ('source_origin','source_result_id','source_feature_key','source_result_sha256')}
+            legacy.update(record_kind='result',source_task_id=task['task_id'])
+            self.registry[task['task_id']]=legacy
+        self.assertEqual(result_lineage(self.registry,third['result_id']),trace)
+        self.assertEqual(trace['round_count'],3)
+
+    def test_reused_round_without_own_source_digest_uses_intake_measured_digest(self):
+        first,_=self.compression_round(short_side=120)
+        parent=self.registry[first['task_id']]
+        # Shape of a 4K round: lineage edge only, no source_sha256 of its own.
+        self.registry['task_4k_round']={'task_id':'task_4k_round','result_id':'image_result_round2','feature_key':'enhancement_4k',
+            'status':'completed','result_file':parent['result_file'],'output_sha256':'f'*64,
+            'task_result':{'result_id':'image_result_round2','source_origin':'EXISTING_RESULT','source_result_id':first['result_id'],
+                'source_task_id':first['task_id'],'source_feature_key':'image_compression','source_result_sha256':parent['output_sha256']}}
+        trace=result_lineage(self.registry,'image_result_round2')
+        self.assertEqual(trace['round_count'],2)
+        self.assertEqual(trace['items'][1]['source_sha256'],parent['output_sha256'])
+        self.registry['task_4k_round']['task_result']['source_result_sha256']='0'*64
+        self.registry['task_4k_round']=self.registry['task_4k_round']
+        with self.assertRaises(ResultReuseError) as mismatch:result_lineage(self.registry,'image_result_round2')
+        self.assertEqual(mismatch.exception.code,'RESULT_LINEAGE_IDENTITY_MISMATCH')

@@ -5,10 +5,17 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from engine.storage.batch_results import batch_reference
 from engine.storage.result_reuse import result_lineage_fields
@@ -16,6 +23,7 @@ from engine.storage.result_reuse import result_lineage_fields
 
 REGISTRY_SCHEMA = "HDDE_SHARED_TASK_REGISTRY_V1"
 REGISTRY_RELATIVE_PATH = Path("诊断") / "任务记录" / "共享任务事实.json"
+REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 class SharedTaskRegistryError(RuntimeError):
@@ -45,11 +53,93 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
         if self._root not in self._path.parents:
             raise SharedTaskRegistryError("SHARED_TASK_REGISTRY_PATH_INVALID")
         self._lock = threading.RLock()
-        self._records = self._load()
+        self._lock_path = self._path.with_name(f"{self._path.name}.lock")
+        self._file_lock_handle: Any = None
+        self._file_lock_depth = 0
+        with self._exclusive():
+            self._records = self._load()
+            # Last persisted copy per key; lets a refresh tell other processes'
+            # changes apart from this process's live (possibly in-place edited) records.
+            self._persisted: dict[str, Any] = _json_ready(self._records)
+            self._disk_signature = self._signature()
 
     @property
     def path(self) -> Path:
         return self._path
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Thread lock plus a cross-process file lock; several backends may share one formal root."""
+
+        with self._lock:
+            if self._file_lock_depth == 0:
+                self._acquire_file_lock()
+            self._file_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._file_lock_depth -= 1
+                if self._file_lock_depth == 0:
+                    self._release_file_lock()
+
+    def _acquire_file_lock(self) -> None:
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self._lock_path.open("a+b")
+        deadline = time.monotonic() + REGISTRY_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise SharedTaskRegistryError("SHARED_TASK_REGISTRY_LOCK_TIMEOUT") from exc
+                time.sleep(0.02)
+        self._file_lock_handle = handle
+
+    def _release_file_lock(self) -> None:
+        handle, self._file_lock_handle = self._file_lock_handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def _signature(self) -> tuple[int, int, int] | None:
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+    def _refresh(self) -> None:
+        """Merge facts another process committed since this process last read or wrote."""
+
+        with self._lock:
+            if self._file_lock_depth == 0 and self._signature() == self._disk_signature:
+                return  # Cheap read path: nothing new on disk.
+        with self._exclusive():
+            signature = self._signature()
+            if signature == self._disk_signature:
+                return
+            disk = self._load()
+            for key, value in disk.items():
+                if self._persisted.get(key) != value:
+                    self._records[key] = value
+            for key in self._persisted:
+                if key not in disk:
+                    self._records.pop(key, None)
+            self._persisted = _json_ready(disk)
+            self._disk_signature = signature
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self._path.is_file():
@@ -70,6 +160,8 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
         }
 
     def _commit(self, records: Mapping[str, Mapping[str, Any]]) -> None:
+        """Write the full registry; callers hold _exclusive() and refreshed first."""
+
         try:
             payload = {"schema": REGISTRY_SCHEMA, "records": _json_ready(records)}
             encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
@@ -89,15 +181,22 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
             except OSError:
                 pass
             raise SharedTaskRegistryError("SHARED_TASK_REGISTRY_WRITE_FAILED") from exc
+        self._persisted = payload["records"]
+        self._disk_signature = self._signature()
 
     def __getitem__(self, key: str) -> dict[str, Any]:
-        return self._records[str(key)]
+        normalized_key = str(key)
+        with self._lock:
+            if normalized_key not in self._records:
+                self._refresh()
+            return self._records[normalized_key]
 
     def __setitem__(self, key: str, value: dict[str, Any]) -> None:
         normalized_key = str(key or "").strip()
         if not normalized_key or not isinstance(value, Mapping):
             raise SharedTaskRegistryError("SHARED_TASK_REGISTRY_RECORD_INVALID")
-        with self._lock:
+        with self._exclusive():
+            self._refresh()
             updated = dict(self._records)
             updated[normalized_key] = dict(value)
             self._commit(updated)
@@ -120,7 +219,8 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
         if not normalized:
             return {"created": [], "unchanged": [], "updated": []}
 
-        with self._lock:
+        with self._exclusive():
+            self._refresh()
             created: list[str] = []
             unchanged: list[str] = []
             updated_keys: list[str] = []
@@ -144,17 +244,22 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
 
     def __delitem__(self, key: str) -> None:
         normalized_key = str(key)
-        with self._lock:
+        with self._exclusive():
+            self._refresh()
             updated = dict(self._records)
             del updated[normalized_key]
             self._commit(updated)
             del self._records[normalized_key]
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._records)
+        with self._lock:
+            self._refresh()
+            return iter(list(self._records))
 
     def __len__(self) -> int:
-        return len(self._records)
+        with self._lock:
+            self._refresh()
+            return len(self._records)
 
     @staticmethod
     def _task_status(record: Mapping[str, Any]) -> str:
@@ -234,7 +339,8 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
         normalized_id = str(task_id or "").strip()
         if not normalized_id:
             return False
-        with self._lock:
+        with self._exclusive():
+            self._refresh()
             record = self._records.get(normalized_id)
             if not isinstance(record, Mapping) or not self._is_task_fact(record):
                 return False
@@ -265,72 +371,88 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
     def delete_task_fact(self, task_id: str) -> dict[str, Any]:
         """Delete one safe Task fact while retaining any formal Result fact."""
 
-        normalized_id = str(task_id or "").strip()
-        if not normalized_id:
-            return {"task_id": "", "deleted": False, "reason": "task_id_invalid", "status": ""}
-        with self._lock:
-            record = self._records.get(normalized_id)
-            if not isinstance(record, Mapping) or not self._is_task_fact(record):
-                return {"task_id": normalized_id, "deleted": False, "reason": "task_not_found", "status": ""}
-            task_identifier = str(record.get("task_id") or normalized_id).strip()
-            status = self._task_status(record)
-            if status in {"processing", "running"}:
-                return {"task_id": task_identifier, "deleted": False, "reason": "task_running", "status": status}
-            if status in {"pending", "queued"} and bool(record.get("execution_started")):
-                return {"task_id": task_identifier, "deleted": False, "reason": "task_already_started", "status": status}
-            if status not in {"pending", "queued", "completed", "failed", "cancelled"}:
-                return {"task_id": task_identifier, "deleted": False, "reason": "task_status_protected", "status": status}
+        return self.delete_task_facts([task_id])[0]
 
+    def delete_task_facts(self, task_ids: Iterable[str]) -> list[dict[str, Any]]:
+        """Delete the eligible Task facts in one atomic registry write."""
+
+        normalized_ids = [str(task_id or "").strip() for task_id in task_ids]
+        if not any(normalized_ids):
+            return [{"task_id": "", "deleted": False, "reason": "task_id_invalid", "status": ""} for _ in normalized_ids]
+        with self._exclusive():
+            self._refresh()
             updated = dict(self._records)
-            removed_keys = [
-                key
-                for key, candidate in self._records.items()
-                if isinstance(candidate, Mapping)
-                and self._is_task_fact(candidate)
-                and str(candidate.get("task_id") or key).strip() == task_identifier
+            keys_by_task: dict[str, list[str]] = {}
+            for key, record in updated.items():
+                if self._is_task_fact(record):
+                    identifier = str(record.get("task_id") or key).strip()
+                    keys_by_task.setdefault(identifier, []).append(key)
+            outcomes = [
+                self._stage_task_fact_deletion(task_id, updated, keys_by_task)
+                for task_id in normalized_ids
             ]
-            for key in removed_keys:
-                updated.pop(key, None)
-            result_reference = self._result_reference(record)
-            if result_reference is not None:
-                result_id = str(result_reference["result_id"])
-                existing = updated.get(result_id)
-                if isinstance(existing, Mapping) and str(existing.get("result_id") or "") != result_id:
-                    raise SharedTaskRegistryError("SHARED_TASK_RESULT_REFERENCE_CONFLICT")
-                updated[result_id] = result_reference
-            # Legacy watermark Results lived only inside the parent Task. Retain
-            # their explicit membership and individual Result facts atomically.
-            batch = batch_reference(record)
-            retained = {}
-            if batch is not None:
-                retained[f"output_batch:{batch['batch_id']}"] = _json_ready(batch)
-                for item in batch["items"]:
-                    if item.get("status") != "completed" or not item.get("result_id"):
-                        continue
-                    child = {**record, **item, "task_result": item, "result": item}
-                    reference = self._result_reference(child)
-                    if reference is not None:
-                        retained[str(reference["result_id"])] = reference
-                updated.update(retained)
-            self._commit(updated)
-            for key in removed_keys:
-                self._records.pop(key, None)
-            if result_reference is not None:
-                self._records[str(result_reference["result_id"])] = result_reference
-            self._records.update(retained)
-            return {
-                "task_id": task_identifier,
-                "deleted": True,
-                "reason": "deleted",
-                "status": status,
-                "result_id": str((result_reference or {}).get("result_id") or ""),
-                "delivery_id": str((result_reference or {}).get("delivery_id") or ""),
-                "result_preserved": result_reference is not None or bool(retained),
-            }
+            if any(outcome["deleted"] for outcome in outcomes):
+                self._commit(updated)
+                self._records = updated
+            return outcomes
+
+    def _stage_task_fact_deletion(
+        self,
+        task_id: str,
+        records: dict[str, dict[str, Any]],
+        keys_by_task: Mapping[str, list[str]],
+    ) -> dict[str, Any]:
+        if not task_id:
+            return {"task_id": "", "deleted": False, "reason": "task_id_invalid", "status": ""}
+        record = records.get(task_id)
+        if not isinstance(record, Mapping) or not self._is_task_fact(record):
+            return {"task_id": task_id, "deleted": False, "reason": "task_not_found", "status": ""}
+        task_identifier = str(record.get("task_id") or task_id).strip()
+        status = self._task_status(record)
+        if status in {"processing", "running"}:
+            return {"task_id": task_identifier, "deleted": False, "reason": "task_running", "status": status}
+        if status in {"pending", "queued"} and bool(record.get("execution_started")):
+            return {"task_id": task_identifier, "deleted": False, "reason": "task_already_started", "status": status}
+        if status not in {"pending", "queued", "completed", "failed", "cancelled"}:
+            return {"task_id": task_identifier, "deleted": False, "reason": "task_status_protected", "status": status}
+
+        for key in keys_by_task[task_identifier]:
+            candidate = records.get(key)
+            if candidate is not None and self._is_task_fact(candidate):
+                del records[key]
+        result_reference = self._result_reference(record)
+        if result_reference is not None:
+            result_id = str(result_reference["result_id"])
+            existing = records.get(result_id)
+            if isinstance(existing, Mapping) and str(existing.get("result_id") or "") != result_id:
+                raise SharedTaskRegistryError("SHARED_TASK_RESULT_REFERENCE_CONFLICT")
+            records[result_id] = result_reference
+
+        # Legacy watermark Results lived only inside the parent Task.
+        batch = batch_reference(record)
+        if batch is not None:
+            records[f"output_batch:{batch['batch_id']}"] = _json_ready(batch)
+            for item in batch["items"]:
+                if item.get("status") != "completed" or not item.get("result_id"):
+                    continue
+                child = {**record, **item, "task_result": item, "result": item}
+                reference = self._result_reference(child)
+                if reference is not None:
+                    records[str(reference["result_id"])] = reference
+        return {
+            "task_id": task_identifier,
+            "deleted": True,
+            "reason": "deleted",
+            "status": status,
+            "result_id": str((result_reference or {}).get("result_id") or ""),
+            "delivery_id": str((result_reference or {}).get("delivery_id") or ""),
+            "result_preserved": result_reference is not None or batch is not None,
+        }
 
     def result_reference_for_task(self, task_id: str) -> dict[str, Any] | None:
         normalized_id = str(task_id or "").strip()
         with self._lock:
+            self._refresh()
             for record in self._records.values():
                 if not isinstance(record, Mapping) or str(record.get("record_kind") or "") != "result":
                     continue
@@ -354,7 +476,8 @@ class SharedTaskRegistry(MutableMapping[str, dict[str, Any]]):
             except (OSError, RuntimeError, ValueError):
                 return False
 
-        with self._lock:
+        with self._exclusive():
+            self._refresh()
             for record_id, record in self._records.items():
                 if not isinstance(record, Mapping) or str(record.get("record_kind") or "") != "result":
                     continue

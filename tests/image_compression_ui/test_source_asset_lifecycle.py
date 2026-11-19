@@ -8,6 +8,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import test_color_correction_api as color_fixture
+import test_level_pick_color_api as level_fixture
 import test_reference_color_api as reference_fixture
 from backend.image_compression_api import TOKEN_TTL_SECONDS, register_image_compression_routes
 from engine.storage.shared_task_registry import SharedTaskRegistry
@@ -105,11 +107,13 @@ class SourceAssetLifecycleTests(unittest.TestCase):
         self.prune()
         self.assertFalse(path.exists())
 
-    def test_original_result_and_reference_previews_survive_expiry_and_reload(self):
+    def test_original_and_reference_previews_survive_expiry_and_reload(self):
         target, reference = self.intake(), self.intake(name="reference.png")
-        before = self.run_reference(target, reference).json()["data"]
-        self.assertEqual(before["result"]["result_action"], "ACCEPT_ORIGINAL")
-        result_file = Path(before["result"]["result_file"])
+        response = self.run_reference(target, reference)
+        self.assertEqual(response.status_code, 422, response.text)
+        before = response.json()["data"]
+        self.assertEqual(before["decision"]["result_action"], "ACCEPT_ORIGINAL")
+        self.assertIsNone(before["result"])
         task_id = before["task"]["task_id"]
         self.expire()
         self.assertEqual(self.run_reference(target, reference).status_code, 404)
@@ -117,14 +121,15 @@ class SourceAssetLifecycleTests(unittest.TestCase):
             if restart:
                 self.reload()
             data = self.client.get("/api/color-correction/tasks/" + task_id).json()["data"]
-            self.assertEqual(data["result"], before["result"])
+            self.assertIsNone(data["result"])
             self.assert_preview(data, "source_preview_url", target["source_sha256"])
             self.assert_preview(data, "reference_preview_url", reference["source_sha256"])
-            self.assertEqual(hashlib.sha256(result_file.read_bytes()).hexdigest(), target["source_sha256"])
 
     def test_auto_color_preview_also_recovers_without_reviving_source_authorization(self):
-        target = self.intake(cast=(0, 0, 0))
-        before = self.client.post("/api/color-correction/run", json={"source_token": target["source_token"]}).json()["data"]
+        target = color_fixture.ColorCorrectionApiTests.intake(self)
+        response = self.client.post("/api/color-correction/run", json={"source_token": target["source_token"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        before = response.json()["data"]
         self.assertEqual(before["task"]["status"], "completed")
         self.expire()
         self.assertEqual(self.client.post("/api/color-correction/run", json={"source_token": target["source_token"]}).status_code, 404)
@@ -132,11 +137,21 @@ class SourceAssetLifecycleTests(unittest.TestCase):
         data = self.client.get("/api/color-correction/tasks/" + before["task"]["task_id"]).json()["data"]
         self.assertEqual(data["result"], before["result"])
         self.assert_preview(data, "source_preview_url", target["source_sha256"])
+        self.assert_preview(data, "output_preview_url", before["result"]["output_sha256"])
 
     def test_deleted_task_retains_result_source_but_releases_unused_reference(self):
-        target, reference = self.intake(), self.intake(name="reference.png")
+        target = level_fixture.LevelPickApiTests.intake(self, level_fixture.cast_scene())
+        reference = level_fixture.LevelPickApiTests.intake(self, level_fixture.cast_scene(cast=(0, 0, 0)), name="reference.png")
         source_path, reference_path = Path(self.source(target)["path"]), Path(self.source(reference)["path"])
-        data = self.run_reference(target, reference).json()["data"]
+        preview = self.client.post("/api/color-correction/level-preview", json={
+            "source_token": target["source_token"], "reference_source_token": reference["source_token"],
+        })
+        self.assertEqual(preview.status_code, 200, preview.text)
+        response = self.client.post("/api/color-correction/level-run", json={
+            "preview_id": preview.json()["data"]["preview_id"], "level": "light",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()["data"]
         task_id = data["task"]["task_id"]
         outcome = self.registry.delete_task_fact(task_id)
         self.assertTrue(outcome["result_preserved"])
@@ -145,7 +160,9 @@ class SourceAssetLifecycleTests(unittest.TestCase):
         self.assertTrue(source_path.is_file())
         self.assertFalse(reference_path.exists())
         self.reload()
-        self.assertEqual(self.registry[data["result"]["result_id"]]["result_file"], str(source_path))
+        result = self.registry[data["result"]["result_id"]]
+        self.assertEqual(Path(result["source_path"]), source_path)
+        self.assertEqual(hashlib.sha256(Path(result["result_file"]).read_bytes()).hexdigest(), data["result"]["output_sha256"])
         self.assertEqual(self.client.get("/api/color-correction/tasks/" + task_id).status_code, 404)
 
     def test_retained_result_fields_and_nested_batch_sources_are_protected(self):

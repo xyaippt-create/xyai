@@ -11,8 +11,8 @@ const watermark = fs.readFileSync(new URL("../../src/BatchWatermarkPage.jsx", im
 const app = fs.readFileSync(new URL("../../src/App.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../../src/index.css", import.meta.url), "utf8");
 
-test("输出中心瞬时展示固定顺序的五个继续处理器", () => {
-  const labels = ["画质增强", "颜色校正", "图片压缩", "瑕疵修复", "添加水印"];
+test("输出中心瞬时展示固定顺序的六个继续处理器", () => {
+  const labels = ["画质增强", "颜色校正", "图片压缩", "瑕疵修复", "添加水印", "喷绘出图"];
   let previousIndex = -1;
   for (const label of labels) {
     const index = outputCenter.indexOf(`label: "${label}"`);
@@ -42,7 +42,8 @@ test("跨页只传 Result 身份，不把路径或 URL 伪装成上传", () => {
   assert.match(color, /JSON\.stringify\(\{ result_id: continueResultId \}\)/);
   assert.match(retouch, /JSON\.stringify\(\{ result_id: continueResultId \}\)/);
   assert.match(processing, /formData\.append\("result_id", item\.sourceResultId\)/);
-  assert.match(watermark, /formData\.append\("result_ids_json"/);
+  assert.match(watermark, /formData\.append\("entries_json"/);
+  assert.match(watermark, /result_id: item\.resultId/);
   assert.match(watermark, /\/api\/result-assets\//);
   assert.doesNotMatch(outputCenter, /output_path|source_path|input_path/);
 });
@@ -51,8 +52,9 @@ test("继续处理入口具备明确的独立任务和原结果不变说明", ()
   assert.match(outputCenter, /新建独立任务/);
   assert.match(outputCenter, /将当前成品作为新任务继续处理，原文件不会被覆盖。/);
   assert.match(outputCenter, /aria-modal="true"/);
-  assert.match(outputCenter, /event\.key === "Escape"/);
-  assert.match(styles, /\.hdde-continue-dialog-backdrop\s*\{[\s\S]*?position:\s*fixed/);
+  assert.match(outputCenter, /dialog\.showModal\(\)/);
+  assert.match(outputCenter, /onCancel=\{/);
+  assert.match(styles, /\.hdde-continue-dialog::backdrop\s*\{/);
   assert.match(styles, /\.hdde-continue-dialog__options > button\s*\{[\s\S]*?min-height:\s*74px/);
 });
 

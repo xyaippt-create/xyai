@@ -113,7 +113,9 @@ test("output center is a real enabled route and its compare route stays out of n
 });
 
 test("output center consumes real indexed items and never accepts a browser filesystem path", () => {
-  assert.match(page, /requestJson\("\/api\/output-center\/items"\)/);
+  const compareView = page.slice(page.indexOf("function OutputCompareView"), page.indexOf("export default function OutputCenterPage"));
+  assert.match(compareView, /\/api\/output-center\/items\/\$\{encodeURIComponent\(itemId\)\}\/comparison/);
+  assert.doesNotMatch(compareView, /requestJson\("\/api\/output-center\/items"\)/);
   assert.match(page, /encodeURIComponent\(item\.id\)/);
   assert.match(page, /performAction\(selected, "open-folder"\)/);
   assert.match(page, /performAction\(selected, "open"\)/);
@@ -132,7 +134,7 @@ test("categories and comparison are derived from real item contracts", () => {
   assert.match(page, /进入对比质检/);
   assert.match(page, /返回输出中心/);
   assert.match(page, /SliderCompareStage/);
-  assert.match(app, /onBackFromCompare=\{\(\) => navigateTo\("\/outputs"\)\}/);
+  assert.match(app, /onBackFromCompare=\{\(\) => navigateTo\(outputBatchId \? `\/outputs\?batch_id=\$\{encodeURIComponent\(outputBatchId\)\}` : "\/outputs"\)\}/);
 });
 
 test("output center preserves real file identity and searches filename separately from product labels", () => {
@@ -188,7 +190,7 @@ test("current output actions keep a clear primary, secondary, and auxiliary hier
 test("output cards are image-first, truncate the real filename, and keep card selection", () => {
   // OC-03 also clears the blank-detail state when a user explicitly selects a card.
   assert.match(page, /className="hdde-output-card"[\s\S]*?onClick=\{\(\) => selectItem\(item\)\}/);
-  assert.match(page, /setSelectedId\(item\.id\); setSelectionCleared\(false\)/);
+  assert.match(page, /setSelectedId\(item\.record_id \|\| item\.id\);\s*setSelectionCleared\(false\)/);
   assert.match(page, /className="hdde-output-thumb"[\s\S]*?title=\{item\.file_name\}/);
   assert.match(styles, /\.hdde-output-card\s*\{[\s\S]*?grid-template-rows:\s*clamp\(180px,\s*18vw,\s*240px\)\s*auto/);
   assert.match(styles, /\.hdde-output-thumb\s*\{[\s\S]*?align-self:\s*stretch/);
@@ -258,7 +260,8 @@ test("hover positioning prefers right, flips left, and clamps to the viewport", 
     imageHeight: 1600,
   });
   assert.equal(left.placement, "left");
-  assert.equal(left.left, 268);
+  assert.equal(left.left + left.width, 748);
+  assert.ok(Math.abs((left.width - 22) / (left.height - 22) - 900 / 1600) < 0.001);
   assert.ok(left.top + left.height <= 744);
 
   const narrow = calculateOutputHoverPreviewPosition({
@@ -271,6 +274,22 @@ test("hover positioning prefers right, flips left, and clamps to the viewport", 
   assert.equal(narrow.width, 343);
   assert.equal(narrow.left, 16);
   assert.equal(narrow.top, 16);
+});
+
+test("larger hover previews fit wide and tall images within the actual padded box", () => {
+  for (const [imageWidth, imageHeight] of [[1600, 900], [900, 1600], [400, 4000], [4000, 400]]) {
+    for (const viewportWidth of [375, 1024, 1520, 1920]) {
+      const box = calculateOutputHoverPreviewPosition({
+        anchorRect: { left: viewportWidth - 300, right: viewportWidth - 20, top: 700, height: 180 },
+        viewportWidth, viewportHeight: 900, imageWidth, imageHeight,
+        previewWidth: Math.min(760, Math.max(520, viewportWidth * 0.46)),
+      });
+      assert.ok(box.left >= 16 && box.left + box.width <= viewportWidth - 16);
+      assert.ok(box.top >= 16 && box.top + box.height <= 884);
+      assert.ok(Math.abs((box.width - 22) / (box.height - 22) - imageWidth / imageHeight) < 0.001);
+      if (imageWidth === 1600 && viewportWidth >= 1520) assert.ok(box.width - 22 >= 650);
+    }
+  }
 });
 
 test("right detail removes the duplicate image while preserving real data and actions", () => {
@@ -298,13 +317,15 @@ test("output center renders a small first batch and loads globally filtered page
   assert.match(page, /query:\s*searchQuery\.trim\(\)/);
   assert.match(page, /sort:\s*sortOrder/);
   assert.match(page, /category:\s*activeCategory/);
-  assert.match(page, /next\.has_more/);
+  assert.match(page, /page\.has_more/);
   // Later pages are requested on scroll, after the current page has painted.
-  assert.match(page, /pendingNextOffset = next\.next_offset/);
+  assert.match(page, /pendingNextOffset = page\.has_more \? page\.next_offset : null/);
   assert.match(page, /addEventListener\("scroll", loadNextPage/);
   assert.doesNotMatch(page, /setTimeout\(\(\) => loadRemaining/);
-  assert.match(page, /params\.set\("limit", String\(OUTPUT_CENTER_PAGE_SIZE\)\)/);
+  assert.match(page, /requestPage\(offset, OUTPUT_CENTER_PAGE_SIZE, listRevision\)/);
   assert.match(page, /params\.set\("offset", String\(offset\)\)/);
+  assert.match(page, /params\.set\("list_revision", revision\)/);
+  assert.match(page, /reason\.code !== "OUTPUT_CENTER_LIST_CHANGED"/);
   assert.doesNotMatch(page, /appendInBatches/);
   assert.match(backend, /def select_output_center_page\(/);
   assert.match(backend, /selected_paths = page\["selected_paths"\]/);
@@ -326,11 +347,8 @@ test("output center keeps the 12px product readability floor and shared theme to
 });
 
 
-test("edit lineage loads only on demand and never replaces the selected Result", () => {
-  assert.match(page, /data-testid="output-center-lineage-action"/);
-  assert.match(page, /showLineage\(selected\)/);
-  assert.match(page, /lineageRequestRef/);
-  assert.match(page, /round_count/);
-  assert.match(page, /initial_source\.file_name/);
+test("output UI omits the skipped-count banner and lineage view while retaining result reuse", () => {
+  assert.doesNotMatch(page, /skipped_unavailable_count|已排除/);
+  assert.doesNotMatch(page, /output-center-lineage-action|查看编辑链|\/lineage/);
   assert.match(page, /continue_result=\$\{encodeURIComponent\(resultId\)\}/);
 });

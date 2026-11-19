@@ -472,13 +472,19 @@ def default_output_dir() -> Path:
     return get_app_data_root() / DEFAULT_OUTPUT_DIR_NAME
 
 
+def compression_default_output_root() -> Path:
+    if _VALIDATION_FORMAL_ROOT is not None:
+        return _VALIDATION_FORMAL_ROOT / IMAGE_COMPRESSION_OUTPUT_DIR_NAME
+    return DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT
+
+
 def default_settings() -> dict:
     initial_root = _initial_formal_app_data_root()
     return {
         "app_data_root": "",
         "last_app_data_root": "",
         "default_output_dir": str(initial_root / DEFAULT_OUTPUT_DIR_NAME),
-        "image_compression_default_output_root": str(DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
+        "image_compression_default_output_root": str(compression_default_output_root()),
         "input_cache_policy": "keep",
         "cleanup_input_cache_days": 0,
         "cleanup_input_cache_max_files": 0,
@@ -1969,6 +1975,8 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         if not resolved_result.is_file():
             raise RuntimeError("FORMAL_RESULT_IMAGE_NOT_FOUND")
         output_sha256 = sha256_file(resolved_result)
+        # Input digest measured at task registration; the edit chain proves each round's input with it.
+        source_sha256 = str(task.get("input_hash") or "").strip().lower()
         lineage_fields = result_lineage_fields(task)
         task_result = task.get("task_result") if isinstance(task.get("task_result"), dict) else {}
         task_result.update(
@@ -1981,6 +1989,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "trace_id": task.get("trace_id") or "",
                 "source": str(source_path),
                 "source_path": str(source_path),
+                "source_sha256": source_sha256,
                 "result_file": str(resolved_result),
                 "output_path": str(resolved_result),
                 "output_sha256": output_sha256,
@@ -1993,6 +2002,7 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
                 "result_id": result_id,
                 "source": str(source_path),
                 "source_path": source_path,
+                "source_sha256": source_sha256,
                 "result_file": str(resolved_result),
                 "output_path": str(resolved_result),
                 "output_sha256": output_sha256,
@@ -2259,9 +2269,14 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         return checked
 
     def compression_output_settings_provider() -> dict[str, str]:
+        built_in = compression_default_output_root()
+        saved = settings_data.get("image_compression_default_output_root") or built_in
+        # Earlier validation instances persisted the production default in their own settings.
+        if _VALIDATION_FORMAL_ROOT is not None and Path(str(saved)) == DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT:
+            saved = built_in
         return {
-            "built_in_default_root": str(DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
-            "saved_default_root": str(settings_data.get("image_compression_default_output_root") or DEFAULT_IMAGE_COMPRESSION_OUTPUT_ROOT),
+            "built_in_default_root": str(built_in),
+            "saved_default_root": str(saved),
         }
 
     def save_compression_default_output_root(value: str) -> None:
@@ -2328,12 +2343,40 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
 
     from backend.batch_watermark_api import register_batch_watermark_routes
 
-    register_batch_watermark_routes(
+    watermark_state = register_batch_watermark_routes(
         app,
         user_dirs_provider=require_directory_ready,
         shared_task_registry=task_registry,
         runtime_event_logger=log_runtime_event,
     )
+
+    @app.get("/api/app/desktop-exit-state")
+    async def desktop_exit_state():
+        image_state = app.state.image_compression_api_state
+        local_state = app.state.local_retouch_api_state
+        compression_batches = image_state["batch_service"].batches.values()
+        retouch_batches = list(local_state["batches"].values())
+        return {"success": True, "data": {
+            "compression_running": sum(
+                batch["control"] == "IMPORTING" or any(
+                    item["status"] == "PROCESSING" or (
+                        item["status"] == "QUEUED" and (batch["control"] == "RUNNING" or item.get("recovery_active"))
+                    ) for item in batch["items"]
+                ) for batch in compression_batches
+            ),
+            "retouch_running": sum(bool(batch.get("busy")) for batch in retouch_batches),
+            "retouch_candidates": sum(
+                item.get("status") == "candidate" for batch in retouch_batches for item in batch["items"]
+            ),
+            "watermark_running": len(watermark_state["active_batches"]),
+            "other_running": (
+                sum(not task.done() for task in background_tasks.values())
+                + len(image_state["active_single_compressions"])
+                + len(image_state["smart_delivery_executing_plans"])
+                + sum(batch.get("status") in {"pending", "processing"} for batch in list(image_state["color_batch_registry"].values()))
+                + sum(bool(session.get("processing")) for session in local_state["sessions"].values() if not session.get("batch_id"))
+            ),
+        }}
 
     def update_task_result_output_meta(task_result: dict, task: dict, final_path: Path) -> dict:
         meta = task.get("output_dir_meta") or {}
@@ -2429,6 +2472,10 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         source_preview_url = str(result.get("source_preview_url") or "")
         if task_id and source_path and (
             not source_preview_url or source_preview_url.startswith("/api/image-compression/preview/")
+            or (
+                result.get("feature_key") == "local_retouch"
+                and source_preview_url.startswith("/api/local-retouch/sessions/")
+            )
         ):
             source_preview_url = f"/api/v1/tasks/{urllib.parse.quote(task_id, safe='')}/source-file"
         if source_preview_url:
@@ -5305,20 +5352,22 @@ def build_web_app(runtime_host: str = SERVER_HOST, runtime_port: int = SERVER_PO
         task_ids = [str(value or "").strip() for value in raw_task_ids]
         if any(not value for value in task_ids) or len(set(task_ids)) != len(task_ids):
             raise HTTPException(status_code=400, detail={"code": "TASK_DELETE_REQUEST_INVALID", "message": "task_ids 不能为空或重复。"})
-        delete_task_fact = getattr(task_registry, "delete_task_fact", None)
-        if not callable(delete_task_fact):
+        delete_task_facts = getattr(task_registry, "delete_task_facts", None)
+        if not callable(delete_task_facts):
             raise HTTPException(status_code=503, detail={"code": "TASK_DELETE_UNAVAILABLE", "message": "统一任务事实源暂不支持安全清除。"})
 
-        outcomes: list[dict] = []
         for task_id in task_ids:
-            current = task_registry.get(task_id)
             active_background = background_tasks.get(task_id)
-            if isinstance(current, dict) and active_background is not None and not active_background.done():
+            if active_background is None or active_background.done():
+                continue
+            current = task_registry.get(task_id)
+            if isinstance(current, dict) and not current.get("execution_started"):
                 current["execution_started"] = True
                 current["execution_state"] = "scheduled"
                 task_registry[task_id] = current
-            outcome = delete_task_fact(task_id)
-            outcomes.append(outcome)
+
+        outcomes = delete_task_facts(task_ids)
+        for task_id, outcome in zip(task_ids, outcomes):
             if outcome.get("deleted"):
                 cleanup_deleted_task_runtime_references(task_id)
                 log_runtime_event(

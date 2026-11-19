@@ -69,6 +69,7 @@ test("route audit scope is derived from real enabled and beta route configuratio
   assert.deepEqual(accessible.map((route) => route.key), [
     "processing",
     "four-k-enhancement",
+    "print-8k",
     "color-correction",
     "compression",
     "retouch",
@@ -680,8 +681,7 @@ test("automatic processing completion enters the existing unified result route",
 test("result confirmation reuses real smart delivery and ends in a focused saved state", () => {
   assert.match(taskDetail, /requestDeliveryJson\("\/api\/smart-delivery\/preflight"/);
   assert.match(taskDetail, /JSON\.stringify\(\{ result_ids: \[resultId\], rules: \{\} \}\)/);
-  assert.match(taskDetail, /requestDeliveryJson\("\/api\/smart-delivery\/execute"/);
-  assert.match(taskDetail, /plan_id: preflight\.plan_id, confirmed: true/);
+  assert.match(taskDetail, /executeSingleResultDelivery\(\{\s*planId: preflight\.plan_id,\s*resultId,\s*idempotencyKey: deliveryRequestKey,\s*request: requestDeliveryJson,/);
   assert.match(taskDetail, /completedDelivery\.failure_count > 0 \|\| completedDelivery\.success_count !== 1/);
   assert.match(taskDetail, /failedItem\?\.failure_reason/);
   assert.match(taskDetail, /data-testid="delivery-completion-state"/);

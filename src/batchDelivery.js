@@ -17,6 +17,9 @@ const ELIGIBILITY_INVALIDATING_CODES = new Set([
   "UNIFIED_RESULT_REQUIRED",
   "COLOR_RESULT_NOT_ACCEPTED",
   "DELIVERY_SHA_MISMATCH",
+  "BATCH_ORIGINAL_UNAVAILABLE",
+  "BATCH_ORIGINAL_NAME_INVALID",
+  "BATCH_ORIGINAL_DELIVERY_CHANGED",
 ]);
 
 function browserStorage() {
@@ -49,6 +52,9 @@ function normalizePersistedState(resultId, raw) {
     status,
     idempotencyKey,
     deliveryId: String(raw?.deliveryId || ""),
+    deliveryFileName: String(raw?.deliveryFileName || ""),
+    deliveryLocation: String(raw?.deliveryLocation || ""),
+    deliveryPath: String(raw?.deliveryPath || ""),
     outputSha256: String(raw?.outputSha256 || "").toLowerCase(),
     code: String(raw?.code || ""),
     reason: String(raw?.reason || ""),
@@ -112,19 +118,12 @@ export function resolveBatchMediaUrl(path) {
   return apiUrl(path);
 }
 
-export async function loadBatchOutputItems(resultIds, { request = requestBatchDeliveryJson } = {}) {
-  const requested = new Set(Array.from(resultIds || []).map(String).filter(Boolean));
-  if (!requested.size) return {};
-  const payload = await request("/api/output-center/items");
-  const matched = {};
-  // Batch Results are nested under their batch card in the Output Center.
-  const items = (payload.data?.items || []).flatMap((item) => [item, ...(item?.items || [])]);
-  for (const item of items) {
-    const resultId = String(item?.result_id || "");
-    if (!requested.has(resultId) || matched[resultId]) continue;
-    matched[resultId] = item;
-  }
-  return matched;
+export async function loadBatchDeliveryEligibility(batchId, { request = requestBatchDeliveryJson } = {}) {
+  const { data } = await request(`/api/image-compression/batches/${encodeURIComponent(batchId)}/delivery/eligibility`);
+  return {
+    outputItems: Object.fromEntries(data.items.map((item) => [item.result_id, item])),
+    originalIds: new Set(data.originalItemIds),
+  };
 }
 
 export function blocksBatchDeliverySelection(deliveryState) {
@@ -144,6 +143,14 @@ export function isBatchDeliveryEligible(item, outputItem, selectionBlocked = fal
     && outputItem?.available !== false
     // A single card reports "completed"; a batch child keeps its batch status "COMPLETED".
     && String(outputItem?.status || "").toLowerCase() === "completed";
+}
+
+export function canSelectBatchDeliveryItem(item, { outputItems, originalIds }, blocked) {
+  if (item.status === "KEEP_ORIGINAL") {
+    return !blocked.has(item.id) && originalIds.has(item.id)
+      && /^[a-f0-9]{64}$/i.test(item.sourceSha256 || "");
+  }
+  return isBatchDeliveryEligible(item, outputItems[item.resultId], blocked.has(item.resultId));
 }
 
 function issueMessage(preflight) {
@@ -208,9 +215,17 @@ export async function executeSingleResultDelivery({ planId, resultId, idempotenc
   } catch (reason) {
     if (!executeOutcomeUnknown(reason)) throw reason;
   }
+  return lookupSingleResultDelivery({ resultId, idempotencyKey, request });
+}
+
+export async function lookupSingleResultDelivery({ resultId, idempotencyKey, request = requestBatchDeliveryJson }) {
+  return lookupDeliveryRequest({ idempotencyKey, query: { result_id: resultId }, request });
+}
+
+export async function lookupDeliveryRequest({ idempotencyKey, query, request = requestBatchDeliveryJson }) {
   try {
     const statusPayload = await request(
-      `/api/smart-delivery/requests/${encodeURIComponent(idempotencyKey)}?result_id=${encodeURIComponent(resultId)}`,
+      `/api/smart-delivery/requests/${encodeURIComponent(idempotencyKey)}?${new URLSearchParams(query)}`,
     );
     const pending = String(statusPayload.data?.status || "").toLowerCase() === "processing";
     return { outcome: pending ? "pending" : "settled", data: statusPayload.data };
@@ -231,7 +246,7 @@ function normalizeDeliveryResult(entry, run) {
     };
   }
   const result = (run?.results || []).find((item) => item?.source_result_id === entry.resultId);
-  if (!result) return unknown(entry, "交付响应缺少对应 Result，正在确认服务端事实。", "DELIVERY_RESULT_MISSING");
+  if (!result) return unknown(entry, "暂未收到这份成品的交付记录，正在核对。", "DELIVERY_RESULT_MISSING");
   if (result.status !== "completed") {
     return failedDefinite(
       entry,
@@ -243,7 +258,7 @@ function normalizeDeliveryResult(entry, run) {
   const sourceSha256 = String(result.source_sha256 || "").toLowerCase();
   const deliverySha256 = String(result.delivery_sha256 || "").toLowerCase();
   if (!registered || registered !== sourceSha256 || registered !== deliverySha256) {
-    return failedDefinite(entry, "Winner、Result 与 Delivery 内容身份不一致，未将本项标记为成功。", "DELIVERY_SHA_MISMATCH");
+    return failedDefinite(entry, "交付副本与压缩成品的内容校验不一致。请在输出中心核对压缩成品。", "DELIVERY_SHA_MISMATCH");
   }
   return {
     resultId: entry.resultId,
@@ -254,6 +269,8 @@ function normalizeDeliveryResult(entry, run) {
     reason: "",
     invalidatesEligibility: false,
     deliveryId: String(result.delivery_id || run?.delivery_id || ""),
+    deliveryFileName: String(result.delivery_file_name || ""),
+    deliveryLocation: String(run?.delivery_location_label || ""),
     sourceSha256,
     deliverySha256,
     idempotentReplay: run?.idempotent_replay === true,
@@ -266,6 +283,7 @@ export async function deliverBatchResults(entries, {
   onItemState = () => {},
   createRequestId = createDeliveryRequestId,
   confirmExisting = false,
+  batchId = "",
 } = {}) {
   const unique = [];
   const seen = new Set();
@@ -279,12 +297,36 @@ export async function deliverBatchResults(entries, {
       name: String(source?.name || "未命名图片"),
       outputSha256: String(source?.outputSha256 || "").toLowerCase(),
       idempotencyKey: DELIVERY_REQUEST_PATTERN.test(suppliedKey) ? suppliedKey : createRequestId(),
+      original: source.original === true,
     });
   }
 
   const items = [];
   for (let index = 0; index < unique.length; index += 1) {
     const entry = unique[index];
+    if (entry.original) {
+      onProgress({ current: index + 1, total: unique.length, name: entry.name, phase: "execute" });
+      onItemState(unknown(entry, "正在确认原图副本…", "SMART_DELIVERY_EXECUTING"));
+      let result;
+      try {
+        const { data } = await request(`/api/image-compression/batches/${encodeURIComponent(batchId)}/delivery/originals/${encodeURIComponent(entry.resultId)}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true }),
+        });
+        if (data.itemId !== entry.resultId || data.deliverySha256 !== entry.outputSha256 || !data.deliveryPath || !data.deliveryFileName) {
+          result = failedDefinite(entry, "原图副本的内容校验不一致，请核对交付目录。", "DELIVERY_SHA_MISMATCH");
+        } else {
+          result = { ...entry, status: BATCH_DELIVERY_STATUS.COMPLETED, deliveryPath: data.deliveryPath, deliveryFileName: data.deliveryFileName };
+        }
+      } catch (reason) {
+        result = executeOutcomeUnknown(reason)
+          ? unknown(entry, reason?.message || "正在确认原图副本…", reason?.code || "BATCH_ORIGINAL_COPY_PENDING")
+          : failedDefinite(entry, reason?.message, reason?.code || "BATCH_ORIGINAL_COPY_FAILED");
+      }
+      result = { ...result, original: true };
+      items.push(result);
+      onItemState(result);
+      continue;
+    }
     let phase = "preflight";
     if (confirmExisting) {
       phase = "confirm";

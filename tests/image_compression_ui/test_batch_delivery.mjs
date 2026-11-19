@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import {
   BATCH_DELIVERY_STATUS,
   blocksBatchDeliverySelection,
+  canSelectBatchDeliveryItem,
   deliverBatchResults,
   executeSingleResultDelivery,
   invalidatesBatchDeliveryEligibility,
   isBatchDeliveryEligible,
+  loadBatchDeliveryEligibility,
   loadBatchDeliveryStates,
-  loadBatchOutputItems,
   readBatchImportProgress,
   requestBatchDeliveryJson,
   saveBatchDeliveryStates,
@@ -27,14 +28,14 @@ const jsonResponse = (status, payload, jsonError = null) => ({
 
 test("output center preview and delivery eligibility are joined only by exact result identity", async () => {
   const requested = [];
-  const matched = await loadBatchOutputItems(["result-a"], { request: async (path) => {
+  const { outputItems: matched } = await loadBatchDeliveryEligibility("batch-a", { request: async (path) => {
     requested.push(path);
     return { data: { items: [
       { result_id: "result-other", unified_result: true, delivery_eligible: true, status: "completed" },
       { result_id: "result-a", unified_result: true, delivery_eligible: true, status: "completed", thumbnail_url: "/thumb/a" },
-    ] } };
+    ], originalItemIds: [] } };
   } });
-  assert.deepEqual(requested, ["/api/output-center/items"]);
+  assert.deepEqual(requested, ["/api/image-compression/batches/batch-a/delivery/eligibility"]);
   assert.equal(matched["result-a"].thumbnail_url, "/thumb/a");
   const batchItem = { status: "COMPLETED", resultId: "result-a", outputSha256: sha("a") };
   assert.equal(isBatchDeliveryEligible(batchItem, matched["result-a"]), true);
@@ -477,14 +478,22 @@ test("single-Result delivery reports pending, not-started and definite outcomes 
   assert.deepEqual(statusCalls, []);
 });
 
-test("batch Results nested under their batch card are found and eligible only while available", async () => {
+test("batch delivery selection requires available Results or a verified original", async () => {
   const child = (id, extra = {}) => ({ id: `card-${id}`, result_id: id, unified_result: true, delivery_eligible: true, status: "COMPLETED", available: true, ...extra });
-  const matched = await loadBatchOutputItems(["result-a", "result-b"], { request: async () => ({ data: { items: [
-    { id: "compression_batch_1", batch_id: "compression_batch_1", items: [child("result-a"), child("result-b", { available: false })] },
-  ] } }) });
+  const eligibility = await loadBatchDeliveryEligibility("batch-a", { request: async () => ({ data: {
+    items: [child("result-a"), child("result-b", { available: false })], originalItemIds: ["original-a"],
+  } }) });
+  const matched = eligibility.outputItems;
   assert.equal(matched["result-a"].id, "card-result-a");
   const batchItem = (resultId) => ({ status: "COMPLETED", resultId, outputSha256: sha("a") });
   assert.equal(isBatchDeliveryEligible(batchItem("result-a"), matched["result-a"]), true);
   assert.equal(isBatchDeliveryEligible(batchItem("result-b"), matched["result-b"]), false);
   assert.equal(isBatchDeliveryEligible(batchItem("result-a"), { ...matched["result-a"], status: "FAILED" }), false);
+  const original = { id: "original-a", status: "KEEP_ORIGINAL", sourceSha256: sha("b") };
+  assert.equal(canSelectBatchDeliveryItem(original, eligibility, new Set()), true);
+  assert.equal(canSelectBatchDeliveryItem({ ...original, id: "original-b" }, eligibility, new Set()), false);
+  assert.equal(canSelectBatchDeliveryItem(original, eligibility, new Set(["original-a"])), false);
+  for (const status of ["QUEUED", "PROCESSING", "FAILED", "CANCELED"]) {
+    assert.equal(canSelectBatchDeliveryItem({ ...original, status }, eligibility, new Set()), false);
+  }
 });

@@ -152,6 +152,31 @@ class BatchOutputContractTests(unittest.TestCase):
         self.restart()
         self.assertEqual(card["summary"], self.card(batch_id)["summary"])
 
+    def test_keep_original_thumbnail_uses_verified_source_even_after_cache_hit(self):
+        import numpy as np
+
+        stream = io.BytesIO()
+        Image.fromarray(np.random.default_rng(7).integers(0, 256, (240, 320, 3), dtype=np.uint8)).save(
+            stream, "JPEG", quality=45, optimize=True,
+        )
+        original = stream.getvalue()
+        batch_id = self.compression([("files", ("original.jpg", original, "image/jpeg"))])
+        self.wait_batch(batch_id)
+        child = self.card(batch_id)["items"][0]
+        self.assertEqual(child["status"], "KEEP_ORIGINAL")
+        self.assertEqual((child["source_width"], child["source_height"]), (320, 240))
+        self.assertEqual((child["result_id"], child["output_path"]), ("", ""))
+        self.assertEqual(child["source_sha256"], hashlib.sha256(original).hexdigest())
+        thumbnail_url = child["source_thumbnail_url"]
+        thumb = self.client.get(thumbnail_url)
+        self.assertEqual(thumb.status_code, 200, thumb.text if not thumb.is_success else "")
+        with Image.open(io.BytesIO(thumb.content)) as image:
+            self.assertEqual(image.size, (160, 120))
+        self.assertEqual(self.client.get(thumbnail_url.removesuffix("/thumbnail")).content, original)
+
+        Path(child["source_path"]).write_bytes(b"source changed after thumbnail was cached")
+        self.assertEqual(self.client.get(thumbnail_url).status_code, 404)
+
     def test_pagination_and_search_never_split_batch_or_guess_filename_membership(self):
         first, second = self.watermark(), self.watermark()
         page = self.client.get("/api/output-center/items?limit=1").json()["data"]
@@ -168,6 +193,25 @@ class BatchOutputContractTests(unittest.TestCase):
         page = self.client.get("/api/output-center/items").json()["data"]
         self.assertEqual(page["total_count"], 3)
         self.assertEqual(sum(i.get("card_type") == "batch" for i in page["items"]), 2)
+
+        endpoint = "/api/output-center/items"
+        batch_params = {"record_kind": "batch", "query": "source-1", "limit": 1}
+        batch_page = self.client.get(endpoint, params=batch_params).json()["data"]
+        self.assertEqual(batch_page["total_count"], 2)
+        self.assertEqual(len(batch_page["items"][0]["items"]), 3)
+        page_params = {**batch_params, "offset": batch_page["next_offset"], "list_revision": batch_page["list_revision"]}
+        next_batch = self.client.get(endpoint, params=page_params).json()["data"]
+        self.assertNotEqual(batch_page["items"][0]["batch_id"], next_batch["items"][0]["batch_id"])
+        self.assertEqual(self.client.get(endpoint, params={**page_params, "record_kind": "single"}).status_code, 409)
+        focused = self.client.get(endpoint, params={**batch_params, "batch_id": first["batch_id"]}).json()["data"]
+        self.assertEqual(focused["total_count"], 1)
+        self.assertEqual(focused["items"][0]["batch_id"], first["batch_id"])
+        self.assertEqual(len(focused["items"][0]["items"]), 3)
+
+        single_page = self.client.get(endpoint, params={**batch_params, "record_kind": "single"}).json()["data"]
+        self.assertEqual(single_page["total_count"], 1)
+        self.assertEqual(single_page["items"][0]["file_name"], singleton.name)
+        self.assertFalse(single_page["has_more"])
 
     def test_registered_wrong_sha_disables_child_actions_without_touching_file(self):
         batch = self.watermark()

@@ -17,6 +17,7 @@ from backend.image_compression_api import (
     smart_delivery_name_issues,
 )
 from engine.output.publish_safety import publish_verified_file_copy_no_overwrite
+from engine.storage.shared_task_registry import SharedTaskRegistry
 
 
 SMART_DELIVERY_NAME_STEM_LENGTH = 177
@@ -328,6 +329,75 @@ class SmartDeliveryApiTests(unittest.TestCase):
         ]
         self.assertEqual(len(completed_attempts), 1)
 
+    def test_multiple_selected_files_replay_by_selection_after_restart(self):
+        delivery_root = self.output_root / "智能交付"
+        self.client.close()
+        registry = SharedTaskRegistry(self.app_root)
+        registry.update(self.shared_registry)
+        self.shared_registry = registry
+        self.client = self.make_client()
+        for selection_mode, identities in (
+            ("result_ids", self.result_ids),
+            ("item_ids", [self.items_by_result[result_id]["id"] for result_id in self.result_ids]),
+        ):
+            with self.subTest(selection_mode=selection_mode):
+                copies_before = set(delivery_root.glob("*"))
+                key = f"delivery_request_multi_selection_{selection_mode}"
+                plan = self.preflight(**{selection_mode: identities}).json()["data"]
+                submission = {"plan_id": plan["plan_id"], "confirmed": True, "idempotency_key": key}
+                execute = self.client.post("/api/smart-delivery/execute", json=submission)
+                self.assertEqual(execute.status_code, 200, execute.text)
+                run = execute.json()["data"]
+                self.assertEqual(run["success_count"], len(identities))
+                copies = set(delivery_root.glob("*")) - copies_before
+                self.assertEqual(len(copies), len(identities))
+                self.assertEqual(sorted(sha256_file(file) for file in copies), sorted(sha256_file(file) for file in self.sources))
+                self.client.close()
+                self.shared_registry = SharedTaskRegistry(self.app_root)
+                self.client = self.make_client()
+                query = {"selection_mode": selection_mode, "selection_ids": ",".join(reversed(identities))}
+                status = self.client.get(f"/api/smart-delivery/requests/{key}", params=query)
+                self.assertEqual(status.status_code, 200, status.text)
+                self.assertEqual(status.json()["data"]["delivery_id"], run["delivery_id"])
+                self.assertEqual(status.json()["data"]["results"], run["results"])
+                conflict = self.client.get(f"/api/smart-delivery/requests/{key}", params={**query, "selection_ids": identities[0]})
+                self.assertEqual(conflict.status_code, 409, conflict.text)
+                # A new plan for the same selection must still replay the original request.
+                refreshed = self.preflight(**{selection_mode: identities}).json()["data"]
+                repeated = self.client.post("/api/smart-delivery/execute", json={**submission, "plan_id": refreshed["plan_id"]})
+                self.assertEqual(repeated.json()["data"]["delivery_id"], run["delivery_id"])
+                self.assertEqual(set(delivery_root.glob("*")), copies_before | copies)
+
+    def test_multi_delivery_partial_receipt_preserves_success_when_retrying_failed_result(self):
+        key = "delivery_request_partial_selection"
+        plan = self.preflight(result_ids=self.result_ids).json()["data"]
+        self.assertTrue(plan["ready"], plan)
+
+        def fail_second_copy(source, *args, **kwargs):
+            if source == self.sources[1]:
+                raise OSError("test: destination temporarily unavailable")
+            return publish_verified_file_copy_no_overwrite(source, *args, **kwargs)
+
+        with patch.object(image_compression_api_module, "publish_verified_file_copy_no_overwrite", side_effect=fail_second_copy):
+            response = self.client.post("/api/smart-delivery/execute", json={
+                "plan_id": plan["plan_id"], "confirmed": True, "idempotency_key": key,
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        replay = self.client.get(f"/api/smart-delivery/requests/{key}", params={
+            "selection_mode": "result_ids", "selection_ids": ",".join(self.result_ids),
+        }).json()["data"]
+        self.assertEqual(replay["status"], "partial")
+        self.assertEqual(replay["results"], response.json()["data"]["results"])
+        failed_ids = [row["source_result_id"] for row in replay["results"] if row["status"] == "failed"]
+        self.assertEqual(failed_ids, self.result_ids[1:])
+        retry_plan = self.preflight(result_ids=failed_ids).json()["data"]
+        retry = self.client.post("/api/smart-delivery/execute", json={
+            "plan_id": retry_plan["plan_id"], "confirmed": True, "idempotency_key": "delivery_request_partial_failed_only",
+        })
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual([item["source_result_id"] for item in retry.json()["data"]["results"]], failed_ids)
+        self.assertEqual(sorted(file.name for file in (self.output_root / "智能交付").iterdir()), sorted(source.name for source in self.sources))
+
     def test_idempotency_key_cannot_be_rebound_to_another_result(self):
         idempotency_key = f"delivery_request_{'b' * 32}"
         first_plan = self.preflight(result_ids=[self.result_ids[0]]).json()["data"]
@@ -588,6 +658,12 @@ class SmartDeliveryApiTests(unittest.TestCase):
                     raise RuntimeError(f"registry write failed for {key}")
                 super().__setitem__(key, value)
 
+            def update(registry, records):
+                for key in records:
+                    if should_fail("set", str(key)):
+                        raise RuntimeError(f"registry write failed for {key}")
+                super().update(records)
+
             def get(registry, key, default=None):
                 if should_fail("get", str(key)):
                     raise RuntimeError(f"registry read failed for {key}")
@@ -695,6 +771,31 @@ class SmartDeliveryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404, response.text)
         self.assertEqual(response.json()["detail"]["code"], "UNIFIED_RESULT_NOT_FOUND")
         self.assertEqual(set(self.shared_registry), before)
+
+    def test_continue_delivery_explains_outside_and_missing_compression_file(self):
+        managed = self.output_root / "图片压缩" / "交付优化" / "poster.png"
+        external = self.root / "other-output" / managed.name
+        external.parent.mkdir()
+        external.write_bytes(self.sources[0].read_bytes())
+        record = {
+            "task_id": "compression_poster", "result_id": "compression_result_poster",
+            "feature_key": "image_compression", "status": "completed",
+            "output_sha256": sha256_file(external), "source": str(self.originals[0]),
+        }
+        for path, reason in ((external, "输出位置"), (managed, "文件缺失")):
+            with self.subTest(path=path):
+                self.shared_registry[record["task_id"]] = {**record, "result_file": str(path), "output_path": str(path)}
+                response = self.preflight(result_ids=[record["result_id"]])
+                self.assertEqual(response.status_code, 404, response.text)
+                detail = response.json()["detail"]
+                self.assertEqual(detail["code"], "UNIFIED_RESULT_NOT_FOUND")
+                self.assertIn(path.name, detail["message"])
+                self.assertIn(reason, detail["message"])
+                self.assertIn("重新处理", detail["message"])
+        self.assertFalse((self.output_root / "智能交付").exists())
+        managed.parent.mkdir(parents=True)
+        managed.write_bytes(external.read_bytes())
+        self.assertTrue(self.preflight(result_ids=[record["result_id"]]).json()["data"]["ready"])
 
     def test_content_change_hidden_from_plan_hash_cache_is_still_blocked_at_copy(self):
         import os

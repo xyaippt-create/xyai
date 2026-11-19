@@ -151,13 +151,33 @@ class ContinueProcessingWorkflowTests(unittest.TestCase):
         )
         return app, compression_state, retouch_state
 
+    def test_large_png_remains_eligible_for_retouch_but_not_watermark(self):
+        with Image.new("RGB", (4200, 4200), (35, 105, 185)) as image:
+            image.save(self.source_a, compress_level=0)
+        self.assertGreater(self.source_a.stat().st_size, 50 * 1024 * 1024)
+        digest = sha256(self.source_a)
+        record = self.registry["task-a"]
+        record["output_sha256"] = digest
+        record["task_result"]["output_sha256"] = digest
+        self.registry["task-a"] = record
+
+        items = self.client.get("/api/output-center/items").json()["data"]["items"]
+        item = next(entry for entry in items if entry["result_id"] == "result-a")
+        response = self.client.get(f"/api/output-center/items/{item['id']}/continue-eligibility")
+        self.assertEqual(response.status_code, 200, response.text)
+        processors = {entry["key"]: entry for entry in response.json()["data"]["processors"]}
+        self.assertEqual(processors["local_retouch"]["status"], "AVAILABLE")
+        self.assertEqual(processors["batch_watermark"]["status"], "UNAVAILABLE")
+        self.assertEqual(processors["print_output"]["status"], "UNAVAILABLE")
+        self.assertIn("50MB", processors["batch_watermark"]["reason"])
+
     def test_result_a_to_compression_b_to_retouch_c_survives_restart(self):
         items = self.client.get("/api/output-center/items").json()["data"]["items"]
         existing = next(item for item in items if item["result_id"] == "result-a")
         self.assertTrue(existing["continue_eligible"])
         self.assertEqual(
             existing["continue_processor_keys"],
-            ["color_correction", "image_compression", "local_retouch", "batch_watermark"],
+            ["color_correction", "image_compression", "local_retouch", "batch_watermark", "print_output"],
         )
         eligibility_response = self.client.get(
             f"/api/output-center/items/{existing['id']}/continue-eligibility"
@@ -166,17 +186,17 @@ class ContinueProcessingWorkflowTests(unittest.TestCase):
         eligibility = eligibility_response.json()["data"]["processors"]
         self.assertEqual(
             [entry["label"] for entry in eligibility],
-            ["画质增强", "颜色校正", "图片压缩", "瑕疵修复", "添加水印"],
+            ["画质增强", "颜色校正", "图片压缩", "瑕疵修复", "添加水印", "喷绘出图"],
         )
         self.assertEqual(
             [entry["status"] for entry in eligibility],
-            ["UNAVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE"],
+            ["UNAVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE"],
         )
         self.assertEqual(
             [entry["history_status"] for entry in eligibility],
-            ["PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED"],
+            ["PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED", "NOT_PROCESSED"],
         )
-        self.assertEqual([entry["repeatable"] for entry in eligibility], [False, True, True, True, True])
+        self.assertEqual([entry["repeatable"] for entry in eligibility], [False, True, True, True, True, True])
         self.assertEqual(eligibility[0]["reason"], "已完成画质增强。")
 
         intake_b_response = self.client.post("/api/image-compression/intake-result", json={"result_id": "result-a"})
@@ -302,7 +322,7 @@ class ContinueProcessingWorkflowTests(unittest.TestCase):
                 f"/api/output-center/items/{existing['id']}/continue-eligibility"
             )
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(len(response.json()["data"]["processors"]), 5)
+            self.assertEqual(len(response.json()["data"]["processors"]), 6)
         finally:
             self.source_a.write_bytes(original)
 

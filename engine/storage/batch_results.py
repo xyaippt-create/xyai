@@ -1,7 +1,7 @@
 """Output Center's batch view, joined only through persisted item identities.
 
-Legacy membership is read from explicit batch.items records. Files, names and
-timestamps never establish membership; unbound historical files stay singletons.
+Membership comes from explicit batch items or the batch identity on a saved
+retouch Result. Files, names and timestamps never establish membership.
 """
 from __future__ import annotations
 
@@ -43,16 +43,45 @@ def item_identity(batch_id, item_id, feature_type, source_id=""):
             "feature_type": feature_type, "source_id": source_id or f"source_{item_id}"}
 
 
+def _retouch_batch_records(records):
+    groups = {}
+    for record in records:
+        if value(record, "feature_key") != "local_retouch" or str(value(record, "status")).lower() != "completed":
+            continue
+        batch_id = str(value(record, "batch_id"))
+        item_id = str(value(record, "batch_item_id"))
+        task_id = str(value(record, "task_id"))
+        result_id = str(value(record, "result_id"))
+        path = str(value(record, "output_path") or value(record, "result_file"))
+        sha = str(value(record, "output_sha256"))
+        if not all((batch_id, item_id, task_id, result_id, path, sha)):
+            continue
+        groups.setdefault(batch_id, {})[(item_id, result_id)] = {
+            **item_identity(batch_id, item_id, "local_retouch", str(value(record, "source_id"))),
+            "task_id": task_id, "result_id": result_id, "status": "COMPLETED",
+            "output_path": path, "output_sha256": sha,
+            "file_name": str(value(record, "original_filename") or value(record, "output_filename")),
+            "source_path": str(value(record, "source_path")),
+            "source_sha256": str(value(record, "source_sha256")),
+            "output_size_bytes": value(record, "output_size_bytes") or None,
+            "saved_at": str(value(record, "completed_at") or value(record, "created_at")),
+        }
+    return [
+        {"record_kind": "local_retouch_batch", "batch_id": batch_id,
+         "created_at": max(item["saved_at"] for item in items.values()), "items": list(items.values())}
+        for batch_id, items in groups.items()
+    ]
+
+
 def batch_views(registry):
     """Return metadata only. The selected page validates actual output files."""
     batches = {}
-    for record in list((registry or {}).values()):
-        if not isinstance(record, Mapping):
-            continue
+    records = [record for record in (registry or {}).values() if isinstance(record, Mapping)]
+    for record in records + _retouch_batch_records(records):
         kind = record.get("record_kind")
-        if kind == "compression_batch":
+        if kind in {"compression_batch", "local_retouch_batch"}:
             batch_id = str(record.get("batch_id") or "")
-            feature = "image_compression"
+            feature = "image_compression" if kind == "compression_batch" else "local_retouch"
         else:
             reference = batch_reference(record)
             if reference is None:
@@ -113,6 +142,8 @@ def batch_views(registry):
                 "error": str(raw.get("error") or raw.get("failure_reason") or ""),
                 "available": False,
             })
+            if feature == "image_compression" and status == "KEEP_ORIGINAL":
+                items[-1].update(source_width=source.get("width"), source_height=source.get("height"))
         counts = Counter(i["status"] for i in items)
         original = sum(i["original_bytes"] for i in items)
         final = sum(i["final_bytes"] if i["status"] in {"COMPLETED", "KEEP_ORIGINAL"}
@@ -121,7 +152,7 @@ def batch_views(registry):
         if isinstance(created, (int, float)):
             created = datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
         category = "compression" if feature == "image_compression" else feature
-        label = "批量压缩" if feature == "image_compression" else "批量水印"
+        label = {"image_compression": "批量压缩", "batch_watermark": "批量水印", "local_retouch": "同位置批量修复"}[feature]
         batches[batch_id] = {
             "id": batch_id, "card_type": "batch", "batch_schema": BATCH_SCHEMA,
             "batch_id": batch_id, "feature_type": feature, "processing_type": category,

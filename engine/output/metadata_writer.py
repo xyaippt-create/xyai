@@ -11,10 +11,11 @@ import re
 import struct
 import zlib
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFile, PngImagePlugin
 
 from runtime import APP_VERSION
 
@@ -121,8 +122,8 @@ def _effective_dpi(image: Image.Image, exif: Image.Exif) -> tuple[float, float] 
 
 
 def _read_effective_dpi(data: bytes) -> tuple[float, float] | None:
-    with Image.open(io.BytesIO(data)) as image:
-        return _effective_dpi(image, image.getexif())
+    with _open_metadata_image(data) as image:
+        return _effective_dpi(image, Image.Image.getexif(image))
 
 
 def _dpi_equal(expected: tuple[float, float] | None, actual: tuple[float, float] | None) -> bool:
@@ -175,13 +176,42 @@ def _decode_xp_text(value: Any) -> str:
     return str(value or "")
 
 
-def _read_exif(data: bytes) -> Image.Exif:
+@contextmanager
+def _open_metadata_image(data: bytes):
+    """Read all static PNG metadata chunks, including those after IDAT.
+
+    Raster integrity remains the responsibility of the existing full-image
+    signatures and persisted-file verifiers; metadata reads need no raster.
+    Pillow's chunk handlers retain its text/ICC decompression safety limits.
+    """
     with Image.open(io.BytesIO(data)) as image:
-        # Pillow reads JPEG APP markers before SOS in _open(). Metadata access
-        # needs no pixel decode. PNG may carry metadata after IDAT; keep its load.
-        if image.format != "JPEG":
+        if image.format == "PNG" and not image.is_animated:
+            stream = io.BytesIO(data)
+            stream.seek(len(PNG_SIGNATURE))
+            with PngImagePlugin.PngStream(stream) as png:
+                while True:
+                    chunk_type, position, length = png.read()
+                    # IDAT/IEND and animation handlers terminate pixel decoding.
+                    # Consume their payloads and CRC without invoking a decoder.
+                    if chunk_type in {b"IDAT", b"IEND"}:
+                        payload = ImageFile._safe_read(stream, length)
+                    else:
+                        try:
+                            payload = png.call(chunk_type, position, length)
+                        except AttributeError:
+                            payload = ImageFile._safe_read(stream, length)
+                    png.crc(chunk_type, payload)
+                    if chunk_type == b"IEND":
+                        break
+                image.info.update(png.im_info)
+        elif image.format != "JPEG":
             image.load()
-        return image.getexif()
+        yield image
+
+
+def _read_exif(data: bytes) -> Image.Exif:
+    with _open_metadata_image(data) as image:
+        return Image.Image.getexif(image)
 
 
 def _merged_exif_bytes(output_data: bytes, source_data: bytes | None, *, normalize_orientation: bool) -> bytes:
@@ -238,8 +268,7 @@ def _extract_xmp(data: bytes | None) -> bytes:
             return b""
         return b""
     try:
-        with Image.open(io.BytesIO(data)) as image:
-            image.load()
+        with _open_metadata_image(data) as image:
             value = image.info.get(_PNG_XMP_KEY) or image.info.get("xmp") or b""
             return value.encode("utf-8") if isinstance(value, str) else value if isinstance(value, bytes) else b""
     except Exception:
@@ -497,6 +526,10 @@ def _source_metadata_facts(data: bytes | None) -> dict[str, str]:
         if tag not in exif:
             continue
         value = exif.get(tag)
+        if tag == 34853:
+            # GPSInfo stores an IFD offset, which moves when EXIF is rewritten.
+            # Compare every actual GPS value, not its position in the file.
+            value = sorted(exif.get_ifd(tag).items())
         facts[label] = _decode_xp_text(value) if tag in {40091, 40092, 40093, 40094, 40095} else repr(value)
     return facts
 
@@ -557,6 +590,17 @@ def _jpeg_segment(marker: int, payload: bytes) -> bytes:
     if length > 0xFFFF:
         raise ValueError("JPEG_METADATA_SEGMENT_TOO_LARGE")
     return b"\xff" + bytes([marker]) + struct.pack(">H", length) + payload
+
+
+def set_jpeg_jfif_density(data: bytes, unit: int, density: tuple[int, int]) -> bytes:
+    """Carry the source density into a newly encoded JPEG's JFIF header."""
+    segments, tail = _jpeg_segments(data)
+    for index, segment in enumerate(segments):
+        payload = _jpeg_payload(segment)
+        if _jpeg_marker(segment) == 0xE0 and payload.startswith(b"JFIF\x00") and len(payload) >= 14:
+            segments[index] = _jpeg_segment(0xE0, payload[:7] + struct.pack(">BHH", unit, *density) + payload[12:])
+            return b"\xff\xd8" + b"".join(segments) + tail
+    raise ValueError("JPEG_JFIF_HEADER_MISSING")
 
 
 def _photoshop_resources(payload: bytes) -> list[tuple[bytes, int, bytes, bytes]] | None:
@@ -951,11 +995,9 @@ def _write_png_metadata(output_data: bytes, source_data: bytes | None, *, normal
 def read_hdde_metadata(path_or_bytes: str | Path | bytes) -> dict[str, Any]:
     data = path_or_bytes if isinstance(path_or_bytes, bytes) else Path(path_or_bytes).read_bytes()
     xmp = _read_xmp_fields(data)
-    with Image.open(io.BytesIO(data)) as image:
-        if image.format != "JPEG":
-            image.load()
+    with _open_metadata_image(data) as image:
         info = dict(image.info or {})
-        exif = image.getexif()
+        exif = Image.Image.getexif(image)
         software = str(info.get("Software") or xmp.get("software") or exif.get(305) or "")
         comment = str(info.get("Comment") or info.get("Comments") or _decode_xp_text(exif.get(40092)) or xmp.get("comment") or "")
         keywords = str(info.get("Keywords") or xmp.get("keywords") or _decode_xp_text(exif.get(40094)) or "")

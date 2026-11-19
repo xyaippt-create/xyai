@@ -21,7 +21,7 @@ test("independent naming is absent from navigation and public copy", () => {
   const route = APP_ROUTES.find((item) => item.key === "smart-delivery");
   assert.equal(route?.name, "文件交付");
   assert.equal(route?.showInNavigation, false);
-  assert.match(shell, /\{ label: "交付", items: \["outputs"\] \}/);
+  assert.match(shell, /\{ label: "交付", items: \["outputs", "print-8k"\] \}/);
   assert.doesNotMatch([delivery, outputCenter, shell].join("\n"), /智能命名|批量命名/);
   assert.equal(fs.existsSync(path.join(root, "src", "BatchImageNamingPanel.jsx")), false);
 });
@@ -29,7 +29,7 @@ test("independent naming is absent from navigation and public copy", () => {
 test("output center keeps an internal compatibility handoff without a naming product entry", () => {
   assert.match(outputCenter, /\/smart-delivery\?results=/);
   assert.match(outputCenter, /\/smart-delivery\?items=/);
-  assert.match(outputCenter, />准备交付</);
+  assert.match(outputCenter, /生成交付副本\s*<span className="hdde-output-delivery-count"[^>]*>\{deliveryCount\}<\/span>/);
   assert.match(outputCenter, /加入交付清单/);
   assert.doesNotMatch(outputCenter, /发送到智能命名|进入智能命名/);
 });
@@ -38,8 +38,12 @@ test("compatibility delivery page uses fixed source filenames and one public pre
   assert.match(delivery, /JSON\.stringify\(\{ \[selectionMode\]: selectedValues, rules: \{\} \}\)/);
   assert.match(delivery, /\/api\/smart-delivery\/preflight/);
   assert.match(delivery, /\/api\/smart-delivery\/execute/);
-  assert.match(delivery, /plan_id: preflight\.plan_id, confirmed: true/);
-  assert.match(delivery, /公共文件安全检查通过/);
+  assert.match(delivery, /plan_id: preflight\.plan_id, confirmed: true, idempotency_key: requestKey/);
+  assert.doesNotMatch(delivery, /type="checkbox"|确认并生成交付副本/);
+  const batchPanel = read("src/BatchCompressionPanel.jsx");
+  assert.doesNotMatch(batchPanel, /我已核对选择项|确认批量交付|setConfirmOpen/);
+  assert.match(batchPanel, /data-testid="batch-delivery-open"[^\n]*beginDelivery\(\)/);
+  assert.match(app, /pathname === "\/smart-delivery" \? \{ startDelivery: true \}/);
   assert.doesNotMatch(delivery, /content-names|base_mode|prefix|suffix|find_text|replace_text|sequence_enabled|date_enabled|template/);
 });
 
@@ -70,22 +74,18 @@ test("backend removes A-line APIs while preserving public Delivery safety and co
   assert.match(backend, /"code": "DELIVERY_NAMING_RULES_RETIRED"/);
 });
 
-test("batch-only CSS is removed without deleting shared delivery styles", () => {
-  assert.doesNotMatch(css, /\.hdde-batch-|batch-naming-page/);
+test("retired naming styles are removed while batch compression and delivery styles remain", () => {
+  assert.doesNotMatch(css, /\.hdde-batch-(?:image-)?naming|batch-naming-page/);
+  assert.match(css, /\.hdde-batch-compression/);
   assert.match(css, /\.hdde-delivery-page/);
-  assert.match(css, /\.hdde-delivery-ready/);
-  assert.match(css, /\.hdde-delivery-confirm/);
+  assert.match(css, /\.hdde-delivery-result-list/);
 });
 
-test("delivery completion footer is a compact full-width action module", () => {
-  assert.match(delivery, /className="hdde-delivery-footer-actions" aria-label="交付完成后的下一步"/);
-  assert.match(delivery, /className="hdde-delivery-footer-actions__copy"/);
-  assert.match(
-    css,
-    /\.hdde-delivery-footer-actions\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
-  );
-  assert.match(
-    css,
-    /\.hdde-delivery-footer-actions\s*>\s*\.hdde-primary-action\s*\{[^}]*min-height:\s*44px;[^}]*margin:\s*0;/s,
-  );
+test("receipt groups file and directory actions and shows the source name when it differs", () => {
+  assert.match(delivery, /item\.source_file_name !== filename/);
+  assert.match(delivery, /total === 1 \? "hdde-primary-action" : "hdde-secondary-action"/);
+  assert.match(delivery, /total > 1 && !hasFailures \? "hdde-primary-action" : "hdde-secondary-action"/);
+  assert.match(delivery, /<nav className="hdde-receipt-navigation" aria-label="交付完成后的下一步">/);
+  assert.match(delivery, /completedPrint && <a [^>]*href="\/print-8k"/);
+  assert.doesNotMatch(delivery, /继续查看正式成品|hdde-delivery-result-summary/);
 });

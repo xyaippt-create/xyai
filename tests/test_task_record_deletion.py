@@ -18,7 +18,7 @@ from tests.support.app_runtime import isolated_runtime_logging
 
 import main
 from backend.image_compression_api import register_image_compression_routes
-from engine.storage.shared_task_registry import SharedTaskRegistry
+from engine.storage.shared_task_registry import SharedTaskRegistry, SharedTaskRegistryError
 
 
 class TaskRecordDeletionTests(unittest.TestCase):
@@ -217,17 +217,37 @@ class TaskRecordDeletionTests(unittest.TestCase):
             "task_cancelled": {"task_id": "task_cancelled", "status": "cancelled"},
             "task_processing": {"task_id": "task_processing", "status": "processing"},
             "task_blocked": {"task_id": "task_blocked", "status": "blocked"},
+            "legacy_completed_alias": {"task_id": "task_completed", "status": "completed"},
         }
-        for task_id, record in records.items():
-            self.registry[task_id] = record
+        self.registry.persist_facts(records)
 
-        outcomes = {task_id: self.registry.delete_task_fact(task_id) for task_id in records}
+        with patch.object(self.registry, "_commit", wraps=self.registry._commit) as commit:
+            outcomes = self.registry.delete_task_facts(records)
+            self.assertEqual(commit.call_count, 1)
+            self.registry.delete_task_facts(["task_processing", "task_blocked", "missing_task"])
+            self.assertEqual(commit.call_count, 1)
 
         self.assertEqual(
-            {task_id for task_id, outcome in outcomes.items() if outcome["deleted"]},
-            {"task_pending", "task_completed", "task_failed", "task_cancelled"},
+            [outcome["task_id"] for outcome in outcomes if outcome["deleted"]],
+            ["task_pending", "task_completed", "task_failed", "task_cancelled"],
         )
         self.assertEqual(set(self.registry), {"task_processing", "task_blocked"})
+        self.assertEqual(set(SharedTaskRegistry(self.root)), {"task_processing", "task_blocked"})
+
+    def test_bulk_delete_conflict_leaves_all_task_facts_intact(self) -> None:
+        records = {
+            "task_safe": {"task_id": "task_safe", "status": "failed"},
+            "task_conflict": {"task_id": "task_conflict", "status": "completed", "result_id": "occupied"},
+            "occupied": {"task_id": "occupied", "status": "processing"},
+        }
+        self.registry.persist_facts(records)
+        before = self.registry.path.read_bytes()
+
+        with self.assertRaisesRegex(SharedTaskRegistryError, "SHARED_TASK_RESULT_REFERENCE_CONFLICT"):
+            self.registry.delete_task_facts(["task_safe", "task_conflict"])
+
+        self.assertEqual(dict(self.registry), records)
+        self.assertEqual(self.registry.path.read_bytes(), before)
 
     def test_pending_runtime_queue_and_task_indexes_are_revoked(self) -> None:
         formal_root = self.root / "formal"

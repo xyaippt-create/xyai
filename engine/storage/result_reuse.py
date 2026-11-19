@@ -81,6 +81,12 @@ def registered_result_fact(registry: Mapping[str, Any] | None, result_id: str) -
                 "raw_path": str(candidate.get("result_file") or candidate.get("output_path") or (task_result.get("result_file") if candidate is record else "") or (result.get("result_file") if candidate is record else "") or (result.get("output_path") if candidate is record else "") or (result.get("final_output_path") if candidate is record else "") or "").strip(),
                 "status": str(candidate.get("task_status") or candidate.get("status") or record.get("task_status") or record.get("status") or "").strip().lower(),
                 "registered_output_sha256": str(candidate.get("output_sha256") or (task_result.get("output_sha256") if candidate is record else "") or (result.get("output_sha256") if candidate is record else "") or "").strip().lower(),
+                # Read the parent edge from one mapping only: legacy Result references
+                # carry their own Task as top-level source_task_id beside a nested edge.
+                "lineage_edge": next(
+                    (edge for edge in map(result_lineage_fields, (candidate, record, task_result, result)) if edge),
+                    {},
+                ),
             })
 
     if not matches:
@@ -117,7 +123,7 @@ def resolve_reusable_result_source(
     result_id: str,
     formal_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     allowed_suffixes: set[str] | frozenset[str],
 ) -> dict[str, Any]:
     source = registered_result_fact(registry, result_id)
@@ -141,7 +147,7 @@ def resolve_reusable_result_source(
         raise ResultReuseError("RESULT_REUSE_FILE_UNREADABLE", "原结果文件当前无法读取。") from exc
     if size_bytes <= 0:
         raise ResultReuseError("RESULT_REUSE_FILE_EMPTY", "原结果文件为空，无法继续处理。")
-    if size_bytes > int(max_bytes):
+    if max_bytes is not None and size_bytes > int(max_bytes):
         raise ResultReuseError("RESULT_REUSE_FILE_TOO_LARGE", "原结果超过目标处理器的 50MB 输入限制。", status_code=413)
     if source["registered_output_sha256"] != actual_sha256:
         raise ResultReuseError("RESULT_REUSE_INTEGRITY_MISMATCH", "原结果文件与登记记录不一致，已阻止继续处理。")
@@ -181,9 +187,11 @@ def result_lineage(registry: Mapping[str, Any], result_id: str) -> dict[str, Any
         fact = resolved["fact"]
         if not rows and result_reuse_denial(fact):
             raise ResultReuseError("RESULT_REUSE_NOT_ACCEPTED", result_reuse_denial(fact))
-        parent = result_lineage_fields(fact)
+        parent = dict(resolved["lineage_edge"])
         source_meta = _mapping(fact.get("source_metadata"))
-        source_sha = str(fact.get("source_sha256") or source_meta.get("sha256") or fact.get("source_sha_before") or "")
+        # A reused round's input digest was measured at intake as source_result_sha256;
+        # the 4K path records only that, not a separate source_sha256.
+        source_sha = str(fact.get("source_sha256") or source_meta.get("sha256") or fact.get("source_sha_before") or parent.get("source_result_sha256") or "")
         source_path = str(fact.get("source_path") or fact.get("source") or source_meta.get("path") or "")
         rows.append({"task_id": resolved["source_task_id"], "result_id": current_id,
                      "feature_key": resolved["source_feature_key"],

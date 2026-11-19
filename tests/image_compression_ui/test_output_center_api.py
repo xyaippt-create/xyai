@@ -5,12 +5,14 @@ from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image, ImageFile
 
 from backend.image_compression_api import register_image_compression_routes
+from backend.print_output_api import register_print_output_routes
 
 
 class OutputCenterApiTests(unittest.TestCase):
@@ -113,6 +115,47 @@ class OutputCenterApiTests(unittest.TestCase):
         self.client.close()
         self.temporary.cleanup()
 
+    def test_saved_retouch_batches_group_retained_results_and_respect_old_removals(self):
+        batch_id = "f" * 32
+        task = self.shared_registry.pop("retouch_task_001")
+        result_id = task["result_id"]
+        path = self.paths["retouch"]
+        task["result"].update(batch_id=batch_id, batch_item_id="a" * 32,
+                              output_sha256=sha256(path.read_bytes()).hexdigest())
+        self.shared_registry[result_id] = {**task, "record_kind": "result"}
+        self.shared_registry["pending"] = {"feature_key": "local_retouch", "status": "completed",
+                                           "batch_id": batch_id, "batch_item_id": "b" * 32, "task_id": "pending"}
+        url = "/api/output-center/items?category=local_retouch"
+        batch_url = f"{url}&record_kind=batch&batch_id={batch_id}"
+        card, = self.client.get(batch_url).json()["data"]["items"]
+        self.assertEqual(card["batch_id"], batch_id)
+        item, = card["items"]
+        self.assertEqual(item["result_id"], result_id)
+        self.assertTrue(item["available"])
+        self.assertEqual(self.client.get(url + "&record_kind=single").json()["data"]["total_count"], 0)
+        self.shared_registry["legacy_removal"] = {"record_kind": "output_center_hidden", "item_id": item["id"],
+                                                  "removed_result_id": result_id, "output_path": str(path)}
+        self.assertEqual(self.client.get(url).json()["data"]["total_count"], 0)
+        self.assertTrue(path.is_file())
+
+        def add_saved_item(suffix):
+            new_path = path.with_name(f"saved-{suffix}.png")
+            new_path.write_bytes(path.read_bytes())
+            new_task = {**task, "task_id": f"task-{suffix}", "result_id": f"result-{suffix}",
+                        "output_path": str(new_path), "result_file": str(new_path),
+                        "result": {**task["result"], "batch_item_id": suffix * 32}}
+            self.shared_registry[new_task["task_id"]] = new_task
+            return new_path
+
+        removed_path = add_saved_item("c")
+        removed = self.client.post(f"/api/output-center/items/{batch_id}/clear")
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertEqual(self.client.get(batch_url).json()["data"]["total_count"], 0)
+        self.assertTrue(removed_path.is_file())
+        add_saved_item("d")
+        reopened, = self.client.get(batch_url).json()["data"]["items"]
+        self.assertEqual([child["result_id"] for child in reopened["items"]], ["result-d"])
+
     def test_large_header_is_listed_without_disabling_pillow_safety(self):
         # Real existing image, lowered guard to exercise the same failure cheaply.
         with patch.object(Image, "MAX_IMAGE_PIXELS", 1000):
@@ -124,6 +167,60 @@ class OutputCenterApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 422)
             self.assertEqual(response.json()["detail"]["code"], "OUTPUT_THUMBNAIL_UNAVAILABLE")
             self.assertEqual(Image.MAX_IMAGE_PIXELS, 1000)
+
+    def test_large_print_result_gets_a_thumbnail_within_the_print_pixel_limit(self):
+        register_print_output_routes(self.app, registry=self.shared_registry, user_dirs_provider=lambda: {
+            "app_data_root": self.app_root, "normal_input_dir": self.tmp, "output_root": self.output_root,
+        })
+        source = io.BytesIO()
+        with Image.new("L", (5, 4), 210) as image:
+            image.paste(40, (0, 0, 2, 4))
+            image.save(source, "PNG")
+        result = self.client.post("/api/print-output/render", files={"file": ("poster.png", source.getvalue())},
+                                  data={"request_id": str(uuid4()), "width": 10000, "height": 8000, "ppi": 150})
+        self.assertEqual(result.status_code, 200, result.text)
+        item, = self.client.get("/api/output-center/items?category=print_output").json()["data"]["items"]
+        self.assertEqual(item["result_id"], result.json()["result_id"])
+        response = self.client.get(item["thumbnail_url"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-hdde-thumbnail-cache"], "MISS")
+        with Image.open(io.BytesIO(response.content)) as thumbnail:
+            self.assertEqual(thumbnail.size, (768, 614))
+            self.assertLess(thumbnail.getpixel((10, 305)), thumbnail.getpixel((750, 305)))
+        self.assertEqual(self.client.get(item["thumbnail_url"]).headers["x-hdde-thumbnail-cache"], "HIT")
+
+        # The same pixels in a regular output still use the ordinary decode budget.
+        self.paths["4k"].write_bytes(Path(self.shared_registry[item["task_id"]]["result_file"]).read_bytes())
+        ordinary = next(i for i in self.client.get("/api/output-center/items").json()["data"]["items"]
+                        if i["file_name"] == self.paths["4k"].name)
+        self.assertEqual(self.client.get(ordinary["thumbnail_url"]).status_code, 422)
+
+    def test_large_compression_outputs_show_their_own_thumbnails(self):
+        directory = self.paths["compression"].parent
+        with Image.new("L", (8000, 5100)) as image:
+            for suffix, left, right in (("jpg", 30, 200), ("png", 180, 60)):
+                image.paste(left, (0, 0, 4000, 5100))
+                image.paste(right, (4000, 0, 8000, 5100))
+                image.save(directory / f"poster.{suffix}")
+
+        items = self.client.get("/api/output-center/items?category=compression").json()["data"]["items"]
+        by_name = {item["file_name"]: item for item in items}
+        for name, media_type, left, right in (("poster.jpg", "image/jpeg", 30, 200),
+                                              ("poster.png", "image/png", 180, 60)):
+            with self.subTest(name=name):
+                url = by_name[name]["thumbnail_url"]
+                first = self.client.get(url)
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.headers["content-type"], media_type)
+                self.assertEqual(first.headers["x-hdde-thumbnail-cache"], "MISS")
+                with Image.open(io.BytesIO(first.content)) as thumbnail:
+                    self.assertEqual(thumbnail.size, (768, 490))
+                    gray = thumbnail.convert("L")
+                    self.assertAlmostEqual(gray.getpixel((10, 245)), left, delta=2)
+                    self.assertAlmostEqual(gray.getpixel((750, 245)), right, delta=2)
+                cached = self.client.get(url)
+                self.assertEqual(cached.headers["x-hdde-thumbnail-cache"], "HIT")
+                self.assertEqual(cached.content, first.content)
 
     def test_corrupt_cache_is_regenerated_and_source_is_unchanged(self):
         item = next(i for i in self.client.get("/api/output-center/items").json()["data"]["items"] if i["file_name"] == "standard.png")
@@ -294,6 +391,32 @@ class OutputCenterApiTests(unittest.TestCase):
         self.assertEqual((opened_file.status_code, opened_folder.status_code), (200, 200))
         self.assertEqual(self.opened, [str(self.paths["color"].resolve()), str(self.paths["color"].parent.resolve())])
 
+    def test_color_comparison_uses_retained_files_after_task_is_cleared(self):
+        task_id, result_id = "color_task_compare", "color_result_compare"
+        result = {
+            "task_id": task_id,
+            "result_id": result_id,
+            "feature_key": "color_correction",
+            "task_family": "color_correction",
+            "status": "completed",
+            "source_path": self.source,
+            "output_path": self.paths["color"],
+        }
+        self.shared_registry[task_id] = {**result, "result": result}
+
+        def color_item():
+            response = self.client.get("/api/output-center/items", params={"category": "color_correction"})
+            self.assertEqual(response.status_code, 200, response.text)
+            return next(item for item in response.json()["data"]["items"] if item["result_id"] == result_id)
+
+        self.assertTrue(color_item()["compare_url"].startswith(f"/color-correction/result?task_id={task_id}"))
+        self.shared_registry[result_id] = {**self.shared_registry.pop(task_id), "record_kind": "result"}
+        item = color_item()
+        self.assertEqual(item["compare_url"], f"/outputs/compare?item={item['id']}")
+        self.assertEqual(self.client.get(f"/api/color-correction/tasks/{task_id}").status_code, 404)
+        self.assertEqual(self.client.get(item["source_preview_url"]).content, self.source.read_bytes())
+        self.assertEqual(self.client.get(item["preview_url"]).content, self.paths["color"].read_bytes())
+
     def test_webp_result_is_visible_with_webp_preview_and_thumbnail(self):
         result_path = self.output_root / "图片压缩" / "交付优化" / "compressed.webp"
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -397,6 +520,60 @@ class OutputCenterApiTests(unittest.TestCase):
         category = self.client.get("/api/output-center/items?limit=12&category=local_retouch").json()["data"]
         self.assertEqual(category["total_count"], 1)
         self.assertEqual(category["items"][0]["processing_type"], "local_retouch")
+
+    def test_comparison_deep_link_loads_only_requested_details_and_rechecks_source(self):
+        path = self.paths["retouch"].resolve()
+        item_id = sha256(f"local_retouch|{path}".encode("utf-8")).hexdigest()[:24]
+        comparison_url = f"/api/output-center/items/{item_id}/comparison"
+        comparison = self.client.get(comparison_url)
+        self.assertEqual(comparison.status_code, 200, comparison.text)
+        data = comparison.json()["data"]
+        self.assertEqual(data["file_name"], path.name)
+        self.assertEqual(self.client.get(data["preview_url"]).content, path.read_bytes())
+        self.assertEqual(self.client.get(data["source_preview_url"]).content, self.source.read_bytes())
+
+        index = self.app.state.image_compression_api_state["output_center_index"]
+        hydrated = {key for key, item in index.items() if "delivery_eligible_base" in item}
+        self.assertEqual(hydrated, {item_id})
+        self.source.unlink()
+        missing = self.client.get(comparison_url)
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertEqual(missing.json()["detail"]["code"], "OUTPUT_SOURCE_MAPPING_UNAVAILABLE")
+
+    def test_page_revision_rejects_offsets_after_equal_count_remove_and_add(self):
+        endpoint = "/api/output-center/items"
+        first = self.client.get(endpoint, params={"limit": 2}).json()["data"]
+        removed = first["items"][0]
+        files = {file.name: file for file in self.paths.values()}
+        removed_file = files[removed["file_name"]]
+        original_sha = sha256(removed_file.read_bytes()).hexdigest()
+        self.assertEqual(self.client.post(f"{endpoint}/{removed['id']}/clear").status_code, 200)
+        Image.new("RGB", (85, 60), (80, 120, 150)).save(self.paths["1080p"].with_name("inserted.png"))
+
+        params = {"limit": 2, "offset": first["next_offset"], "list_revision": first["list_revision"]}
+        stale = self.client.get(endpoint, params=params)
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["detail"]["code"], "OUTPUT_CENTER_LIST_CHANGED")
+        self.assertEqual(sha256(removed_file.read_bytes()).hexdigest(), original_sha)
+        current = self.client.get(endpoint).json()["data"]
+        expected = [item["id"] for item in current["items"]]
+        self.assertEqual(current["total_count"], first["total_count"])
+        self.assertNotIn(removed["id"], expected)
+        self.assertNotEqual(current["list_revision"], first["list_revision"])
+
+        refreshed = self.client.get(endpoint, params={"limit": 2, "selected_id": expected[-1]}).json()["data"]
+        self.assertTrue(refreshed["selection_matches"])
+        self.assertNotIn(expected[-1], [item["id"] for item in refreshed["items"]])
+        remainder = self.client.get(endpoint, params={
+            "limit": 32, "offset": refreshed["next_offset"], "list_revision": refreshed["list_revision"],
+        }).json()["data"]
+        actual = [item["id"] for page in (refreshed, remainder) for item in page["items"]]
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+        for changed in ({"sort": "oldest"}, {"query": "inserted"}, {"category": "1080p"}, {"scope": "history"}):
+            with self.subTest(changed=changed):
+                response = self.client.get(endpoint, params={**params, "list_revision": refreshed["list_revision"], **changed})
+                self.assertEqual(response.status_code, 409)
 
     def test_missing_file_is_not_kept_as_a_normal_output(self):
         data = self.client.get("/api/output-center/items").json()["data"]

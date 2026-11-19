@@ -139,11 +139,16 @@ export function SliderCompareStage({
   enhancedUrl,
   fileName,
   deliveryBadge,
+  showIdentity = true,
+  split: controlledSplit,
+  onSplitChange,
   onEnhancedAssetLoad,
   onEnhancedAssetError,
 }) {
   const stageRef = useRef(null);
-  const [split, setSplit] = useState(50);
+  const [localSplit, setLocalSplit] = useState(50);
+  const split = controlledSplit ?? localSplit;
+  const setSplit = onSplitChange ?? setLocalSplit;
   const [dragging, setDragging] = useState(false);
   const [zoom, setZoom] = useState({ active: false, x: 0, y: 0, xPct: 50, yPct: 50 });
   const [loadError, setLoadError] = useState(false);
@@ -226,9 +231,9 @@ export function SliderCompareStage({
       <div className="absolute right-5 top-5 z-20 rounded border border-[#8fb0ff]/40 bg-[#2d6fe8]/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.18em] text-[#9ab7ff] backdrop-blur-md">
         {deliveryBadge}
       </div>
-      <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-xs tracking-[0.16em] text-white/55 backdrop-blur-md">
+      {showIdentity ? <div className="absolute bottom-4 right-4 z-20 max-w-[85%] truncate rounded border border-white/10 bg-black/55 px-4 py-2 text-right font-mono text-xs tracking-[0.16em] text-white/55 backdrop-blur-md">
         影界 HDDE {PRODUCT_VERSION_LABEL} · {fileName || "等待真实上传资产"} · HD Delivery Engine
-      </div>
+      </div> : null}
       <ZoomGlass zoom={zoom} originalUrl={originalUrl} enhancedUrl={enhancedUrl} split={split} />
     </div>
   );

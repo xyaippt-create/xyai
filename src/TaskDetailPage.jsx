@@ -649,7 +649,7 @@ export default function TaskDetailPage({
   }
 
   return (
-    <section className="hdde-detail-page" data-testid="unified-result-page">
+    <section className={visibleTaskStatus === "completed" ? "hdde-detail-page hdde-detail-page--review" : "hdde-detail-page"} data-testid="unified-result-page">
       <header className="hdde-detail-header">
         <div className="hdde-detail-heading">
           <p className="hdde-eyebrow">{visibleTaskStatus === "completed" ? "统一结果" : "任务状态"}</p>
@@ -663,6 +663,7 @@ export default function TaskDetailPage({
 
       {visibleTaskStatus === "completed" ? (
         <div className="hdde-detail-result-flow">
+          <div className="hdde-detail-review-workbench">
           {showReferenceCompare ? <section className="hdde-detail-panel hdde-detail-compare-anchor" data-testid="result-compare-anchor" aria-label="参考图校色对照">
             <h2>目标原图 · 参考图 · 校色结果</h2>
             <p>{capabilityBoundary}</p>
@@ -710,6 +711,7 @@ export default function TaskDetailPage({
             ) : null}
           </section>}
 
+          <div className="hdde-detail-review-inspector" role="region" aria-label="复核与成品信息" tabIndex={0}>
           <section className="hdde-detail-panel" data-testid="result-review-focus" aria-labelledby="result-review-title">
             <div className="hdde-detail-section-heading">
               <div>
@@ -777,7 +779,10 @@ export default function TaskDetailPage({
               ) : null}
             </div>
           </HddeTechnicalDetails>
+          </div>
+          </div>
 
+          <div className="hdde-detail-result-dock">
           {deliveryError ? (
             <div className="hdde-delivery-completion__message" role="alert">
               <strong>交付未完成</strong>
@@ -807,6 +812,7 @@ export default function TaskDetailPage({
                 {deliveryPhase === "preflight" ? "正在检查…" : deliveryPhase === "delivering" ? "正在交付…" : deliveryPhase === "failed" ? "重试交付" : isLevelPick ? "交付所选结果" : "确认结果并交付"}
               </button> : null}
             </div>
+          </div>
           </div>
         </div>
       ) : (
