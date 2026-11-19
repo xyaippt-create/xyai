@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { appendPrintSource } from "./printPreflight.js";
+import { pickRegionColors } from "./printLayerColors.js";
 
 const names = { ink: "文字与圆章", texture: "纹理字", subject: "照片主体", hole:"主体镂空" };
 const colors = { ink: "#2082cd", texture: "#c67817", subject: "#149567" };
@@ -17,6 +18,9 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [hole,setHole]=useState([]);
+  // Per region: false when its background is a gradient or photo that one paper colour would replace.
+  const [flat,setFlat]=useState([]);
+  const paperChosen = useRef(false);
   const [zoom,setZoom]=useState(1);
   const start = useRef(null);
   const revision = useRef(0);
@@ -59,7 +63,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
       const ctx = canvas.getContext("2d");
       ctx.drawImage(photo.current, Math.min(w-1, Math.floor(p[0]*w)), Math.min(h-1,Math.floor(p[1]*h)), 1,1,0,0,1,1);
       const value = "#" + [...ctx.getImageData(0,0,1,1).data].slice(0,3).map(v=>v.toString(16).padStart(2,"0")).join("");
-      if (sample === "paper") update({ ...recipe, paper:value });
+      if (sample === "paper") { paperChosen.current = true; update({ ...recipe, paper:value }); }
       else { setInk(value); if (active) modifyRegion({ink:value}); }
       setSample("");
       return;
@@ -82,8 +86,28 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
     start.current = null; setDraft(null);
     if ((rect[2]-rect[0])*w < 2 || (rect[3]-rect[1])*h < 2) return;
     if (recipe.regions.length >= 48) { setError("每张海报最多 48 个图文选区。"); return; }
+    const picked = regionColors(rect);
+    const regionInk = picked?.ink || ink;
+    if (picked) setInk(regionInk);
     setIndex(recipe.regions.length);
-    update({ ...recipe, regions:[...recipe.regions,{kind, rect, ink, dx:0, dy:0, scale:1}] });
+    setFlat([...flat, picked ? picked.flat : true]);
+    const paper = picked && !paperChosen.current && !recipe.regions.length ? picked.paper : recipe.paper;
+    update({ ...recipe, paper, regions:[...recipe.regions,{kind, rect, ink:regionInk, dx:0, dy:0, scale:1}] });
+  }
+  // Start a new region from the poster's own colours (sampled at most 160 px on the long side).
+  function regionColors(rect) {
+    const image = photo.current;
+    if (!image?.naturalWidth) return null;
+    const sx = rect[0]*image.naturalWidth, sy = rect[1]*image.naturalHeight;
+    const sw = Math.max(1, (rect[2]-rect[0])*image.naturalWidth), sh = Math.max(1, (rect[3]-rect[1])*image.naturalHeight);
+    const ratio = Math.min(1, 160 / Math.max(sw, sh));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sw*ratio)); canvas.height = Math.max(1, Math.round(sh*ratio));
+    const ctx = canvas.getContext("2d");
+    try {
+      ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      return pickRegionColors(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+    } catch { return null; }
   }
   async function inspect(candidate=recipe, expectedHash="") {
     const id = revision.current;
@@ -96,7 +120,8 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
       const data = await r.json();
       if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : data.detail?.message || "分层检查失败。");
       if(expectedHash && expectedHash!==data.source_sha256) throw new Error("该方案属于另一张原图。");
-      if (revision.current === id) { setRecipe(data.recipe);setPreview(data);onReady(data.recipe);setHole([]); }
+      if (revision.current === id) { setRecipe(data.recipe);setPreview(data);onReady(data.recipe);setHole([]);
+        setFlat(data.recipe.regions.map(r => regionColors(r.rect)?.flat ?? true)); }
     } catch (e) { if (revision.current === id) setError(e.message); }
     finally { setChecking(false); }
   }
@@ -149,7 +174,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
     <div className="print-layer-sidebar">
     <h3>选区设置</h3>
     <div className="print-actions">
-      <label>纸色<input type="color" value={recipe.paper} onChange={e=>update({...recipe,paper:e.target.value})}/></label>
+      <label>纸色<input type="color" value={recipe.paper} onChange={e=>{paperChosen.current=true;update({...recipe,paper:e.target.value});}}/></label>
       <button type="button" aria-pressed={sample==="paper"} onClick={()=>setSample(sample==="paper"?"":"paper")}>从原图取纸色</button>
       {(kind === "ink" || kind === "texture") && <>
         <label>字色<input type="color" value={active?.ink || ink} onChange={e=>{setInk(e.target.value);if(active)modifyRegion({ink:e.target.value});}}/></label>
@@ -165,7 +190,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
         {[["dx","水平移动（%）"],["dy","垂直移动（%）"],["scale","字形缩放（%）"]].map(([k,n])=><label key={k}>{n}
           <input type="number" min={k==="scale"?10:-100} max={k==="scale"?400:100} step="1"
             value={Math.round(active[k]*100)} onChange={e=>modifyRegion({[k]:Number(e.target.value)/100})}/></label>)}
-        <button type="button" onClick={()=>{update({...recipe,regions:recipe.regions.filter((_,i)=>i!==index)});setIndex(-1);}}>删除选区</button>
+        <button type="button" onClick={()=>{update({...recipe,regions:recipe.regions.filter((_,i)=>i!==index)});setFlat(flat.filter((_,i)=>i!==index));setIndex(-1);}}>删除选区</button>
       </div>}
     </div>}
     {(kind==="subject" || recipe.subject.length>0) && <div className="print-actions">
@@ -187,6 +212,7 @@ export default function PrintLayerEditor({ source, onReady, busy }) {
     {checking && <p role="status">正在提取轮廓…</p>}
     {preview && <><img className="print-mask-preview" src={preview.preview} alt="分层选区预览"/>
       <p role="status">蓝色为文字轮廓，橙色为纹理字，绿色为主体。已提取 {preview.contours} 条闭合轮廓。</p></>}
+    {flat.some(f=>!f) && <p role="alert">选区 {flat.map((f,i)=>f?null:i+1).filter(Boolean).join("、")} 的底色是渐变或照片。分层会把这块底色换成单一纸色，并按字色重画文字，会改变原图设计；这类海报建议直接用等比出图。</p>}
     {error && <p role="alert">{error}</p>}
   </fieldset>;
 }
