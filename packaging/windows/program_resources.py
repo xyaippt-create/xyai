@@ -109,7 +109,10 @@ _KNOWN_SOURCE_EXCLUSIONS = {
 }
 
 _GENERATED_DIST_PATTERNS = (
-    re.compile(r"dist/assets/index-[A-Za-z0-9_-]+\.(?:js|css)"),
+    # Vite emits the entry and one chunk per lazily loaded page, each as
+    # "<name>-<8-char hash>.js|css" directly under assets/ (same scope as the
+    # manifest rule used by build_release.ps1).
+    re.compile(r"dist/assets/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(?:js|css)"),
     re.compile(r"dist/assets/SourceHan(?:Sans|Serif)CN-[A-Za-z]+-[A-Za-z0-9_-]+\.otf"),
 )
 

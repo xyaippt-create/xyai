@@ -139,6 +139,27 @@ class ProgramResourceAllowlistTests(unittest.TestCase):
             }
         return tree, work, trusted, provenance
 
+    def test_local_dist_accepts_hashed_page_chunks_only(self):
+        accepted = (
+            "dist/assets/index-DtMHfLW6.js",
+            "dist/assets/index-9QsQss9E.css",
+            "dist/assets/PrintPreflightPage-jRMCv-z-.js",
+            "dist/assets/SmartDeliveryPage-DPVT8fOZ.css",
+            "dist/assets/batchDelivery-DUFoXrCL.js",
+            "dist/assets/SourceHanSansCN-Medium-BdhNbnyX.otf",
+        )
+        rejected = (
+            "dist/assets/index-DtMHfLW6.js.map",
+            "dist/assets/PrintPreflightPage.js",
+            "dist/assets/notes-DtMHfLW6.txt",
+            "dist/assets/sub/PrintPreflightPage-jRMCv-z-.js",
+            "dist/assets/desktop-guide-AbCdEf12.webp",
+        )
+        for relative in accepted:
+            self.assertTrue(program_resources._matches_generated_dist(relative), relative)
+        for relative in rejected:
+            self.assertFalse(program_resources._matches_generated_dist(relative), relative)
+
     def test_current_program_resources_are_explicit_and_exclude_runtime_artifacts(self):
         resources = program_resources.discover_program_resources(ROOT)
         sources = {item.source_relative for item in resources}

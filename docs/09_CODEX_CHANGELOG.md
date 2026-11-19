@@ -3397,3 +3397,11 @@ S78 签收补记（同日）：负责人看截图后签字，S78 PASS_AND_FROZEN
 - 未提交：`.codex/`（本机 Codex 配置和第三方 UI Skill），仍未跟踪。
 
 验证：前端 `node --test` 411 项通过，`vite build` 通过。改动涉及的 Python 测试有 20 个文件，其中 18 个直接通过。`test_source_asset_lifecycle` 需要把同目录的测试模块加入导入路径，补上后通过。`test_package_data_gate` 有 1 项失败，是已有问题：打包白名单只认 `dist/assets/index-*`，前端按页面拆出的文件被拒，按当前 dist 打包会被门禁拦下。8 个 `.cjs` 是 Playwright 浏览器验收脚本，要先启动前端并传入网址才能运行，本次未跑。各批中间提交不保证能单独运行，完整状态以最后一批为准。
+
+## 2026-11-19｜打包白名单收录按页面拆分的前端文件
+
+执行者：Claude。问题：`packaging/windows/program_resources.py` 在不带构建清单时（直接按项目 `dist/` 跑 `HDDE.spec`，以及 `test_package_data_gate`）只认 `dist/assets/index-*` 和思源字体。前端按页面拆出的 23 个文件被判为 `UNALLOWLISTED_PROGRAM_RESOURCE`。正式脚本 `build_release.ps1` 用 `--manifest` 走构建清单路径，不受影响；上一条记录里“按当前 dist 打包会被门禁拦下”的说法过宽，在此更正。
+- `program_resources.py`：本地 dist 规则改为 `assets/` 下直接的 `<名称>-<8 位哈希>.js|css`，范围与构建清单路径一致。`.map`、无哈希文件、子目录和图片仍会被拒。
+- `tests/test_package_data_gate.py`：新增接受和拒绝样例。
+
+验证：`test_package_data_gate`、`test_packaged_runtime`、`test_installer_data_gate` 共 59 项通过。当前 `dist/` 解析出 87 项程序资源，`dist/assets` 下 26 个文件全部收录。未重新打安装包。未提交。
