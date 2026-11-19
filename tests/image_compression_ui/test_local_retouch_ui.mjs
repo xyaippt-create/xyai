@@ -120,12 +120,12 @@ test("矩形工具使用一次性新建意图允许在已有矩形内部拖拽�
   assert.match(pageSource, /data-rectangle-create-armed=\{rectangleCreateArmed \? "true" : "false"\}/);
 });
 
-test("拖入单张图片与点击导入复用同一intake并提供明确拖拽状态", () => {
+test("单图和多图拖入分别复用单图和批量导入入口", () => {
   const intakeCalls = pageSource.match(/requestJson\("\/api\/local-retouch\/intake"/g) || [];
   assert.equal(intakeCalls.length, 1, "click and drop must share one intake request path");
   assert.match(pageSource, /const intakeFile = async \(file\) => \{/);
   assert.match(pageSource, /if \(file\) void intakeFile\(file\)/);
-  assert.match(pageSource, /const handleFileDrop = \(event\) => \{[\s\S]*?files\.length !== 1[\s\S]*?当前仅支持单张图片[\s\S]*?void intakeFile\(files\[0\]\)/);
+  assert.match(pageSource, /const handleFileDrop = \(event\) => \{[\s\S]*?if \(files\.length === 1\) void intakeFile\(files\[0\]\);\s*else void importBatch\(files\)/);
   assert.match(pageSource, /onDragEnter=\{handleFileDragEnter\}/);
   assert.match(pageSource, /onDragOver=\{handleFileDragOver\}/);
   assert.match(pageSource, /onDragLeave=\{handleFileDragLeave\}/);
@@ -133,7 +133,7 @@ test("拖入单张图片与点击导入复用同一intake并提供明确拖拽�
   assert.match(pageSource, /event\.preventDefault\(\);[\s\S]*?event\.dataTransfer\.dropEffect = busy \? "none" : "copy"/);
   assert.match(pageSource, /data-file-drag-active=\{fileDragActive \? "true" : "false"\}/);
   assert.match(pageSource, /data-testid="retouch-drop-indicator"/);
-  assert.match(pageSource, /拖入一张图片，或点击导入/);
+  assert.match(pageSource, /拖入多张图片，按实际尺寸分组标记和修复/);
   assert.match(pageSource, /data-testid="retouch-canvas-wrap"/);
   assert.match(pageSource, /data-retouch-drop-zone="true"/);
   assert.match(styles, /\.hdde-retouch-canvas-wrap\.is-file-drag-active\s*\{[\s\S]*?var\(--brand-primary\)/);
@@ -246,7 +246,7 @@ test("正式页面使用产品API、工作源重试和人工确认保存合同",
   assert.match(routeSource, /本地智能修整/);
   assert.match(pageSource, /retouch-open-output-center/);
   assert.match(pageSource, /前往输出中心/);
-  assert.match(appSource, /<LocalRetouchPage[\s\S]*?onOpenOutputCenter=\{\(\) => navigateTo\("\/outputs"\)\}/);
+  assert.match(appSource, /<LocalRetouchPage[\s\S]*?onOpenOutputCenter=\{\(batchId\) => navigateTo\(batchId \? `\/outputs\?batch_id=\$\{encodeURIComponent\(batchId\)\}` : "\/outputs"\)\}/);
 });
 
 test("连续修整成功后自动切换稳定底图并隔离下一轮Mask历史", () => {
@@ -304,7 +304,8 @@ test("retouch路由是正式现有页面而非占位页", () => {
   assert.match(routeBlock, /status: FEATURE_STATUSES\.ENABLED/);
   assert.match(routeBlock, /implementationType: "existing"/);
   assert.doesNotMatch(routeBlock, /placeholder|PLANNED/);
-  assert.match(appSource, /route\.key === "retouch"/);
+  assert.match(appSource, /retouchWorkspaceMounted \|\| route\?\.key === "retouch"/);
+  assert.match(appSource, /hidden=\{route\?\.key !== "retouch"\}/);
   assert.match(appSource, /<LocalRetouchPage/);
 });
 

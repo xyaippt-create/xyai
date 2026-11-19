@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useAppTheme } from "./AppShell.jsx";
 import HddeIcon from "./HddeIcon.jsx";
 import UnifiedFeedback from "./UnifiedFeedback.jsx";
+import { SaveGuideLink, UserGuideTrigger } from "./UserGuide.jsx";
+import RetouchBatchPanel from "./RetouchBatchPanel.jsx";
+import { currentBatchCandidate, readBatchView, rememberBatchView, retouchGroup, selectedBatchCandidates, uploadRetouchBatchItem } from "./localRetouchBatch.js";
+import "./localRetouchBatch.css";
 import {
   fitImageView,
   hitTestEditableRectangles,
@@ -110,7 +114,9 @@ async function requestJson(path, options = {}) {
   }
   if (!response.ok || payload?.success === false) {
     const detail = payload?.detail;
-    throw new Error((typeof detail === "object" ? detail?.message : detail) || payload?.message || "操作失败，请重试。");
+    const error = new Error((typeof detail === "object" ? detail?.message : detail) || payload?.message || "操作失败，请重试。");
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -151,11 +157,14 @@ function drawOperation(context, operation) {
   context.restore();
 }
 
-export function renderRetouchMask(width, height, operations, draft = null) {
+export function renderRetouchMask(width, height, regions, draft = null) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d", { willReadFrequently: false });
+  const restored = regions.find((region) => region.maskImage);
+  if (restored) context.drawImage(restored.maskImage, 0, 0);
+  const operations = restored ? regions.filter((region) => region !== restored) : regions;
   repairRegionsToMaskOperations([...operations, ...(draft ? [draft] : [])])
     .forEach((operation) => drawOperation(context, operation));
   return canvas;
@@ -182,6 +191,7 @@ export default function LocalRetouchPage({
 }) {
   const { resolvedTheme } = useAppTheme();
   const fileInputRef = useRef(null);
+  const batchFileInputRef = useRef(null);
   const fileDragDepthRef = useRef(0);
   const canvasRef = useRef(null);
   const canvasWrapRef = useRef(null);
@@ -189,6 +199,8 @@ export default function LocalRetouchPage({
   const compareSourceImageRef = useRef(null);
   const resultImageRef = useRef(null);
   const viewRef = useRef({ scale: 1, offsetX: 0, offsetY: 0 });
+  const viewFrameRef = useRef(null);
+  const manualViewRef = useRef(false);
   const pointerRef = useRef(null);
   const regionSequenceRef = useRef(0);
   const maskRevisionRef = useRef(0);
@@ -222,6 +234,56 @@ export default function LocalRetouchPage({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("请选择一张自有或已授权图片开始修整。");
   const [fileDragActive, setFileDragActive] = useState(false);
+  const [fullBatch, setBatch] = useState(null);
+  const [groupId, setGroupId] = useState("");
+  const batch = retouchGroup(fullBatch, groupId);
+  const [batchIntakeIssues, setBatchIntakeIssues] = useState([]);
+  const [batchPanelOpen, setBatchPanelOpen] = useState(true);
+  const [activeBatchItemId, setActiveBatchItemId] = useState("");
+  const [batchSkipped, setBatchSkipped] = useState([]);
+  const [batchHistory, setBatchHistory] = useState(null);
+
+  const unsavedSingleCandidate = Boolean(!batch && result?.result_url && !saved);
+  useEffect(() => {
+    const report = () => window.pywebview?.api?.set_retouch_candidate_pending?.(unsavedSingleCandidate)?.catch(() => {});
+    report();
+    window.addEventListener("pywebviewready", report);
+    return () => window.removeEventListener("pywebviewready", report);
+  }, [unsavedSingleCandidate]);
+  const [resumeBatchMode, setResumeBatchMode] = useState(false);
+  const [selectionError, setSelectionError] = useState("");
+  const batchDraftRef = useRef({ batchId: "", revision: 0 });
+  const pendingDraftRef = useRef(null);
+
+  useEffect(() => {
+    if (!batch?.busy) return undefined;
+    let active = true;
+    let polling = false;
+    const timer = window.setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const payload = await requestJson(`/api/local-retouch/batches/${batch.batch_id}`);
+        if (!active) return;
+        setBatch(payload.data);
+        if (!payload.data.busy) {
+          setResumeBatchMode(payload.data.status === "interrupted");
+          const item = payload.data.items.find((entry) => entry.item_id === activeBatchItemId);
+          if (item?.status === "candidate" && currentBatchCandidate(item, Math.max(1, maskRevisionRef.current))) {
+            await viewBatchItem(item);
+          } else {
+            setBusy("");
+            setNotice("批量修复已结束。请核对修复结果后另存。");
+          }
+        }
+      } catch (reason) {
+        if (active) setError(reason.message);
+      } finally {
+        polling = false;
+      }
+    }, 700);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [activeBatchItemId, batch?.batch_id, batch?.busy, groupId]);
 
   useEffect(() => {
     requestJson("/api/local-retouch/capabilities")
@@ -261,6 +323,15 @@ export default function LocalRetouchPage({
       .then(({ nextSession, image }) => {
         if (!active) return;
         handledContinueResultRef.current = continueResultId;
+        continueIntakeRef.current = { resultId: "", promise: null };
+        setBatch(null);
+        setBatchSkipped([]);
+        setBatchIntakeIssues([]);
+        setBatchHistory(null);
+        setActiveBatchItemId("");
+        setResumeBatchMode(false);
+        setSelectionError("");
+        batchDraftRef.current = { batchId: "", revision: 0 };
         setSession(nextSession);
         setSourceImage(image);
         setCompareSourceImage(null);
@@ -282,6 +353,7 @@ export default function LocalRetouchPage({
       })
       .catch((reason) => {
         if (!active) return;
+        continueIntakeRef.current = { resultId: "", promise: null };
         setError(reason.message);
         setNotice("");
       })
@@ -405,12 +477,26 @@ export default function LocalRetouchPage({
 
   const fitView = useCallback(() => {
     if (!session) return;
+    manualViewRef.current = false;
     updateView(fitImageView(session.width, session.height, canvasSize.width, canvasSize.height, 36));
   }, [canvasSize.height, canvasSize.width, session, updateView]);
 
   useEffect(() => {
-    if (session && sourceImage) fitView();
-  }, [fitView, session, sourceImage]);
+    const previous = viewFrameRef.current;
+    const { width, height } = canvasSize;
+    viewFrameRef.current = { session, sourceImage, width, height };
+    if (!session || !sourceImage) return;
+    if (!manualViewRef.current || previous?.session !== session || previous.sourceImage !== sourceImage) {
+      fitView();
+    } else if (previous.width !== width || previous.height !== height) {
+      const current = viewRef.current;
+      updateView({
+        ...current,
+        offsetX: current.offsetX + (width - previous.width) / 2,
+        offsetY: current.offsetY + (height - previous.height) / 2,
+      });
+    }
+  }, [canvasSize, fitView, session, sourceImage, updateView]);
 
   useEffect(() => {
     sourceImageRef.current = sourceImage;
@@ -447,7 +533,9 @@ export default function LocalRetouchPage({
     );
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
-    if (displayMode === "compare" && resultImageRef.current) {
+    if (displayMode === "result" && resultImageRef.current) {
+      drawImage(resultImageRef.current);
+    } else if (displayMode === "compare" && resultImageRef.current) {
       drawImage(resultImageRef.current);
       context.save();
       context.beginPath();
@@ -511,7 +599,14 @@ export default function LocalRetouchPage({
     setSaved(null);
     setDisplayMode("edit");
     setNotice("选区已更新，请重新处理后查看结果。");
-  }, []);
+    if (batch) {
+      setSelectionError("");
+      setResult(null);
+      setResultImage(null);
+      const memberIds = new Set(batch.items.map((item) => item.item_id));
+      setBatchSkipped((skipped) => skipped.filter((id) => !memberIds.has(id)));
+    }
+  }, [batch?.batch_id, batch?.group_id, fullBatch]);
 
   const commitRepairRegions = useCallback((nextRegions, nextActiveRegionId = activeRegionId) => {
     setUndoStack((current) => [...current, { regions: repairRegions, activeRegionId }]);
@@ -538,7 +633,10 @@ export default function LocalRetouchPage({
       const payload = await requestJson("/api/local-retouch/intake", { method: "POST", body: form });
       const nextSession = payload.data;
       const image = await loadCanvasImage(apiUrl(`${nextSession.working_source_url || nextSession.source_url}?v=${Date.now()}`));
+      handledContinueResultRef.current = "";
       setSession(nextSession);
+      setBatch(null);
+      setBatchSkipped([]);
       setSourceImage(image);
       setCompareSourceImage(null);
       setResult(null);
@@ -605,12 +703,13 @@ export default function LocalRetouchPage({
     event.stopPropagation();
     resetFileDragState();
     if (busy) return;
-    if (files.length !== 1) {
-      setError(files.length > 1 ? "当前仅支持单张图片" : "未读取到图片文件，请重新拖入。");
+    if (!files.length) {
+      setError("未读取到图片文件，请重新拖入。");
       setNotice("");
       return;
     }
-    void intakeFile(files[0]);
+    if (files.length === 1) void intakeFile(files[0]);
+    else void importBatch(files);
   };
 
   const canvasPoint = (event) => {
@@ -637,6 +736,7 @@ export default function LocalRetouchPage({
       event.preventDefault();
       const rect = canvas.getBoundingClientRect();
       const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      manualViewRef.current = true;
       updateView(zoomViewAt(
         viewRef.current,
         point,
@@ -648,7 +748,7 @@ export default function LocalRetouchPage({
   }, [session, updateView]);
 
   const handlePointerDown = (event) => {
-    if (!session || busy || displayMode === "compare") return;
+    if (!session || busy || displayMode !== "edit") return;
     const screen = canvasPoint(event);
     if (tool === "pan" || event.button === 1 || event.altKey) {
       event.preventDefault();
@@ -725,6 +825,7 @@ export default function LocalRetouchPage({
       return;
     }
     if (pointer.type === "pan") {
+      manualViewRef.current = true;
       updateView({
         ...pointer.view,
         offsetX: pointer.view.offsetX + screen.x - pointer.screen.x,
@@ -816,6 +917,7 @@ export default function LocalRetouchPage({
 
   const zoomBy = (factor) => {
     const current = viewRef.current;
+    manualViewRef.current = true;
     updateView(zoomViewAt(current, { x: canvasSize.width / 2, y: canvasSize.height / 2 }, current.scale * factor));
   };
 
@@ -863,6 +965,7 @@ export default function LocalRetouchPage({
 
   const processMask = async () => {
     if (!session || busy || workspaceActionRef.current) return;
+    if (batch) return previewBatchItem();
     const mask = renderRetouchMask(
       session.width,
       session.height,
@@ -1013,12 +1116,316 @@ export default function LocalRetouchPage({
     ? (rectangleCreateArmed ? "crosshair" : (SELECTION_CURSORS[selectionHover] || "crosshair"))
     : undefined;
 
+  const batchRevision = Math.max(1, maskRevisionRef.current);
+  const batchMask = () => {
+    const recovered = repairRegions.length === 1 && repairRegions[0].maskImage ? repairRegions[0] : null;
+    if (recovered) return { mask_revision: batchRevision, mask_png_base64: recovered.maskBase64 };
+    const mask = renderRetouchMask(batch.width, batch.height, repairRegions);
+    if (!maskHasPixels(mask)) throw new Error("请先标记需要修复的区域。");
+    return { mask_revision: batchRevision, mask_png_base64: mask.toDataURL("image/png") };
+  };
+  const groupQuery = `?group_id=${encodeURIComponent(batch?.group_id || "")}`;
+  const batchRequest = (action, body) => requestJson(`/api/local-retouch/batches/${batch.batch_id}/${action}${groupQuery}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const batchId = batch?.batch_id;
+  const batchWidth = batch?.width;
+  const batchHeight = batch?.height;
+  const batchSavedCount = batch?.items.filter((item) => item.status === "saved").length ?? 0;
+  const batchPendingSaves = selectedBatchCandidates(batch, null, selectionError ? null : batchRevision);
+  const batchSelectedSaves = batchPendingSaves.filter(({ item_id }) => !batchSkipped.includes(item_id));
+  const batchHasCurrentWork = batch?.items.some((item) => item.source && (resumeBatchMode
+    ? item.status === "ready" && !item.retried
+    : !["excluded", "saved"].includes(item.status)));
+  const batchHasInterruptedRetry = resumeBatchMode && batch?.items.some((item) => item.status === "ready" && item.retried);
+  useEffect(() => {
+    if (batchId && groupId && activeBatchItemId) {
+      const view = readBatchView(batchId);
+      rememberBatchView(batchId, { groupId, activeItems: { ...view.activeItems, [groupId]: activeBatchItemId }, skipped: batchSkipped });
+    }
+  }, [batchId, groupId, activeBatchItemId, batchSkipped]);
+
+  useEffect(() => {
+    if (!batchId || !batchWidth || !batchHeight || batchDraftRef.current.batchId !== batchId
+        || batchDraftRef.current.groupId !== groupId
+        || batchRevision <= batchDraftRef.current.revision) return undefined;
+    let active = true;
+    const mask = renderRetouchMask(batchWidth, batchHeight, repairRegions);
+    const maskBase64 = maskHasPixels(mask) ? mask.toDataURL("image/png") : "";
+    const saveDraft = () => requestJson(`/api/local-retouch/batches/${batchId}/selection${groupQuery}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mask_revision: batchRevision, mask_png_base64: maskBase64 }),
+    });
+    const writing = saveDraft();
+    pendingDraftRef.current = { writing, saveDraft };
+    // Keep editable shapes when this browser has them. Recovery verifies their
+    // rendered PNG against the group's authoritative mask before using them.
+    rememberBatchView(`${batchId}/${groupId}`, {
+      revision: batchRevision, regions: repairRegions.some((region) => region.maskImage) ? null : repairRegions,
+    });
+    writing.then(() => {
+      if (active) batchDraftRef.current.revision = batchRevision;
+    }).catch((reason) => {
+      if (active) setError(`共用选区暂未保存。 ${reason.message}`);
+    });
+    return () => { active = false; };
+  }, [batchId, groupId, groupQuery, batchWidth, batchHeight, batchRevision, repairRegions]);
+
+  async function viewBatchItem(item, preview = false, restoring = false) {
+    setBusy("switch");
+    setError("");
+    setResult(null);
+    setResultImage(null);
+    setDisplayMode("edit");
+    try {
+      const original = await loadCanvasImage(apiUrl(item.source.working_source_url));
+      const revision = Math.max(1, maskRevisionRef.current);
+      const trial = item.preview?.mask_revision === revision ? item.preview : null;
+      const candidate = preview ? trial : currentBatchCandidate(item, revision) || trial;
+      const resultUrl = candidate?.saved ? candidate.output_url : candidate?.result_url;
+      const image = resultUrl ? await loadCanvasImage(apiUrl(`${resultUrl}?v=${candidate.session_id}`)) : null;
+      setSession(item.source);
+      setSourceImage(original);
+      setCompareSourceImage(original);
+      setResult(candidate || null);
+      setResultImage(image);
+      setActiveBatchItemId(item.item_id);
+      setSaved(null);
+      setDraft(null);
+      setSelectionDraft(null);
+      pointerRef.current = null;
+      setDisplayMode(image ? "result" : "edit");
+      setNotice(image
+        ? candidate.saved ? "正在查看这张图已另存的成品。" : "正在查看当前图的修复候选，可切换前后对比。"
+        : "切图保留相同像素位置的选区，可核对覆盖或试修。");
+    } catch (reason) {
+      setError(reason.message);
+    } finally { if (!restoring) setBusy(""); }
+  }
+
+  async function listBatchHistory() {
+    setBusy("restore");
+    setError("");
+    try {
+      const { data } = await requestJson("/api/local-retouch/batches");
+      setBatchHistory(data);
+      if (!data.length) setNotice("当前数据目录没有可恢复的批次。");
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(""); }
+  }
+
+  async function restoreBatch(id, requestedGroup = "") {
+    if (!id || busy) return;
+    setBusy("restore");
+    setError("");
+    try {
+      const url = `/api/local-retouch/batches/${id}`;
+      // Flush the group we are leaving before loading a different canvas.
+      if (pendingDraftRef.current) {
+        const { writing, saveDraft } = pendingDraftRef.current;
+        await writing.catch(saveDraft);
+      }
+      pendingDraftRef.current = null;
+      const { data: next } = await requestJson(url);
+      const view = readBatchView(id);
+      const group = retouchGroup(next, next.running_group_id || requestedGroup || view.groupId);
+      const key = group.group_id || "";
+      const { data: selection } = await requestJson(`${url}/selection?group_id=${encodeURIComponent(key)}`);
+      const maskImage = selection.mask_png_base64
+        ? await loadCanvasImage(`data:image/png;base64,${selection.mask_png_base64}`) : null;
+      let regions = maskImage ? [{ id: "restored-mask", maskImage, maskBase64: selection.mask_png_base64 }] : [];
+      const cached = readBatchView(`${id}/${key}`);
+      if (maskImage && cached.revision === selection.mask_revision && Array.isArray(cached.regions)) {
+        try {
+          const rendered = renderRetouchMask(group.width, group.height, cached.regions);
+          if (rendered.toDataURL("image/png").split(",")[1] === selection.mask_png_base64) {
+            regions = cached.regions;
+            regionSequenceRef.current = regions.reduce((max, region) => Math.max(max, region.order), regionSequenceRef.current);
+          }
+        } catch { /* The verified PNG also supports continued painting and erasing. */ }
+      }
+      maskRevisionRef.current = selection.mask_revision || 1;
+      batchDraftRef.current = { batchId: id, groupId: key, revision: maskRevisionRef.current };
+      handledContinueResultRef.current = "";
+      setResumeBatchMode(group.status === "interrupted" || (group.status === "completed" && group.items.some((item) => item.status === "ready")));
+      setGroupId(key);
+      setBatchPanelOpen(true);
+      setBatch(next);
+      if (id !== batchId) setBatchIntakeIssues([]);
+      setBatchHistory(null);
+      setBatchSkipped(Array.isArray(view.skipped) ? view.skipped : []);
+      setActiveBatchItemId("");
+      setSession(null);
+      setSourceImage(null);
+      setCompareSourceImage(null);
+      setResult(null);
+      setResultImage(null);
+      setSaved(null);
+      setConfirmed(false);
+      setDisplayMode("edit");
+      setRepairRegions(regions);
+      setUndoStack([]);
+      setRedoStack([]);
+      setActiveRegionId(null);
+      setDraft(null);
+      setSelectionDraft(null);
+      setSelectionHover(null);
+      setRectangleCreateArmed(false);
+      manualViewRef.current = false;
+      pointerRef.current = null;
+      setSelectionError(selection.error);
+      const first = group.items.find((item) => item.source && item.item_id === view.activeItems?.[key])
+        || group.items.find((item) => item.source);
+      if (first) await viewBatchItem(first, false, true);
+      setNotice(requestedGroup ? "已切换尺寸组。" : "已恢复批次，可继续处理当前尺寸组。");
+      if (next.busy) setBusy("batch");
+      else setBusy("");
+    } catch (reason) { setError(reason.message); setBusy(""); }
+  }
+  async function importBatch(files) {
+    if (!files.length || busy) return;
+    setBusy("intake");
+    setError("");
+    setNotice(`正在导入批量图片：0 / ${files.length}`);
+    try {
+      let next = (await requestJson("/api/local-retouch/batches", { method: "POST" })).data;
+      const url = `/api/local-retouch/batches/${next.batch_id}`;
+      const issues = [];
+      for (const [index, file] of files.entries()) {
+        const clientItemId = crypto.randomUUID().replaceAll("-", "");
+        try {
+          next = await uploadRetouchBatchItem(requestJson, url, file, clientItemId);
+        } catch (reason) {
+          issues.push({ clientItemId, fileName: file.name, reason: reason.status ? reason.message : "未收到导入确认" });
+        }
+        setNotice(`正在导入批量图片：${index + 1} / ${files.length}`);
+      }
+      if (issues.length) {
+        const latest = await requestJson(url).catch(() => null);
+        if (latest?.data) next = latest.data;
+      }
+      const confirmedIds = new Set(next.items.map((item) => item.client_item_id));
+      handledContinueResultRef.current = "";
+      setBatchIntakeIssues(issues.filter((item) => !confirmedIds.has(item.clientItemId)));
+      setBatchPanelOpen(true);
+      setBatch(next);
+      const key = next.groups[0]?.group_id || "";
+      setGroupId(key);
+      setActiveBatchItemId("");
+      setBatchHistory(null);
+      setResumeBatchMode(false);
+      setSelectionError("");
+      setBatchSkipped([]);
+      setRepairRegions([]);
+      setUndoStack([]);
+      setRedoStack([]);
+      setActiveRegionId(null);
+      maskRevisionRef.current = 1;
+      batchDraftRef.current = { batchId: next.batch_id, groupId: key, revision: 1 };
+      pendingDraftRef.current = null;
+      const first = next.items.find((item) => item.source && item.status !== "excluded");
+      if (first) await viewBatchItem(first);
+      else {
+        setSession(null); setSourceImage(null); setResult(null); setResultImage(null);
+        setNotice("");
+        setError("本批没有可修复的图片，请查看导入列表。");
+      }
+    } catch (reason) { setError(reason.message); setNotice(""); }
+    finally { setBusy(""); }
+  }
+  async function previewBatchItem() {
+    setBusy("preview"); setError("");
+    try {
+      const next = (await batchRequest("preview", { ...batchMask(), item_id: activeBatchItemId })).data;
+      setBatch(next);
+      await viewBatchItem(next.items.find((item) => item.item_id === activeBatchItemId), true);
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(""); }
+  }
+  async function startBatch(retry = false) {
+    if (busy) return;
+    setBusy("batch"); setError("");
+    try {
+      const action = retry ? "retry-failed" : resumeBatchMode ? "resume" : "start";
+      const next = (await batchRequest(action, !retry && batchHasCurrentWork ? batchMask() : {})).data;
+      setBatch(next);
+      if (!retry) {
+        const memberIds = new Set(batch.items.map((item) => item.item_id));
+        setBatchSkipped((skipped) => skipped.filter((id) => !memberIds.has(id)));
+        setResult(null); setResultImage(null); setDisplayMode("edit");
+      }
+      if (!next.busy) setBusy("");
+      setNotice(next.busy
+        ? (retry ? "正在用失败时的选区重试失败项。" : "正在按导入顺序处理所选范围。")
+        : "请查看图片列表中的提示。");
+    } catch (reason) { setError(reason.message); setBusy(""); }
+  }
+  async function saveBatchItems() {
+    if (busy || batch.busy || !batchSelectedSaves.length) return;
+    setBusy("save"); setError("");
+    try {
+      const items = batchSelectedSaves;
+      const selectedIds = new Set(items.map(({ item_id }) => item_id));
+      const needsCurrentMask = batch.items.some((item) => !item.retried && selectedIds.has(item.item_id));
+      const next = (await batchRequest("confirm-save", needsCurrentMask ? { ...batchMask(), items } : { items })).data;
+      setBatch(next);
+      const savedItems = next.items.filter((item) => selectedIds.has(item.item_id) && item.status === "saved" && item.candidate?.result_id);
+      if (savedItems.length === items.length) {
+        setNotice(`本次已另存 ${savedItems.length} 张。`);
+        onOpenOutputCenter?.(next.batch_id);
+      } else {
+        const activeSaved = savedItems.find((item) => item.item_id === activeBatchItemId);
+        if (activeSaved) await viewBatchItem(activeSaved);
+        setError(`本次已另存 ${savedItems.length} 张，${items.length - savedItems.length} 张未另存。请查看批次列表后重试。`);
+      }
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(""); }
+  }
+
+  function clearCurrentBatch() {
+    if (!batch || busy || batch.busy) return;
+    setBatch(null);
+    pendingDraftRef.current = null;
+    setBatchIntakeIssues([]);
+    setBatchHistory(null);
+    setBatchSkipped([]);
+    setActiveBatchItemId("");
+    setResumeBatchMode(false);
+    setSelectionError("");
+    setSession(null);
+    setSourceImage(null);
+    setCompareSourceImage(null);
+    setResult(null);
+    setResultImage(null);
+    setSaved(null);
+    setConfirmed(false);
+    setDisplayMode("edit");
+    setComparePosition(50);
+    setRepairRegions([]);
+    setUndoStack([]);
+    setRedoStack([]);
+    setDraft(null);
+    setSelectionDraft(null);
+    setActiveRegionId(null);
+    setSelectionHover(null);
+    setRectangleCreateArmed(false);
+    pointerRef.current = null;
+    manualViewRef.current = false;
+    maskRevisionRef.current = 0;
+    regionSequenceRef.current = 0;
+    batchDraftRef.current = { batchId: "", revision: 0 };
+    resetFileDragState();
+    setError("");
+    setNotice("当前工作区已清空。可从「恢复历史批次」重新打开。");
+  }
+
   return (
     <section className="hdde-retouch-workspace" data-testid="retouch-workspace" aria-labelledby="retouch-title">
       <input ref={fileInputRef} type="file" accept="image/png,image/jpeg" hidden onChange={chooseFile} data-testid="retouch-file-input" />
+      <input ref={batchFileInputRef} type="file" accept="image/png,image/jpeg" multiple hidden onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; void importBatch(files); }} data-testid="retouch-batch-file-input" />
       <header className="hdde-retouch-workspace__topbar">
         <div className="hdde-retouch-workspace__identity">
-          <button type="button" className="hdde-retouch-back" onClick={onBack} data-testid="retouch-back">
+          <button type="button" className="hdde-retouch-back" onClick={onBack} disabled={Boolean(batch && busy)} data-testid="retouch-back">
             <HddeIcon name="back" size={18} />
             <span>返回</span>
           </button>
@@ -1033,12 +1440,22 @@ export default function LocalRetouchPage({
           <span>{error || notice}</span>
         </div>
         <div className="hdde-retouch-workspace__actions">
+          <UserGuideTrigger workspace />
           <UnifiedFeedback taskId={session?.task_id || ""} sourceFeature="local_retouch" stage={busy || (result ? "result_review" : "editing")} triggerLabel="反馈问题" triggerClassName="hdde-retouch-feedback" testId="retouch-feedback-trigger" />
           <button type="button" className="hdde-retouch-import" onClick={() => fileInputRef.current?.click()} disabled={Boolean(busy)} data-testid="retouch-import">{session ? "更换图片" : "导入图片"}</button>
+          <button type="button" className="hdde-retouch-import" onClick={() => batchFileInputRef.current?.click()} disabled={Boolean(busy)} data-testid="retouch-batch-import">同位置批量</button>
+          <button type="button" className="hdde-retouch-import" onClick={listBatchHistory} disabled={Boolean(busy)}>恢复历史批次</button>
+          {batchHistory?.length ? (
+            <select className="hdde-retouch-import" aria-label="选择要恢复的批次" value="" disabled={Boolean(busy)} onChange={(event) => void restoreBatch(event.target.value)}>
+              <option value="">选择要恢复的批次</option>
+              {batchHistory.map((entry) => <option key={entry.batch_id} value={entry.batch_id}>{entry.file_name} · {entry.count} 张 · {new Date(entry.updated_at * 1000).toLocaleString()}</option>)}
+            </select>
+          ) : null}
         </div>
       </header>
 
       <div className="hdde-retouch-workspace__body">
+        <div className={batch && batchPanelOpen ? "hdde-retouch-left has-batch" : "hdde-retouch-left"}>
         <aside className="hdde-retouch-toolrail" aria-label="修整工具">
           <div className="hdde-retouch-toolrail__group" role="group" aria-label="选区工具">
             {TOOLS.map((item) => (
@@ -1073,6 +1490,8 @@ export default function LocalRetouchPage({
             <button type="button" title="重做当前选区操作" aria-label="重做选区" onClick={redo} disabled={!redoStack.length || Boolean(busy)}><HddeIcon name="redo" size={20} /><span>重做选区</span></button>
             <button type="button" title="清除选区" aria-label="清除选区" onClick={clearMask} disabled={!repairRegions.length || Boolean(busy)}><HddeIcon name="clear" size={20} /><span>清除</span></button>
           </div>
+          {batch ? <button type="button" className="hdde-retouch-batch-toggle" aria-controls="retouch-batch-browser"
+            aria-expanded={batchPanelOpen} onClick={() => setBatchPanelOpen((open) => !open)}>批次<br />{fullBatch.items.length} 张</button> : null}
           <div className="hdde-retouch-toolrail__zoom" aria-label="画布缩放">
             <button type="button" title="缩小" aria-label="缩小" onClick={() => zoomBy(0.8)} disabled={!session}><HddeIcon name="minus" size={19} /></button>
             <span>{session ? `${Math.round(view.scale * 100)}%` : "—"}</span>
@@ -1080,16 +1499,31 @@ export default function LocalRetouchPage({
             <button type="button" title="放大" aria-label="放大" onClick={() => zoomBy(1.25)} disabled={!session}><HddeIcon name="plus" size={19} /></button>
           </div>
         </aside>
+          {batch ? <div className="hdde-retouch-batch-browser" id="retouch-batch-browser" hidden={!batchPanelOpen}><RetouchBatchPanel
+            batch={batch} fullBatch={fullBatch} onGroupChange={(key) => restoreBatch(batchId, key)}
+            intakeIssues={batchIntakeIssues} revision={batchRevision} activeId={activeBatchItemId} skipped={batchSkipped} busy={busy}
+            resumeMode={resumeBatchMode} selectionError={selectionError}
+            canStart={batchHasCurrentWork ? canProcess : Boolean(batchHasInterruptedRetry && !busy && capabilities?.available)}
+            canRetry={!busy && !batch.busy}
+            onSelect={viewBatchItem}
+            onToggle={(id) => setBatchSkipped((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])}
+            onStart={() => startBatch()}
+            onRetry={() => startBatch(true)}
+            onCancel={() => batchRequest("cancel", {}).then((payload) => setBatch(payload.data)).catch((reason) => setError(reason.message))}
+            onClear={clearCurrentBatch}
+          /></div> : null}
+        </div>
 
         <div className={`hdde-retouch-stage hdde-retouch-workspace__stage ${session ? "has-image" : "is-empty"}`} role="region" aria-label="瑕疵修复画布">
           <div className="hdde-retouch-stage-bar">
             <div>
               <strong>{session?.file_name || "尚未导入图片"}</strong>
-              <span>{session ? `${session.width} × ${session.height} · ${session.format}` : "支持PNG、JPG、JPEG，单图最大50MB"}</span>
+              <span>{session ? `${session.width} × ${session.height} · ${session.format}` : "支持PNG、JPG、JPEG，不限文件体积"}</span>
             </div>
             {result ? (
               <div className="hdde-retouch-view-tabs" role="group" aria-label="画面查看模式">
                 <button type="button" aria-pressed={displayMode === "edit"} onClick={() => setDisplayMode("edit")}>编辑选区</button>
+                {batch ? <button type="button" aria-pressed={displayMode === "result"} onClick={() => setDisplayMode("result")}>查看修复结果</button> : null}
                 <button type="button" aria-pressed={displayMode === "compare"} onClick={() => setDisplayMode("compare")}>前后对比</button>
               </div>
             ) : null}
@@ -1139,15 +1573,15 @@ export default function LocalRetouchPage({
             {!session ? (
               <button type="button" className="hdde-retouch-empty" onClick={() => fileInputRef.current?.click()}>
                 <span className="hdde-retouch-empty__icon"><HddeIcon name="retouch" size={24} /></span>
-                <strong>拖入一张图片，或点击导入</strong>
-                <span>图片导入后即可标记瑕疵；图片只在本机处理。</span>
-                <small>支持 PNG、JPG、JPEG · 单图最大 50 MB</small>
+                <strong>拖入图片，或点击导入单图</strong>
+                <span>拖入多张图片，按实际尺寸分组标记和修复。</span>
+                <small>支持 PNG、JPG、JPEG · 图片只在本机处理</small>
               </button>
             ) : null}
             {fileDragActive ? (
               <div className="hdde-retouch-file-drop-indicator" role="status" aria-live="polite" data-testid="retouch-drop-indicator">
-                <strong>松手导入这张图片</strong>
-                <span>{session ? "将使用现有导入流程更换当前图片" : "将使用现有导入流程建立本地工作副本"}</span>
+                <strong>松手导入图片</strong>
+                <span>单张进入单图修复，多张进入同位置批量修复。</span>
               </div>
             ) : null}
           </div>
@@ -1193,14 +1627,38 @@ export default function LocalRetouchPage({
           </section>
           <section className="hdde-retouch-inspector__section hdde-retouch-inspector__section--result">
           <div className="hdde-retouch-summary">
-            <span>当前状态</span>
-            <strong>{saved ? "当前结果已保存" : editDepth ? "当前结果可继续修整" : session ? "等待首次修整" : "等待导入"}</strong>
-            <span className="hdde-retouch-summary__depth" data-testid="retouch-edit-depth">
-              {editDepth ? `已完成 ${editDepth} 次修整` : "尚未开始修整"}
-            </span>
+            {batch ? <>
+              <span>{fullBatch.groups.length > 1 ? "当前尺寸组" : "当前批次"}</span>
+              <div className="hdde-guide-save-status">
+                <strong>{batch.busy ? "正在批量修复" : batchPendingSaves.length ? `${batchPendingSaves.length} 张待另存` : "同位置批量修复"}</strong>
+                {!batch.busy && batchPendingSaves.length > 0 && <SaveGuideLink />}
+              </div>
+              <span className="hdde-retouch-summary__depth" data-testid="retouch-batch-saved-count">
+                已另存 {batchSavedCount} / {batch.total} 张
+              </span>
+            </> : <>
+              <span>当前状态</span>
+              <strong>{saved ? "当前结果已保存" : editDepth ? "当前结果可继续修整" : session ? "等待首次修整" : "等待导入"}</strong>
+              <span className="hdde-retouch-summary__depth" data-testid="retouch-edit-depth">
+                {editDepth ? `已完成 ${editDepth} 次修整` : "尚未开始修整"}
+              </span>
+            </>}
           </div>
-          <button type="button" className="hdde-primary-action" onClick={processMask} disabled={!canProcess} data-testid="retouch-process">
-            {busy === "process" ? "正在进行瑕疵修复…" : editDepth ? "执行本次修复" : "开始瑕疵修复"}
+          {batch && batchPendingSaves.length ? (
+            <button type="button" className="hdde-primary-action" onClick={saveBatchItems}
+              disabled={Boolean(busy) || batch.busy || !batchSelectedSaves.length} data-testid="retouch-batch-save">
+              {busy === "save" ? "正在另存…" : batchSelectedSaves.length === batchPendingSaves.length
+                ? (fullBatch.groups.length > 1 ? "另存本组并查看成品" : "另存全部并查看成品") : `另存 ${batchSelectedSaves.length} 张并查看成品`}
+            </button>
+          ) : null}
+          {batchSavedCount ? (
+            <button type="button" className={batchPendingSaves.length ? "hdde-secondary-action" : "hdde-primary-action"}
+              onClick={() => onOpenOutputCenter?.(batch.batch_id)} disabled={Boolean(busy) || batch.busy}>
+              查看本批次成品
+            </button>
+          ) : null}
+          <button type="button" className={batch && (batchPendingSaves.length || batchSavedCount) ? "hdde-secondary-action" : "hdde-primary-action"} onClick={processMask} disabled={!canProcess} data-testid="retouch-process">
+            {batch ? busy === "preview" ? "正在试修…" : "试修当前图" : busy === "process" ? "正在进行瑕疵修复…" : editDepth ? "执行本次修复" : "开始瑕疵修复"}
           </button>
           {editDepth ? (
             <div className="hdde-retouch-result-actions" aria-label="当前结果操作">
@@ -1234,7 +1692,7 @@ export default function LocalRetouchPage({
               <button type="button" onClick={() => requestJson(`/api/local-retouch/sessions/${session.session_id}/open-folder`, { method: "POST" }).catch((reason) => setError(reason.message))}>
                 打开所在目录
               </button>
-              <button type="button" onClick={onOpenOutputCenter} data-testid="retouch-open-output-center">
+              <button type="button" onClick={() => onOpenOutputCenter?.()} data-testid="retouch-open-output-center">
                 前往输出中心
               </button>
             </div>

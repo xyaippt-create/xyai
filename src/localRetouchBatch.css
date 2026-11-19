@@ -1,0 +1,17 @@
+.hdde-retouch-batch { display: grid; gap: 10px; padding: 16px; border-bottom: 1px solid var(--border-color, #8884); font-size: 13px; }
+.hdde-retouch-batch p { margin: 0; line-height: 1.6; font-size: 12px; }
+.hdde-retouch-batch-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.hdde-retouch-batch-intake-summary { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.hdde-retouch-batch-intake-summary span { padding: 4px 6px; border-radius: 5px; background: var(--retouch-panel-raised); white-space: nowrap; }
+.hdde-retouch-batch-intake-summary [data-excluded="true"] { color: var(--status-warning); }
+.hdde-retouch-batch-exclusions { padding: 8px; border: 1px solid color-mix(in srgb, var(--status-warning) 36%, var(--retouch-border)); border-radius: 7px; background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
+.hdde-retouch-batch-exclusions summary { cursor: pointer; font-weight: 600; color: var(--status-warning); }
+.hdde-retouch-batch-exclusion-reasons { max-height: 96px; overflow-y: auto; margin: 5px 0; }
+.hdde-retouch-batch progress { width: 100%; accent-color: var(--brand-primary); }
+.hdde-retouch-batch ul { display: grid; gap: 12px; max-height: 270px; overflow-y: auto; list-style: none; padding: 0; margin: 0; }
+.hdde-retouch-batch li { display: grid; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color, #8884); overflow-wrap: anywhere; }
+.hdde-retouch-batch label { display: flex; gap: 8px; align-items: start; }
+.hdde-retouch-batch button { min-height: 34px; padding: 6px 10px; border: 1px solid var(--border-color, #8886); border-radius: 7px; color: inherit; background: transparent; font-size: 12px; cursor: pointer; }
+.hdde-retouch-batch button[aria-pressed="true"] { border-color: var(--control-selected-border); color: var(--text-primary); background: var(--control-selected-surface); font-weight: 650; }
+.hdde-retouch-batch button:disabled { opacity: .5; cursor: default; }
+.hdde-retouch-batch [role="alert"] { color: var(--status-danger); font-size: 12px; }

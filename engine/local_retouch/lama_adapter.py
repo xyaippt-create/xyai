@@ -63,16 +63,18 @@ def _write_png(
     dpi: tuple[float, float] | None = None,
 ) -> dict[str, float]:
     encode_started = time.perf_counter()
-    encoded, buffer = cv.imencode(".png", image)
-    if not encoded:
-        raise RuntimeError("修整结果编码失败。")
-    output = buffer.tobytes()
-    if dpi is not None:
-        with Image.open(io.BytesIO(output)) as opened:
-            opened.load()
-            rewritten = io.BytesIO()
-            opened.save(rewritten, format="PNG", dpi=dpi)
-            output = rewritten.getvalue()
+    if dpi is None:
+        encoded, buffer = cv.imencode(".png", image)
+        if not encoded:
+            raise RuntimeError("修整结果编码失败。")
+        output = buffer.tobytes()
+    else:
+        color_conversion = cv.COLOR_BGRA2RGBA if image.shape[2] == 4 else cv.COLOR_BGR2RGB
+        stream = io.BytesIO()
+        # Encode the same RGB(A) pixels directly with the original DPI.
+        with Image.fromarray(cv.cvtColor(image, color_conversion)) as rendered:
+            rendered.save(stream, format="PNG", dpi=dpi)
+        output = stream.getvalue()
     encode_ms = (time.perf_counter() - encode_started) * 1000.0
     write_started = time.perf_counter()
     Path(path).write_bytes(output)

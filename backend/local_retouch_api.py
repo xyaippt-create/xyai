@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, MutableMapping
 
 from fastapi import UploadFile
+from starlette.concurrency import run_in_threadpool
 from PIL import Image, ImageOps
 
+from backend.batch_local_retouch_api import batch_retouch_path, register_batch_local_retouch_routes
 from engine.diagnostics.runtime_logging import build_exception_diagnostics, new_operation_identity
 from engine.local_retouch import LocalRetouchEngine
 from engine.output.filename_policy import FEATURE_RETOUCH, build_output_path
@@ -29,7 +31,6 @@ from engine.storage.result_reuse import (
 )
 
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_MASK_BYTES = 64 * 1024 * 1024
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg"}
@@ -369,7 +370,7 @@ def register_local_retouch_routes(
                 "adapter": "LaMa",
                 "reason": str(capabilities.get("reason") or ""),
                 "supported_formats": ["PNG", "JPEG"],
-                "max_upload_bytes": MAX_UPLOAD_BYTES,
+                "max_upload_bytes": None,
                 "max_image_pixels": MAX_IMAGE_PIXELS,
             },
         }
@@ -378,6 +379,8 @@ def register_local_retouch_routes(
         content: bytes,
         raw_name: str,
         lineage: Mapping[str, Any] | None = None,
+        *,
+        batch_id: str = "",
     ) -> dict[str, Any]:
         _, app_root, runtime_root, _ = require_roots()
         if not raw_name or raw_name != Path(raw_name).name or "/" in raw_name or "\\" in raw_name:
@@ -386,8 +389,8 @@ def register_local_retouch_routes(
         suffix = Path(safe_name).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
             raise HTTPException(status_code=415, detail={"code": "RETOUCH_FORMAT_UNSUPPORTED", "message": "仅支持PNG、JPG和JPEG图片。"})
-        if not content or len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail={"code": "RETOUCH_FILE_TOO_LARGE", "message": "图片为空或超过50MB限制。"})
+        if not content:
+            raise HTTPException(status_code=400, detail={"code": "RETOUCH_FILE_EMPTY", "message": "图片文件为空，请重新选择。"})
         try:
             with Image.open(io.BytesIO(content)) as opened:
                 opened.verify()
@@ -406,9 +409,11 @@ def register_local_retouch_routes(
             raise HTTPException(status_code=422, detail={"code": "RETOUCH_IMAGE_INVALID", "message": "图片损坏、无法解码或尺寸超出安全范围。"}) from exc
 
         session_id = uuid.uuid4().hex
-        session_root = _ensure_safe_directory(runtime_root / session_id, app_root)
+        parent = batch_retouch_path(app_root, batch_id) / "sessions" if batch_id else runtime_root
+        session_root = _ensure_safe_directory(parent / session_id, app_root)
         session_root.mkdir(parents=True, exist_ok=False)
-        upload_path = _ensure_safe_directory(session_root / safe_name, app_root)
+        upload_path = _ensure_safe_directory(session_root / "source" / safe_name if batch_id else session_root / safe_name, app_root)
+        upload_path.parent.mkdir(parents=True, exist_ok=True)
         working_path = _ensure_safe_directory(session_root / "working_source.png", app_root)
         try:
             upload_path.write_bytes(content)
@@ -425,6 +430,7 @@ def register_local_retouch_routes(
         lineage_fields = result_lineage_fields(lineage)
         sessions[session_id] = {
             "session_id": session_id,
+            **({"batch_id": batch_id} if batch_id else {}),
             "root": session_root,
             "upload_path": upload_path,
             "working_path": working_path,
@@ -464,7 +470,7 @@ def register_local_retouch_routes(
 
     @app.post("/api/local-retouch/intake")
     async def local_retouch_intake(file: UploadFile = File(...)):
-        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        content = await file.read()
         data = create_local_retouch_session(content, str(file.filename or ""))
         return {"code": 200, "status": "success", "success": True, "data": data}
 
@@ -481,7 +487,7 @@ def register_local_retouch_routes(
                 shared_task_registry,
                 str(payload.get("result_id") or ""),
                 app_root,
-                max_bytes=MAX_UPLOAD_BYTES,
+                max_bytes=None,
                 allowed_suffixes=ALLOWED_SUFFIXES,
             )
             content = Path(reusable["source_result_path"]).read_bytes()
@@ -507,6 +513,8 @@ def register_local_retouch_routes(
     async def local_retouch_process(session_id: str, payload: dict[str, Any] = Body(...)):
         session = require_session(session_id)
         require_roots()
+        if session.get("batch_id") and not session.get("_batch_processing"):
+            raise HTTPException(status_code=409, detail={"message": "请从同位置批量工作台处理当前图片。"})
         if session.get("processing"):
             raise HTTPException(
                 status_code=409,
@@ -580,6 +588,7 @@ def register_local_retouch_routes(
         source_lineage = result_lineage_fields(session)
         task_record = {
             "task_id": task_id,
+            **{key: session[key] for key in ("batch_id", "batch_item_id", "source_id", "mask_sha256", "mask_revision") if key in session},
             **operation_identity,
             "task_family": LOCAL_RETOUCH_FEATURE_KEY,
             "operation_mode": "LOCAL_RETOUCH",
@@ -643,7 +652,10 @@ def register_local_retouch_routes(
         )
         session["processing"] = True
         try:
-            processed = retouch_engine.process(working_path, mask_path, candidate_path)
+            if session.get("batch_id"):
+                processed = await run_in_threadpool(retouch_engine.process, working_path, mask_path, candidate_path)
+            else:
+                processed = retouch_engine.process(working_path, mask_path, candidate_path)
         except ValueError as exc:
             session["processing"] = False
             candidate_path.unlink(missing_ok=True)
@@ -897,6 +909,8 @@ def register_local_retouch_routes(
     @app.post("/api/local-retouch/sessions/{session_id}/confirm")
     async def local_retouch_confirm(session_id: str, payload: dict[str, Any] = Body(...)):
         session = require_session(session_id)
+        if session.get("batch_id") and not session.get("_batch_saving"):
+            raise HTTPException(status_code=409, detail={"message": "请从同位置批量工作台确认对应选区版本。"})
         result = session.get("result")
         if not result:
             raise HTTPException(status_code=409, detail={"code": "RETOUCH_RESULT_REQUIRED", "message": "请先生成并查看修整结果。"})
@@ -929,6 +943,8 @@ def register_local_retouch_routes(
     @app.post("/api/local-retouch/sessions/{session_id}/save")
     async def local_retouch_save(session_id: str, payload: dict[str, Any] = Body(default={})):
         session = require_session(session_id)
+        if session.get("batch_id") and not session.get("_batch_saving"):
+            raise HTTPException(status_code=409, detail={"message": "请从同位置批量工作台确认并另存当前结果。"})
         _, app_root, _, output_root = require_roots()
         if payload:
             raise HTTPException(status_code=400, detail={"code": "RETOUCH_SAVE_REQUEST_INVALID", "message": "保存派生结果不接受额外参数。"})
@@ -957,8 +973,11 @@ def register_local_retouch_routes(
         task_id = str(task_record["task_id"])
         output_root = _ensure_safe_directory(output_root, app_root)
         output_root.mkdir(parents=True, exist_ok=True)
-        destination = _ensure_safe_directory(next_output_path(output_root, session["file_name"]), output_root)
-        temporary = destination.with_name(f".{destination.stem}.writing.png")
+        intent = task_record.get("batch_save_intent") if session.get("batch_id") else None
+        destination = _ensure_safe_directory(
+            Path(intent["path"]) if intent else next_output_path(output_root, session["file_name"]), output_root
+        )
+        temporary = _ensure_safe_directory(destination.with_name(f".{destination.stem}.writing.png"), output_root)
         output_metadata: dict[str, Any] | None = None
         destination_created = False
         try:
@@ -972,24 +991,34 @@ def register_local_retouch_routes(
                 opened.load()
                 if opened.size != (session["width"], session["height"]) or opened.format != "PNG":
                     raise RuntimeError("派生结果验证失败。")
+            if session.get("batch_id") and not intent:
+                task_record["batch_save_intent"] = {"path": str(destination), "sha256": _sha256(temporary)}
+                shared_task_registry[task_id] = task_record
             if destination.exists():
-                raise FileExistsError(destination)
-            try:
-                os.link(temporary, destination)
-                destination_created = True
-                temporary.unlink()
-            except FileExistsError:
-                raise
-            except OSError:
-                with temporary.open("rb") as source_handle, destination.open("xb") as target_handle:
+                if not intent or _sha256(destination) != intent["sha256"]:
+                    raise FileExistsError(destination)
+            else:
+                if intent and _sha256(temporary) != intent["sha256"]:
+                    raise RuntimeError("派生结果与此前保存记录不一致。")
+                try:
+                    os.link(temporary, destination)
                     destination_created = True
-                    shutil.copyfileobj(source_handle, target_handle)
-                    target_handle.flush()
-                    os.fsync(target_handle.fileno())
-                if _sha256(temporary) != _sha256(destination):
-                    destination.unlink(missing_ok=True)
-                    raise RuntimeError("派生结果发布校验失败。")
-                temporary.unlink()
+                except FileExistsError:
+                    raise
+                except OSError:
+                    if session.get("batch_id") and os.name == "nt":
+                        # Windows rename publishes the complete file without replacing an existing name.
+                        os.rename(temporary, destination)
+                        destination_created = True
+                    else:
+                        with temporary.open("rb") as source_handle, destination.open("xb") as target_handle:
+                            destination_created = True
+                            shutil.copyfileobj(source_handle, target_handle)
+                            target_handle.flush()
+                            os.fsync(target_handle.fileno())
+                        if _sha256(temporary) != _sha256(destination):
+                            raise RuntimeError("派生结果发布校验失败。")
+            temporary.unlink(missing_ok=True)
         except Exception as exc:
             temporary.unlink(missing_ok=True)
             if destination_created:
@@ -1014,6 +1043,7 @@ def register_local_retouch_routes(
         result_id = next_result_id()
         result_data = {
             "result_id": result_id,
+            **{key: session[key] for key in ("batch_id", "batch_item_id", "source_id", "mask_sha256", "mask_revision") if key in session},
             "task_id": task_id,
             "feature_key": LOCAL_RETOUCH_FEATURE_KEY,
             "module_id": task_record.get("module_id") or "",
@@ -1100,7 +1130,8 @@ def register_local_retouch_routes(
             session["resume_committed_result_id"] = ""
             session["resume_committed_task_id"] = ""
         except Exception as exc:
-            destination.unlink(missing_ok=True)
+            if destination_created:
+                destination.unlink(missing_ok=True)
             diagnostics = attach_error_context(task_record, exc, "result_registry")
             try:
                 shared_task_registry[task_id] = task_record
@@ -1281,7 +1312,15 @@ def register_local_retouch_routes(
             raise HTTPException(status_code=400, detail={"code": "RETOUCH_OPEN_FOLDER_FAILED", "message": "无法打开派生结果目录。"}) from exc
         return {"code": 200, "status": "success", "success": True, "data": {"directory_name": path.parent.name}}
 
+    batches = register_batch_local_retouch_routes(
+        app, sessions=sessions, require_roots=require_roots,
+        create_session=create_local_retouch_session, session_payload=session_payload,
+        process=local_retouch_process, confirm=local_retouch_confirm, save=local_retouch_save,
+        max_mask_bytes=MAX_MASK_BYTES, registry=shared_task_registry,
+        safe_path=_ensure_safe_directory, sha256_file=_sha256,
+    )
     state = {
+        "batches": batches,
         "feature_key": LOCAL_RETOUCH_FEATURE_KEY,
         "sessions": sessions,
         "engine": retouch_engine,
