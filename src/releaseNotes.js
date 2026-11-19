@@ -1,9 +1,19 @@
 // User-facing release notes shown on /settings/release-notes (linked from 系统设置 › 产品与版本).
 // Only completed, user-visible changes, in plain Chinese; engineering detail
 // stays in docs/09_CODEX_CHANGELOG.md. Newest version first.
+// Keep each change under the version where it was completed.
 // History before V0.6.1 was reviewed by the product owner from
 // docs/drafts/RELEASE_NOTES_HISTORY_DRAFT.md (2026-10-29).
 export const RELEASE_NOTES = Object.freeze([
+  {
+    version: "0.8.3-dev",
+    label: "V0.8.3 开发版",
+    date: "2026-11-19",
+    groups: [{
+      title: "版本更新",
+      items: ["影界 HDDE 进入 V0.8.3 开发版。"],
+    }],
+  },
   {
     version: "0.8.2-dev",
     label: "V0.8.2 开发版",
@@ -16,6 +26,10 @@ export const RELEASE_NOTES = Object.freeze([
       items: [
         "选已有的 4K 成品出喷绘时，后台会自动找回它的原图，从原图重新做超清，不再把 4K 成品直接拉大，大尺寸画面能保留更多细节。原图找不到或已被改动时，照常用 4K 成品出图，不影响使用。",
         "喷绘成品里的标题和文字边缘更利落：只收窄字的边缘过渡，字形、颜色都不变，也不会出现白边或黑边。",
+        "分层编辑时，「主体边缘吸附」单独一行，「撤销轮廓点」和「清除主体」在下方并排显示，窄窗口下也能对齐。",
+        "喷绘左栏把尺寸和目标 PPI 排成紧凑表单。选图后可直接核对目标像素、喷绘尺寸和放大提示，展开「精度详情」可查看有效 PPI 和放大方式。",
+        "分层出图左栏沿用等比出图的「已选原图」文件卡片、喷绘规格和整行提交按钮。成品画布仍可指定宽高，选区检查提示显示在尺寸预检处。",
+        "分层出图左右并排时，「提交出图」与「检查分层选区」「载入分层方案」在同一行。滚动查看选区或预览时，底部操作按钮仍然可见。",
         "分层编辑框选文字后，字色和纸色会自动取自原图，不再默认用红字白底。选区的底色是渐变天空或照片时，会提示分层将把底色换成单一颜色、改变原图设计，建议改用等比出图。",
       ],
     }, {
@@ -43,6 +57,7 @@ export const RELEASE_NOTES = Object.freeze([
       items: [
         "喷绘成品预览的局部对照可以自己选区：在成品上拖拽框出要核对的地方，右侧两个窗口就显示这块区域；也可以切换 1:1 原像素到 1:16 的对照比例。打开时选框会自动落在画面细节最多的位置，选框外的区域会变暗，方便看清。",
         "分层出图也会先用 4K 超清重建整张底图：没有框选的 Logo、小字和背景同样更清楚，框选的文字和照片主体照旧单独处理。指定宽高的画布预检也会显示超清后的有效精度。",
+        "喷绘尺寸超过单张 8000 万像素上限时，会直接告诉你按当前尺寸最高能用多少 PPI，点「改为 XXX PPI」即可一键套用，不用再自己反复试。",
       ],
     }, {
       title: "输出中心",
