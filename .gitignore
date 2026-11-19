@@ -82,3 +82,13 @@ models/text_detection/*.onnx
 models/delivery_naming/florence-2-base-ft/
 *.zip
 测试图/
+
+# Local evidence, run outputs and experiment models (not source)
+/output/
+/artifacts/
+/.playwright-cli/
+/.reprosight/
+/models/e4k_poc/
+/models/e4k_poc_v2/
+/models/e4k_poc_quicksrnet/
+/models/s62_ai4k_poc/
