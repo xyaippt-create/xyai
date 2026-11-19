@@ -28,14 +28,21 @@ import standardImage from "./assets/user-guide/manual-1080.webp";
 import standardResultImage from "./assets/user-guide/manual-1080-result.webp";
 import compressionReviewImage from "./assets/user-guide/manual-review.webp";
 import taskResultImage from "./assets/user-guide/manual-task-result.webp";
+import printPreflightImage from "./assets/user-guide/manual-print-preflight.webp";
+import printReviewImage from "./assets/user-guide/manual-print-review.webp";
+import printLayersImage from "./assets/user-guide/manual-print-layers.webp";
+import whitePointPickerImage from "./assets/user-guide/manual-white-point-picker.webp";
+import whitePointImage from "./assets/user-guide/manual-white-point.webp";
+import colorGroupImage from "./assets/user-guide/manual-color-group.webp";
 
 export const guideSections = [
   { title: "压图与交付", searchAlias: "常用操作 · 压图与交付", topics: ["start", "uploadLimit", "resize", "findOutput", "delivery", "chooseMode"] },
   { title: "批量压缩与交付", topics: ["batch", "batchDelivery", "batchControl", "retry"] },
   { title: "画质增强", topics: ["enhance4k", "enhance1080", "enhancementSize"] },
   { title: "瑕疵修复", topics: ["singleRepair", "selectionTools", "save", "recoverRepair"] },
-  { title: "颜色校正", topics: ["automaticColor", "colorLevel", "colorReference"] },
+  { title: "颜色校正", topics: ["automaticColor", "colorLevel", "colorWhitePoint", "colorGroup", "colorReference"] },
   { title: "批量水印", topics: ["watermark", "watermarkStyle"] },
+  { title: "喷绘出图", topics: ["printPreflight", "printReview", "printLayers"] },
   { title: "格式选择与画质检查", topics: ["formats", "compressionSize", "lossless", "compare", "reviewCompression", "longReview"] },
   { title: "成品管理与任务记录", topics: ["continueEditing", "taskResult", "deliveryCheck", "deliveryRecovery", "previousDelivery", "taskHistory", "cleanup"] },
   { title: "系统设置与帮助", topics: ["directory", "appearance", "feedback"] },
@@ -261,7 +268,7 @@ export const articles = {
     intro: "例如一批图片都已修好，只想单独精修其中一张，可以直接把这张成品带进下一个工作台。",
     steps: [
       { title: "选对作为起点的图", text: "在「输出中心 → 单张处理」选中成品，点「继续编辑」。如果是批量成品，展开批次，在目标文件的子项点「单图处理」。" },
-      { title: "选下一项处理", text: "在弹窗核对「当前成品」的文件名，再点可用的「画质增强」「颜色校正」「图片压缩」「瑕疵修复」或「添加水印」。灰色选项旁会说明原因。", picture: { src: continueImage, alt: "选中成品后弹出的处理方式选择窗口" } },
+      { title: "选下一项处理", text: "在弹窗核对「当前成品」的文件名，再点可用的「画质增强」「颜色校正」「图片压缩」「瑕疵修复」「添加水印」或「喷绘出图」。灰色选项旁会说明原因。", picture: { src: continueImage, alt: "选中成品后弹出的处理方式选择窗口" } },
       { title: "在新工作台完成操作", text: "确认预览载入的就是所选成品，再像平常一样调整、执行并保存。例如单图精修后点「完成修整」，回「单张处理」查看新成品。" },
     ],
     result: "新任务以刚选的成品为起点。原成品和原批次都可以在输出中心再次查看。",
@@ -409,12 +416,12 @@ export const articles = {
     steps: [
       { title: "选一张要调整的图", text: "从左侧打开「颜色校正」，点「挑档校色」。把一张 JPG 或 PNG 拖到「选择图片」区域。" },
       { title: "比较同一处颜色", text: "点「生成四档预览」。依次点击「原图」和「轻」的缩略图放大，观察同一面白墙。每次看完点「关闭」，再看下一档。" },
-      { title: "勾选最合适的一档", text: "点缩略图下方档名旁的圆圈来选档。例如「轻」已经让白墙看起来自然，就选「轻」。如果画面本来就是暖色灯光，也可以保留原图。",
+      { title: "勾选最合适的一档", text: "勾选缩略图下方档名旁的选框。例如「轻」已经让白墙看起来自然，就选「轻」。如果画面本来就是暖色灯光，也可以保留原图。",
         picture: { src: colorLevelImage, alt: "挑档校色页面同时显示原图、轻、中、强四档，演示图已选中轻档" } },
       { title: "采用这次选择", text: "选了「轻」，就点「使用“轻”档生成结果」。如果更喜欢原来的颜色，选「原图」，再点「使用原图（不生成新文件）」。" },
     ],
     result: "采用调整档位后，可以在「输出中心」的「单张处理」里找到新的校色成品。",
-    next: "colorReference",
+    next: "colorWhitePoint",
   },
   colorReference: {
     title: "怎样用同组照片作参考，让白色更一致",
@@ -427,6 +434,74 @@ export const articles = {
       { title: "生成结果或换参考图", text: "例如选了「中」，就点「使用“中”档生成结果」。若提示参考图不可用，点「替换参考图」后重新生成预览；也可以选「原图」并确认保留。" },
     ],
     result: "采用轻、中或强档会生成目标图的校色成品，作为参照的照片保持原样。",
+  },
+  colorWhitePoint: {
+    title: "挑档校色判断不准时，怎样点选白点",
+    intro: "例如暖色灯下拍的商品照，系统建议的档位看起来仍偏黄。可以告诉影界画面里哪一处本来是白色或灰色，让四档预览按这一点重新校正。",
+    steps: [
+      { title: "先生成四档预览", text: "在「颜色校正」点「挑档校色」，选一张 JPG 或 PNG，点「生成四档预览」。先读预览上方的测量结论和「系统建议」。" },
+      { title: "在原图上点一下白色处", text: "点「点选白点」，在弹出的原图上点一下本来应该是白或灰的地方，例如白墙、白纸、白衣服或灰色物体。四档预览会按这一点重新生成，默认建议「中」。不想点了就点「取消」。",
+        picture: { src: whitePointPickerImage, alt: "点选白点窗口，顶部提示点一下本来应该是白色或灰色的地方，右上角有取消按钮" } },
+      { title: "换一处，或改回自动判断", text: "如果提示点到的位置太鲜艳、过亮或过暗，点「重新点选白点」换一个地方。想恢复软件自己的判断，点「取消白点，改回自动判断」，四档预览会重新生成。",
+        picture: { src: whitePointImage, alt: "按点选位置重新生成的四档预览，上方有重新点选白点和取消白点按钮，中档标为建议" } },
+      { title: "比较后生成结果", text: "点缩略图放大，看同一面白墙或同一块浅色背景。勾选合适的一档，点「使用“中”档生成结果」这类按钮；更喜欢原来的颜色时选「原图」。" },
+    ],
+    result: "白点只用来计算这次的校正量，原图不会被改动。采用的档位会生成新的校色成品。",
+    next: "colorGroup",
+  },
+  colorGroup: {
+    title: "怎样一次生成几档，或按代表图整组校色",
+    intro: "只有一张图时，可以同时勾选几档，一次拿到几份成品再挑。同一场景、同一灯光下拍的一组照片，可以用一张代表图选档，整组按同样的校正量处理。",
+    steps: [
+      { title: "单张图同时生成几档", text: "在「挑档校色」只选一张图，生成四档预览后同时勾选几档，例如「中」和「强」。按钮会变成「生成所选 2 档（中、强）」，点它即可。生成后在「处理中心」逐份查看。" },
+      { title: "整组：先放入一组照片", text: "一次拖入 2–20 张光线一致的照片。默认第一张标着「代表图」，用来选档；想换一张更有代表性的，点它旁边的「设为代表图」。" },
+      { title: "按代表图选档并处理整组", text: "点「生成四档预览」，比较代表图的四档，选一档后点「按“中”档处理整组（N 张）」这类按钮。整组任务创建后会进入「处理中心」。选「原图」时整组都不处理。",
+        picture: { src: colorGroupImage, alt: "挑档校色载入三张同组照片，第一张标为代表图，右下角按钮为按中档处理整组 3 张" } },
+      { title: "逐张复核其他图片", text: "除代表图外，其他图片要在「处理中心」点「复核结果」检查后才能交付。若提示代表图只有发灰、没有偏色，整组处理不会改变其他图片，请改为逐张挑档。" },
+    ],
+    result: "整组用的是同一份校正量，光线差别大的照片请分组或逐张处理。",
+    next: "colorReference",
+  },
+  printPreflight: {
+    title: "怎样按喷绘尺寸检查原图精度并出图",
+    intro: "例如要喷一张宽 60 cm 的展览海报，先算一算这张原图够不够大，再生成喷绘文件。所有计算和出图都在本机完成。",
+    steps: [
+      { title: "选一张原图", text: "在左侧「交付」下点「喷绘出图」，保持「等比出图」。把一张 JPG、PNG 或 WebP 拖进「选择图片」，一次只放一张，选错时点「更换」。已有成品也可以在「输出中心」点「继续编辑 → 喷绘出图」带进来。" },
+      { title: "填写喷绘规格", text: "在「喷绘规格」的「计算方式」选「按喷绘尺寸计算」，选「宽度」或「高度」，填厘米数，例如宽度 60。「目标 PPI」可点 100、150 或 300 快速填入，也可以手动输入。只想按 8K 大屏出图时，选「按 8K 长边估算（7680 px）」。" },
+      { title: "看尺寸预检", text: "核对「目标像素」和「喷绘尺寸」。右上角显示「原图像素充足」时不用放大；显示「需放大 N 倍」时，展开「精度详情」，看原图有效精度和超清后有效精度。需要放大时会先用 4K 超清重建细节，再补到目标像素。",
+        picture: { src: printPreflightImage, alt: "喷绘出图页填好宽 60 cm、150 PPI，尺寸预检显示需放大 3.94 倍，精度详情已展开" } },
+      { title: "遇到偏软或超限提示", text: "出现「细节偏软」时，可以降低 PPI、缩小喷绘尺寸，或换一张更大的原图。提示超过单张 8000 万像素时，点「改为 XXX PPI」一键套用当前尺寸能用的最高精度。" },
+      { title: "提交出图", text: "核对后点「提交出图」。需要超清重建时约需 1 分钟，页面会显示进度，期间不要更换原图。" },
+    ],
+    result: "生成后页面右侧出现「喷绘成品预览」。先核对局部细节，再另存交付副本。",
+    next: "printReview",
+  },
+  printReview: {
+    title: "喷绘成品怎样核对局部细节，再另存交付副本",
+    intro: "喷绘文件很大，整张缩小后看不出问题。按原像素看几处文字、Logo 和人物边缘，再决定交给喷绘厂。",
+    steps: [
+      { title: "框选要看的位置", text: "在「喷绘成品预览」上按住鼠标拖出一个框，右侧「局部对照」就显示这块区域。点击画面可以把选框移过去，也可以先点一下预览，再用方向键移动。刚打开时，选框会自动落在细节最多的位置。",
+        picture: { src: printReviewImage, alt: "喷绘成品预览中选框落在标题上，右侧局部对照以 1:1 原像素并排显示原图参考和成品" } },
+      { title: "切换对照比例", text: "在「对照比例」点「1:1 原像素」看最接近实际喷绘的细节，点 1:2 到 1:16 看更大范围。左窗是「原图等比参考」，右窗是成品。对照同一行小字的笔画和 Logo 边缘，留意有没有白边、黑边或发糊。" },
+      { title: "核对文件信息", text: "预览下方列出文件名、像素尺寸和 PPI；显示「已超清重建」表示出图前做过 4K 超清。要回看这份文件，点「查看输出中心」。" },
+      { title: "另存交付副本", text: "确认无误后点「另存交付副本」，在交付页点「生成交付副本」。看到「交付副本已生成」后，点「打开交付文件」取文件。还要出别的尺寸时，点「继续喷绘出图」。" },
+    ],
+    result: "喷绘成品保存在正式目录的「输出 / 喷绘出图」中，交付副本另存一份，原图保持不变。",
+    next: "printLayers",
+  },
+  printLayers: {
+    title: "海报小字发虚，怎样用分层出图单独处理文字",
+    intro: "纯色底上的标题、署名和圆章，放大到喷绘尺寸后容易发虚。分层出图可以框出这些文字单独重画，照片主体也能单独增强。底色是渐变天空或照片的海报，建议直接用等比出图。",
+    steps: [
+      { title: "切到分层出图", text: "在「喷绘出图」点「分层出图」，选原图并填好喷绘规格。要固定画布大小时，在「成品画布」选「指定宽高，等比居中留边」，填宽和高的厘米数。" },
+      { title: "框出文字", text: "在「分层编辑」的「标记图层」选「文字与圆章」，在原图上拖出矩形，框住同一字色、同一底色的一组字。字色和纸色会自动从原图取；不准时点「从原图取字色」或「从原图取纸色」，再点一下原图。带纹理的大字选「纹理字」。看不清时，把「标注视图」改为「放大两倍」或「放大四倍」。",
+        picture: { src: printLayersImage, alt: "分层编辑中已框出标题、副标题、日期和圆章四个文字选区，右侧为纸色、字色和选区设置" } },
+      { title: "调整或删除选区", text: "在「编辑图文选区」选一个选区，可调「水平移动（%）」「垂直移动（%）」和「字形缩放（%）」。框错时点「删除选区」。每张海报最多 48 个图文选区。" },
+      { title: "标出照片主体（可选）", text: "选「照片主体」，沿主体外缘依次点选，末点会和起点连起来；勾选「主体边缘吸附」可贴着边缘走。点错点「撤销轮廓点」，重来点「清除主体」。主体中间露出背景时，选「主体镂空」围出这块，点「确认这处镂空」。" },
+      { title: "检查选区并提交", text: "点「检查分层选区」看预览：蓝色为文字轮廓，橙色为纹理字，绿色为主体。若提示某个选区的底色是渐变或照片，分层会把底色换成单一纸色、改变原图设计，建议改用等比出图。确认无误后点「提交出图」。" },
+      { title: "核对后再另存", text: "成品出来后，框选几处文字和主体核对，勾选「已核对图文和主体细节」，「另存交付副本」才能点。要接着改选区，点「展开分层编辑」。" },
+    ],
+    result: "同一张原图以后还要出图，可在检查选区后点「保存分层方案」存下文件，下次用「载入分层方案」直接套用；方案只能用于同一张原图。",
   },
   singleRepair: {
     title: "怎样修掉一张图上的小瑕疵",
