@@ -1,22 +1,37 @@
-import React, { createContext, useContext, useLayoutEffect, useRef, useState } from "react";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import HddeIcon from "./HddeIcon.jsx";
-import { articles, guideSections } from "./userGuideArticles.js";
 import "./userGuide.css";
 
 const OpenGuide = createContext(null);
+// The articles carry their screenshots inline (see vite.config.js), so they live in
+// their own chunk. It is preloaded shortly after start-up; once loaded, the guide
+// keeps working even if the local server stops answering.
+const GUIDE_PRELOAD_DELAY_MS = 1500;
+let guideContent = null;
+let guideRequest = null;
 
 function normalizeText(text) {
   return text.normalize("NFKC").toLowerCase().trim();
 }
 
-const searchIndex = guideSections.flatMap((section) => section.topics.map((id) => {
-  const article = articles[id];
-  const body = [section.title, section.searchAlias, article.title, article.intro, article.result,
-    ...article.steps.map((step) => `${step.title} ${step.text}`)].join("\n");
-  return { id, section: section.title, title: normalizeText(article.title), body: normalizeText(body) };
-}));
+function loadGuideContent() {
+  guideRequest ??= import("./userGuideArticles.js").then(({ articles, guideSections }) => {
+    const searchIndex = guideSections.flatMap((section) => section.topics.map((id) => {
+      const article = articles[id];
+      const body = [section.title, section.searchAlias, article.title, article.intro, article.result,
+        ...article.steps.map((step) => `${step.title} ${step.text}`)].join("\n");
+      return { id, section: section.title, title: normalizeText(article.title), body: normalizeText(body) };
+    }));
+    guideContent = { articles, guideSections, searchIndex };
+    return guideContent;
+  }).catch((error) => {
+    guideRequest = null;
+    throw error;
+  });
+  return guideRequest;
+}
 
-function searchGuide(query) {
+function searchGuide(searchIndex, query) {
   const terms = query.split(/\s+/);
   return searchIndex.filter(({ body }) => terms.every((term) => body.includes(term)))
     .map((entry) => ({ ...entry, titleHits: terms.filter((term) => entry.title.includes(term)).length }))
@@ -53,13 +68,28 @@ export function UserGuideProvider({ children }) {
   const { topic, anchor } = selection;
   const [picture, setPicture] = useState(null);
   const [actualSize, setActualSize] = useState(false);
+  const [content, setContent] = useState(guideContent);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const articles = content?.articles ?? {};
   const article = articles[topic];
-  const matches = !article && searchTerm ? searchGuide(searchTerm) : null;
+  const matches = content && !article && searchTerm ? searchGuide(content.searchIndex, searchTerm) : null;
+
+  function requestContent() {
+    setLoadFailed(false);
+    loadGuideContent().then(setContent, () => setLoadFailed(true));
+  }
+
+  useEffect(() => {
+    if (guideContent) return undefined;
+    const timer = setTimeout(() => loadGuideContent().then(setContent, () => {}), GUIDE_PRELOAD_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   function openGuide(id, anchor) {
     lastTopic.current = id;
     setQuery("");
     setSelection({ topic: id, anchor });
+    if (!guideContent) requestContent();
     panel.current.showModal();
   }
 
@@ -79,7 +109,7 @@ export function UserGuideProvider({ children }) {
     panel.current.scrollTop = 0;
     if (topic) heading.current?.focus({ preventScroll: true });
     else if (lastTopic.current) panel.current.querySelector(`[data-topic="${lastTopic.current}"]`)?.focus();
-  }, [selection]);
+  }, [selection, content]);
 
   return (
     <OpenGuide.Provider value={openGuide}>
@@ -89,7 +119,12 @@ export function UserGuideProvider({ children }) {
           <h2 id="guide-title">使用指南</h2>
           <button type="button" aria-label="关闭使用指南" onClick={() => panel.current.close()}><HddeIcon name="close" /></button>
         </header>
-        {article ? <article>
+        {!content ? <div className="hdde-guide-loading" role="status">
+          {loadFailed ? <>
+            <p>使用指南没有载入成功，请确认影界仍在运行后重试。</p>
+            <button type="button" className="hdde-guide-next" onClick={requestContent}>重新载入</button>
+          </> : <p>正在载入使用指南…</p>}
+        </div> : article ? <article>
           <button type="button" className="hdde-guide-back" onClick={() => setSelection({ topic: null })}><HddeIcon name="back" size={14} />{searchTerm ? "返回搜索结果" : "目录"}</button>
           <h3 id={`guide-${topic}`} tabIndex="-1" ref={heading}>{article.title}</h3>
           <p className="hdde-guide-intro">{article.intro}</p>
@@ -125,7 +160,7 @@ export function UserGuideProvider({ children }) {
           <nav aria-label={matches ? "教程搜索结果" : "指南目录"}>
           {matches ? matches.map(({ id, section }) => <button key={id} type="button" data-topic={id} onClick={() => selectTopic(id)}>
             <span>{articles[id].title}<small className="hdde-guide-result-section">{section}</small></span><HddeIcon name="chevron" size={16} />
-          </button>) : guideSections.map((section) => <section key={section.title}>
+          </button>) : content.guideSections.map((section) => <section key={section.title}>
             <h3>{section.title}</h3>
             {section.topics.map((id) => <button key={id} type="button" data-topic={id} onClick={() => selectTopic(id)}>
               {articles[id].title}<HddeIcon name="chevron" size={16} />

@@ -66,6 +66,8 @@
 }
 .hdde-guide-panel nav, .hdde-guide-panel article { padding: 16px 20px 24px; }
 .hdde-guide-search { padding: 16px 20px 0; }
+.hdde-guide-loading { padding: 24px 20px; line-height: 1.6; color: var(--text-secondary); }
+.hdde-guide-loading p { margin: 0 0 12px; }
 .hdde-guide-search label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
 .hdde-guide-search-field {
   display: flex; align-items: center; gap: 8px; padding-inline-start: 12px;
