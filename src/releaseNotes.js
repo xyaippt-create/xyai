@@ -6,6 +6,29 @@
 // docs/drafts/RELEASE_NOTES_HISTORY_DRAFT.md (2026-10-29).
 export const RELEASE_NOTES = Object.freeze([
   {
+    version: "0.8.6-dev",
+    label: "V0.8.6 开发版",
+    date: "2026-11-19",
+    groups: [{
+      title: "版本更新",
+      items: ["影界 HDDE 进入 V0.8.6 开发版。"],
+    }],
+  },
+  {
+    version: "0.8.5-dev",
+    label: "V0.8.5 开发版",
+    date: "2026-11-19",
+    groups: [{
+      title: "版本更新",
+      items: ["影界 HDDE 进入 V0.8.5 开发版。"],
+    }, {
+      title: "颜色校正",
+      items: [
+        "挑档校色点白点时，如果点的是暖光（比如暖黄灯光下的店铺），三档都会保留一点暖调，“强”不再把整张图校得发冷发蓝；冷色偏、偏绿、偏品红照常完全校正。有白点时建议档改回“强”。",
+      ],
+    }],
+  },
+  {
     version: "0.8.3-dev",
     label: "V0.8.3 开发版",
     date: "2026-11-19",
