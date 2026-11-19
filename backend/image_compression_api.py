@@ -520,6 +520,7 @@ def register_image_compression_routes(
         LevelPickAnalysis,
         NeutralPointError,
         analyze_level_pick,
+        group_transferable,
         transfer_level_pick_correction,
         build_level_pick_preview,
         level_safety,
@@ -5815,7 +5816,7 @@ def register_image_compression_routes(
                 source = require_token(payload[f"{role.lower()}_source_token"], role="source")
             except HTTPException as exc:
                 raise HTTPException(status_code=404, detail={"code": f"{role}_TOKEN_INVALID", "message": f"{label}不可用，请重新选择。"}) from exc
-            if _sha256_file(Path(source["path"])) != source.get("sha256"):
+            if await asyncio.to_thread(_sha256_file, Path(source["path"])) != source.get("sha256"):
                 raise HTTPException(status_code=409, detail={"code": f"{role}_SOURCE_IDENTITY_CHANGED", "message": f"{label}内容发生变化，请重新选择。"})
             try:
                 await asyncio.to_thread(load_color_managed_source, Path(source["path"]))
@@ -5853,7 +5854,7 @@ def register_image_compression_routes(
                 raise HTTPException(status_code=400, detail={"code": "NEUTRAL_POINT_INVALID", "message": "白点位置无效，请在图片上重新点选。"})
         source = require_token(str(payload.get("source_token") or ""), role="source")
         source_path = Path(str(source["path"])).resolve()
-        if _sha256_file(source_path) != source.get("sha256"):
+        if await asyncio.to_thread(_sha256_file, source_path) != source.get("sha256"):
             raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "图片内容发生变化，请重新选择。"})
         reference_source = None
         if payload.get("reference_source_token"):
@@ -5862,7 +5863,7 @@ def register_image_compression_routes(
             except HTTPException as exc:
                 raise HTTPException(status_code=404, detail={"code": "REFERENCE_TOKEN_INVALID", "message": "参考图片会话无效，请重新选择。"}) from exc
             reference_path = Path(str(reference_source["path"])).resolve()
-            if _sha256_file(reference_path) != reference_source.get("sha256"):
+            if await asyncio.to_thread(_sha256_file, reference_path) != reference_source.get("sha256"):
                 raise HTTPException(status_code=409, detail={"code": "REFERENCE_IDENTITY_CHANGED", "message": "参考图片内容发生变化，请重新选择。"})
         prune_level_preview_sessions()
         try:
@@ -5974,13 +5975,19 @@ def register_image_compression_routes(
             raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_ALREADY_USED", "message": "这组预览已经生成过结果，请重新生成预览后再选择。"})
         if level != "original" and not session["levels"][level]["selectable"]:
             raise HTTPException(status_code=409, detail={"code": "LEVEL_NOT_SELECTABLE", "message": "该档位未通过安全检查，不能选择。"})
-        source_path = Path(str(session["source"]["path"])).resolve()
-        if not source_path.is_file() or _sha256_file(source_path) != session["source_sha256"]:
-            raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "原图已变化或不存在，请重新选择图片。"})
-        if session.get("reference"):
-            reference_path = Path(str(session["reference"]["path"])).resolve()
-            if not reference_path.is_file() or _sha256_file(reference_path) != session["reference_sha256"]:
-                raise HTTPException(status_code=409, detail={"code": "REFERENCE_IDENTITY_CHANGED", "message": "参考图已变化或不存在，请重新选择参考图。"})
+        # The identity checks below hash off the event loop; hold the session meanwhile so a
+        # second request for the same preview cannot pass the "already used" check above.
+        session["running_task_id"] = "IDENTITY_CHECK"
+        try:
+            source_path = Path(str(session["source"]["path"])).resolve()
+            if not source_path.is_file() or await asyncio.to_thread(_sha256_file, source_path) != session["source_sha256"]:
+                raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "原图已变化或不存在，请重新选择图片。"})
+            if session.get("reference"):
+                reference_path = Path(str(session["reference"]["path"])).resolve()
+                if not reference_path.is_file() or await asyncio.to_thread(_sha256_file, reference_path) != session["reference_sha256"]:
+                    raise HTTPException(status_code=409, detail={"code": "REFERENCE_IDENTITY_CHANGED", "message": "参考图已变化或不存在，请重新选择参考图。"})
+        finally:
+            session["running_task_id"] = None
         if level == "original":
             session["used_by_task_id"] = "ORIGINAL_SELECTED"
             release_used_level_preview(session)
@@ -6066,13 +6073,21 @@ def register_image_compression_routes(
             analysis = level_session.get("measurement_cache")
             if not isinstance(analysis, LevelPickAnalysis):
                 raise HTTPException(status_code=409, detail={"code": "LEVEL_PREVIEW_NOT_FOUND", "message": "代表图预览已失效，请重新生成预览。"})
+            if not multi_level and not group_transferable(analysis):
+                raise HTTPException(status_code=409, detail={"code": "COLOR_BATCH_NOTHING_TO_TRANSFER",
+                                                             "message": "代表图只有发灰问题、没有偏色，整组处理不会改变其他图片。请逐张挑档校色。"})
             representative_path = Path(str(level_session["source"]["path"])).resolve()
             representative_index = next((index for index, source in enumerate(sources)
                                          if Path(str(source["path"])).resolve() == representative_path), None)
             if representative_index is None:
                 raise HTTPException(status_code=400, detail={"code": "COLOR_BATCH_LEVEL_PICK_INVALID",
                                                              "message": "所选图片与这组预览不是同一张，请重新生成预览。" if multi_level else "代表图必须是本批图片中的一张。"})
-            if not representative_path.is_file() or _sha256_file(representative_path) != level_session["source_sha256"]:
+            level_session["running_task_id"] = "IDENTITY_CHECK"  # held while hashing off the event loop
+            try:
+                unchanged = representative_path.is_file() and await asyncio.to_thread(_sha256_file, representative_path) == level_session["source_sha256"]
+            finally:
+                level_session["running_task_id"] = None
+            if not unchanged:
                 raise HTTPException(status_code=409, detail={"code": "SOURCE_IDENTITY_CHANGED", "message": "代表图已变化或不存在，请重新生成预览。"})
         output_root = effective_color_output_root(payload)
         output_dir = color_output_dir(Path(str(output_root["normalized_path"])).resolve())

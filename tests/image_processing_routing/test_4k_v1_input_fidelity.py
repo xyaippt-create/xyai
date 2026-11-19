@@ -97,3 +97,35 @@ class ChromaFollowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuperResolutionWatchdogTests(unittest.TestCase):
+    def test_a_silent_hung_engine_is_killed_at_the_deadline(self):
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = Path(tmp) / "tool"
+            (tool / "models").mkdir(parents=True)
+            for name in ("realesrgan-ncnn-vulkan.exe", f"models/{fk.FOUR_K_V1_SR_MODEL}.param", f"models/{fk.FOUR_K_V1_SR_MODEL}.bin"):
+                (tool / name).write_bytes(b"")
+            launched = []
+            real_popen = subprocess.Popen
+
+            def hang(command, **options):
+                # Stands in for an engine that hangs with stdout open and prints nothing.
+                process = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **{**options, "cwd": tmp})
+                launched.append(process)
+                return process
+
+            with mock.patch.object(fk, "_sr_tool_dir", return_value=tool),                  mock.patch.object(fk, "FOUR_K_V1_SR_TIMEOUT_SECONDS", 1),                  mock.patch.object(fk.subprocess, "Popen", side_effect=hang):
+                started = time.monotonic()
+                with self.assertRaises(fk.FourKV1ProcessingError) as raised:
+                    fk._run_super_resolution(Image.new("RGB", (8, 8)), Path(tmp))
+            self.assertLess(time.monotonic() - started, 15)
+            self.assertIn("超时", str(raised.exception))
+            self.assertIsNotNone(launched[0].poll())  # the engine process is gone
+            self.assertEqual(list(Path(tmp).glob(".sr_*")), [])

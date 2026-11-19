@@ -591,6 +591,18 @@ class BatchLevelPickApiTests(LevelPickApiTests):
         again = self.batch(sources, rep_preview, "medium", expect=409)
         self.assertEqual(again["detail"]["code"], "LEVEL_PREVIEW_ALREADY_USED")
 
+    def test_haze_only_representative_cannot_drive_a_group(self):
+        # A grey veil without a colour cast: the representative would only be de-hazed, and
+        # haze never transfers, so the rest of the group would be published unchanged.
+        veiled = (cast_scene(cast=(0, 0, 0)).astype(np.float32) * 0.55 + 70).astype(np.uint8)
+        sources = [self.intake(veiled, name="hazy.png"), self.intake(veiled[:, ::-1].copy(), name="hazy2.png")]
+        preview = self.preview(sources[0])
+        self.assertIn("GREY", preview["measurement"]["category"])
+        level = next(item["level"] for item in preview["levels"] if item["level"] != "original" and item["selectable"])
+        refused = self.batch(sources, preview, level, expect=409)
+        self.assertEqual(refused["detail"]["code"], "COLOR_BATCH_NOTHING_TO_TRANSFER")
+        self.assertEqual(self.color_dir_files(), [])
+
     def test_one_unsafe_image_keeps_its_original_and_the_rest_continue(self):
         from unittest import mock
         import engine.color_correction.level_pick as level_pick_module

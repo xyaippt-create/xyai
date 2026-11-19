@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -440,6 +441,7 @@ def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
         tail: list[str] = []
         last_reported = -1
+        timed_out = threading.Event()
         try:
             process = subprocess.Popen(
                 command,
@@ -453,6 +455,15 @@ def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None)
             )
         except OSError as exc:
             raise FourKV1ProcessingError("SR_ENGINE_UNAVAILABLE", "image_processing", f"4K超分引擎无法启动：{exc}") from exc
+        # Reading stdout blocks until the engine closes it, so the deadline is enforced by a
+        # watchdog that kills the process; a hung engine would otherwise block forever.
+        def expire() -> None:
+            timed_out.set()
+            process.kill()
+
+        watchdog = threading.Timer(FOUR_K_V1_SR_TIMEOUT_SECONDS, expire)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -467,14 +478,19 @@ def _run_super_resolution(rgb: Image.Image, work_dir: Path, stage_callback=None)
                     if progress >= last_reported + 3:
                         last_reported = progress
                         _emit_stage(stage_callback, "image_processing", progress, f"正在进行4K超分细节重建（{match.group(1)}%）")
-            returncode = process.wait(timeout=FOUR_K_V1_SR_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
+            returncode = process.wait()
+        finally:
+            watchdog.cancel()
+            if process.poll() is None:  # leaving on an exception: never orphan the engine
+                process.kill()
+                process.wait()
+            process.stdout.close()
+        if timed_out.is_set():
             raise FourKV1ProcessingError(
                 "SR_ENGINE_FAILED",
                 "image_processing",
                 f"4K超分引擎超时（{FOUR_K_V1_SR_TIMEOUT_SECONDS}s），已停止。",
-            ) from exc
+            )
         if returncode != 0 or not sr_output.is_file():
             raise FourKV1ProcessingError(
                 "SR_ENGINE_FAILED",

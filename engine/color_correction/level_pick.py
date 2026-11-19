@@ -564,6 +564,12 @@ def _analyze_user_point(pixels: np.ndarray, point: Any) -> LevelPickAnalysis:
     )
 
 
+def group_transferable(reference: LevelPickAnalysis) -> bool:
+    """Whether the representative carries a white-point correction the rest of a group can reuse."""
+
+    return bool(reference.neutral.get("reliable")) and len(reference.tone_curve) > 2
+
+
 def transfer_level_pick_correction(pixels: np.ndarray, reference: LevelPickAnalysis) -> LevelPickAnalysis:
     """S75: apply the representative's white-point correction to another image of the group.
 
@@ -573,6 +579,10 @@ def transfer_level_pick_correction(pixels: np.ndarray, reference: LevelPickAnaly
     transferred: its black and white points belong to one image only.
     """
 
+    if not group_transferable(reference):
+        # Without a colour curve the representative was only de-hazed, and haze is never
+        # transferred: every other image would come out byte-identical yet count as corrected.
+        raise LevelPickError("LEVEL_PICK_NOTHING_TO_TRANSFER")
     rgb = np.ascontiguousarray(pixels[..., :3])
     visible = pixels[..., 3] >= VISIBLE_ALPHA_MIN if pixels.shape[2] == 4 else np.ones(rgb.shape[:2], bool)
     view, visible_view = _analysis_view(rgb, visible)
@@ -831,5 +841,6 @@ __all__ = [
     "pixel_sha256",
     "render_level",
     "sample_neutral_point",
+    "group_transferable",
     "transfer_level_pick_correction",
 ]
