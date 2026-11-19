@@ -12,7 +12,7 @@
 开始或结束时 staging 非空。
 
 纠正：
-不得自行 unstage、reset 或 restore；报告实际状态并等待修正后的任务卡。
+报告实际状态和冲突证据。按 `SKILL.md` 第 5、12 节保护已有暂存内容；只有存在冲突、无法证明安全或任务卡明确要求 staging 为空时才停止相应操作。
 
 ## PROTECTED_RESULT_DAMAGE
 
