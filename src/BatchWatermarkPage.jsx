@@ -1,22 +1,41 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { HddePageHeader, HddeStatusPill } from "./HddeUI.jsx";
+import { HddePageHeader } from "./HddeUI.jsx";
+import WatermarkPresets from "./WatermarkPresets.jsx";
+import { checkBatchOutput } from "./batchOutputPreflight.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const ACCEPTED_IMAGE = /\.(png|jpe?g)$/i;
+const MAX_WATERMARK_BYTES = 50 * 1024 * 1024;
+const MAX_WATERMARK_FILES = 100;
 const POSITION_OPTIONS = Object.freeze([
-  ["top-left", "左上"], ["top-center", "上中"], ["top-right", "右上"],
-  ["middle-left", "左中"], ["center", "居中"], ["middle-right", "右中"],
-  ["bottom-left", "左下"], ["bottom-center", "下中"], ["bottom-right", "右下"],
+  ["top-left", "左上", "↖"], ["top-center", "上中", "↑"], ["top-right", "右上", "↗"],
+  ["middle-left", "左中", "←"], ["center", "居中", "◎"], ["middle-right", "右中", "→"],
+  ["bottom-left", "左下", "↙"], ["bottom-center", "下中", "↓"], ["bottom-right", "右下", "↘"],
 ]);
-const STATUS_LABELS = Object.freeze({ pending: "等待处理", processing: "处理中", completed: "已完成", failed: "失败", canceled: "已取消" });
+const STATUS_LABELS = Object.freeze({ pending: "等待处理", processing: "处理中", completed: "已完成", failed: "失败", canceled: "已取消", unconfirmed: "结果未确认" });
+const TERMINAL_ITEM_STATUSES = new Set(["completed", "failed", "canceled"]);
 const BATCH_RESULT_STATUSES = Object.freeze(["FULL_SUCCESS", "PARTIAL_SUCCESS", "FAILED", "CANCELED"]);
 const BATCH_ID_PATTERN = /^watermark_batch_[a-f0-9]{16}$/i;
+const BATCH_STATUS_INTERVAL_MS = 300;
+const BATCH_CONFIRMATION_TIMEOUT_MS = 60_000;
+const BATCH_PRE_SUBMIT_REJECTIONS = new Set([
+  "FORMAL_DIRECTORY_NOT_READY", "WATERMARK_OUTPUT_UNSAFE", "WATERMARK_RESULT_IDS_INVALID",
+  "WATERMARK_BATCH_ENTRIES_INVALID", "WATERMARK_BATCH_SIZE_INVALID", "WATERMARK_SPEC_INVALID", "WATERMARK_LOGO_INVALID",
+  "BATCH_DISK_SPACE_INSUFFICIENT", "BATCH_DISK_SPACE_UNAVAILABLE",
+]);
 const SCRUB_THRESHOLD_PX = 4;
 const FONT_OPTIONS = Object.freeze([
   ["source_han_sans_cn_medium", "思源黑体 CN Medium", "hdde-watermark-font--sans-medium"],
   ["source_han_serif_cn_heavy", "思源宋体 CN Heavy", "hdde-watermark-font--serif-heavy"],
 ]);
 const TEXT_PRESETS = Object.freeze(["仅供预览", "内部资料", "仅供内部使用", "请勿转载", "版权所有", "样稿", "DEMO", "未经授权禁止使用"]);
+
+function watermarkInputIssue(name, size, logo = false) {
+  if (!(logo ? /\.png$/i : ACCEPTED_IMAGE).test(name)) return logo ? "图片水印必须是透明 PNG。" : "仅支持 PNG、JPG、JPEG。";
+  if (size <= 0) return "文件为空。";
+  if (size > MAX_WATERMARK_BYTES) return "单个文件不得超过 50 MiB。";
+  return "";
+}
 
 export function validateNumericDraft(rawValue, { label, min, max, step = 1 }) {
   const raw = String(rawValue ?? "").trim();
@@ -92,11 +111,35 @@ function formatBytes(value) {
 }
 
 function makeItem(file) {
-  return { id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`, file, status: "pending", failureReason: "", outputName: "" };
+  return { id: crypto.randomUUID().replaceAll("-", ""), file, status: "pending", failureReason: "", outputName: "" };
 }
 
 function itemDisplayName(item) {
   return item?.file?.name || item?.fileName || "未命名图片";
+}
+
+export function matchBatchItems(items, result, batchId, useServerId = false) {
+  const returned = result?.items;
+  const lookupId = (item) => useServerId ? item.serverItemId : item.id;
+  const byId = new Map((Array.isArray(returned) ? returned : []).map((item) => [useServerId ? item?.item_id : item?.client_item_id, item]));
+  if (result?.batch_id !== batchId || returned?.length !== items.length || byId.size !== items.length ||
+      items.some((item) => !lookupId(item) || !byId.has(lookupId(item)))) {
+    throw new Error("返回的批量水印结果与提交的图片清单不一致，请在输出中心核对批次。");
+  }
+  return items.map((item) => {
+    const outcome = byId.get(lookupId(item));
+    if (!Object.hasOwn(STATUS_LABELS, outcome.status) || outcome.status === "unconfirmed") {
+      throw new Error("批量水印返回了无法识别的图片状态。");
+    }
+    return {
+      ...item,
+      serverItemId: outcome.item_id,
+      status: outcome.status,
+      failureReason: outcome.failure_reason || "",
+      outputName: outcome.output_file_name || "",
+      outputResultId: outcome.result_id || "",
+    };
+  });
 }
 
 export function validateRecoveredBatchResult(recovered, requestedBatchId) {
@@ -114,11 +157,13 @@ export function validateRecoveredBatchResult(recovered, requestedBatchId) {
 export function mapRecoveredBatchItems(recovered) {
   return recovered.items.map((item, index) => ({
     id: `${recovered.batch_id}-${item?.item_id || "item"}-${index}`,
+    serverItemId: item?.item_id,
     file: null,
     fileName: item?.file_name || item?.original_filename || item?.output_file_name || `第 ${index + 1} 张图片`,
     status: item?.status === "completed" ? "completed" : item?.status === "canceled" ? "canceled" : "failed",
     failureReason: item?.failure_reason || "",
     outputName: item?.output_file_name || "",
+    outputResultId: item?.result_id || "",
     recovered: true,
   }));
 }
@@ -352,9 +397,12 @@ function ColorField({ value, onChange }) {
   );
 }
 
-export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }) {
+export default function BatchWatermarkPage({ active = true, onNavigate, continueResultId = "", requestedBatchId = "" }) {
   const imageInputRef = useRef(null);
   const logoInputRef = useRef(null);
+  const batchLocked = useRef(null);
+  const outputCheck = useRef(null);
+  const unconfirmedBatch = useRef(null);
   const [items, setItems] = useState([]);
   const [activeId, setActiveId] = useState("");
   const [kind, setKind] = useState("text");
@@ -370,17 +418,26 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
   const [tile, setTile] = useState(false);
   const [logoFile, setLogoFile] = useState(null);
   const [imageWidthPercent, setImageWidthPercent] = useState(18);
-  const [sourcePreviewUrl, setSourcePreviewUrl] = useState("");
-  const [watermarkPreviewUrl, setWatermarkPreviewUrl] = useState("");
-  const [previewState, setPreviewState] = useState("idle");
+  const [applyingPreset, setApplyingPreset] = useState(false);
+  const [presetRevision, setPresetRevision] = useState(0);
+  const [sourcePreview, setSourcePreview] = useState(null);
+  const [watermarkPreview, setWatermarkPreview] = useState(null);
   const [running, setRunning] = useState(false);
+  const [checkingOutput, setCheckingOutput] = useState(false);
   const [runningBatchId, setRunningBatchId] = useState("");
+  const [recoveryAction, setRecoveryAction] = useState("");
   const [error, setError] = useState("");
+  const [importIssues, setImportIssues] = useState([]);
   const [result, setResult] = useState(null);
-  const requestedBatchId = typeof window === "undefined" ? "" : (new URLSearchParams(window.location.search).get("batch_id") || "").trim();
   const [recoveryState, setRecoveryState] = useState(requestedBatchId ? "loading" : "idle");
+  const [loadedResultId, setLoadedResultId] = useState("");
+  const normalizedResultId = String(continueResultId || "").trim();
+  const resultLoading = Boolean(normalizedResultId && !requestedBatchId && loadedResultId !== normalizedResultId);
 
-  const activeItem = items.find((item) => item.id === activeId) || items[0] || null;
+  const activeIndex = Math.max(0, items.findIndex((item) => item.id === activeId));
+  const activeItem = items[activeIndex] || null;
+  const { id: previewItemId, file: previewFile, resultId: previewResultId, previewUrl: previewAssetUrl } = activeItem || {};
+  const sourcePreviewUrl = sourcePreview?.id === activeItem?.id ? sourcePreview?.url : "";
   const hasRunnableItems = items.length > 0 && items.every((item) => item.file || item.resultId);
   const marginAvailability = getMarginAvailability(position, kind === "text" && tile);
   const spec = useMemo(() => ({
@@ -388,6 +445,9 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
     margin_x: marginX, margin_y: marginY, tile: kind === "text" && tile,
     image_width_percent: imageWidthPercent,
   }), [kind, text, fontId, color, opacity, textSize, rotation, position, marginX, marginY, tile, imageWidthPercent]);
+  const canPreview = Boolean((previewFile || previewResultId) && (kind === "image" ? logoFile : text.trim()));
+  const currentPreview = watermarkPreview?.id === previewItemId && watermarkPreview?.spec === spec && watermarkPreview?.logoFile === logoFile ? watermarkPreview : null;
+  const previewState = currentPreview?.url ? "ready" : currentPreview?.error ? "error" : canPreview ? "loading" : "idle";
 
   useEffect(() => {
     if (!requestedBatchId) {
@@ -439,7 +499,7 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
   }, [requestedBatchId]);
 
   useEffect(() => {
-    const normalized = String(continueResultId || "").trim();
+    const normalized = normalizedResultId;
     if (!normalized || requestedBatchId) return undefined;
     const controller = new AbortController();
     const loadResult = async () => {
@@ -447,9 +507,14 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
         const response = await fetch(`${API_BASE}/api/result-assets/${encodeURIComponent(normalized)}`, { cache: "no-store", signal: controller.signal });
         const body = await response.json().catch(() => ({}));
         if (!response.ok || !body?.data) throw new Error(responseMessage(body, "当前成品无法作为水印输入。"));
+        if (controller.signal.aborted) return;
         const source = body.data;
+        const name = source.file_name || "";
+        const size = Number(source.size_bytes || 0);
+        const issue = watermarkInputIssue(name, size);
+        if (issue) throw new Error(`${name || "当前成品"}：${issue}`);
         const item = {
-          id: `result-${normalized}`,
+          id: crypto.randomUUID().replaceAll("-", ""),
           file: null,
           resultId: normalized,
           fileName: source.file_name || "result.png",
@@ -461,46 +526,46 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
           failureReason: "",
           outputName: "",
         };
-        setItems([item]);
-        setActiveId(item.id);
+        setItems((current) => current.some((entry) => entry.resultId === normalized) ? current : [item, ...current.filter((entry) => !entry.recovered)]);
         setResult(null);
         setRecoveryState("idle");
-        setError("");
       } catch (reason) {
-        if (reason.name !== "AbortError") setError(reason.message || "当前成品无法作为水印输入。");
+        if (!controller.signal.aborted) setError(reason.message || "当前成品无法作为水印输入。");
+      } finally {
+        if (!controller.signal.aborted) setLoadedResultId(normalized);
       }
     };
     void loadResult();
     return () => controller.abort();
-  }, [continueResultId, requestedBatchId]);
+  }, [normalizedResultId, requestedBatchId]);
 
   useEffect(() => {
-    if (!activeItem?.file && !activeItem?.previewUrl) {
-      setSourcePreviewUrl("");
+    if (!previewFile && !previewAssetUrl) {
+      setSourcePreview(null);
       return undefined;
     }
-    if (activeItem.previewUrl) {
-      setSourcePreviewUrl(activeItem.previewUrl);
+    if (previewAssetUrl) {
+      setSourcePreview({ id: previewItemId, url: previewAssetUrl });
       return undefined;
     }
-    const url = URL.createObjectURL(activeItem.file);
-    setSourcePreviewUrl(url);
+    const url = URL.createObjectURL(previewFile);
+    setSourcePreview({ id: previewItemId, url });
     return () => URL.revokeObjectURL(url);
-  }, [activeItem]);
+  }, [previewItemId, previewFile, previewAssetUrl]);
 
   useEffect(() => {
-    if ((!activeItem?.file && !activeItem?.resultId) || (kind === "image" && !logoFile) || (kind === "text" && !text.trim())) {
-      setPreviewState("idle");
-      setWatermarkPreviewUrl((current) => { if (current) URL.revokeObjectURL(current); return ""; });
+    if (!canPreview) {
+      setWatermarkPreview(null);
       return undefined;
     }
     const controller = new AbortController();
+    const identity = { id: previewItemId, spec, logoFile };
     const timer = window.setTimeout(async () => {
-      setPreviewState("loading");
       const formData = new FormData();
-      if (activeItem.resultId) formData.append("result_id", activeItem.resultId);
-      else formData.append("file", activeItem.file, activeItem.file.name);
+      if (previewResultId) formData.append("result_id", previewResultId);
+      else formData.append("file", previewFile, previewFile.name);
       formData.append("spec_json", JSON.stringify(spec));
+      formData.append("fit_preview", "true");
       if (logoFile) formData.append("watermark_file", logoFile, logoFile.name);
       try {
         const response = await fetch(`${API_BASE}/api/batch-watermark/preview`, { method: "POST", body: formData, signal: controller.signal });
@@ -509,29 +574,47 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
           throw new Error(responseMessage(body, "无法生成真实水印预览。"));
         }
         const blob = await response.blob();
+        if (controller.signal.aborted) return;
         const url = URL.createObjectURL(blob);
-        setWatermarkPreviewUrl((current) => { if (current) URL.revokeObjectURL(current); return url; });
-        setPreviewState("ready");
-        setError("");
+        setWatermarkPreview({ ...identity, url });
       } catch (reason) {
-        if (reason.name === "AbortError") return;
-        setPreviewState("error");
-        setError(reason.message || "无法生成真实水印预览。");
+        if (controller.signal.aborted) return;
+        setWatermarkPreview({ ...identity, error: reason.message || "无法生成真实水印预览。" });
       }
     }, 280);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [activeItem, kind, logoFile, spec, text]);
+  }, [previewItemId, previewFile, previewResultId, canPreview, logoFile, spec]);
 
-  useEffect(() => () => { if (watermarkPreviewUrl) URL.revokeObjectURL(watermarkPreviewUrl); }, [watermarkPreviewUrl]);
+  useEffect(() => () => { if (watermarkPreview?.url) URL.revokeObjectURL(watermarkPreview.url); }, [watermarkPreview]);
+  useEffect(() => () => {
+    batchLocked.current?.abort();
+    outputCheck.current?.abort();
+  }, []);
+
+  const submissionLocked = running || checkingOutput || Boolean(recoveryAction) || applyingPreset;
+  const inputLocked = submissionLocked || resultLoading || recoveryState === "loading";
 
   const addImages = (fileList) => {
+    if (batchLocked.current || outputCheck.current || unconfirmedBatch.current || inputLocked) return;
     const selected = Array.from(fileList || []);
-    const valid = selected.filter((file) => ACCEPTED_IMAGE.test(file.name));
-    if (valid.length !== selected.length) setError("已忽略非 PNG、JPG、JPEG 文件。");
+    if (!selected.length) return;
+    const issues = [];
+    const valid = selected.filter((file) => {
+      const reason = watermarkInputIssue(file.name, file.size);
+      if (reason) issues.push({ name: file.name, reason });
+      return !reason;
+    });
+    const alreadyAdded = items.filter((item) => !item.recovered).length;
+    if (alreadyAdded + valid.length > MAX_WATERMARK_FILES) {
+      const reason = `本次选图超过每批 ${MAX_WATERMARK_FILES} 张的上限，请分批添加。`;
+      setImportIssues([...issues, ...valid.map((file) => ({ name: file.name, reason }))]);
+      return;
+    }
+    setImportIssues(issues);
     if (!valid.length) return;
     const additions = valid.map(makeItem);
-    const replacingRecoveredItems = items.some((item) => !item.file);
-    setItems((current) => current.some((item) => !item.file) ? additions : [...current, ...additions]);
+    const replacingRecoveredItems = items.some((item) => item.recovered);
+    setItems((current) => [...current.filter((item) => !item.recovered), ...additions]);
     setActiveId((current) => replacingRecoveredItems ? additions[0].id : current || additions[0].id);
     setResult(null);
     setRecoveryState("idle");
@@ -539,15 +622,17 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
   };
 
   const removeItem = (id) => {
+    if (batchLocked.current || unconfirmedBatch.current || inputLocked) return;
     setItems((current) => current.filter((item) => item.id !== id));
     if (activeId === id) setActiveId("");
     setResult(null);
   };
 
   const selectLogo = (file) => {
-    if (!file) return;
-    if (!/\.png$/i.test(file.name)) {
-      setError("图片水印必须选择透明 PNG。当前文件未加入。");
+    if (!file || batchLocked.current || outputCheck.current || unconfirmedBatch.current) return;
+    const issue = watermarkInputIssue(file.name, file.size, true);
+    if (issue) {
+      setError(`${file.name}：${issue} 当前文件未加入。`);
       return;
     }
     setLogoFile(file);
@@ -555,41 +640,197 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
     setResult(null);
   };
 
-  const runBatch = async () => {
-    if (!hasRunnableItems || running || (kind === "image" && !logoFile) || (kind === "text" && !text.trim())) return;
-    setRunning(true);
-    setError("");
-    setResult(null);
-    setItems((current) => current.map((item) => ({ ...item, status: "processing", failureReason: "", outputName: "" })));
-    const formData = new FormData();
-    items.filter((item) => item.file).forEach((item) => formData.append("files", item.file, item.file.name));
-    const batchId = `watermark_batch_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
-    setRunningBatchId(batchId);
-    formData.append("batch_id", batchId);
-    formData.append("result_ids_json", JSON.stringify(items.map((item) => item.resultId).filter(Boolean)));
-    formData.append("spec_json", JSON.stringify(spec));
-    if (logoFile) formData.append("watermark_file", logoFile, logoFile.name);
-    try {
-      const response = await fetch(`${API_BASE}/api/batch-watermark/batches`, { method: "POST", body: formData });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body?.data) throw new Error(responseMessage(body, "批量水印处理失败。"));
-      const serverItems = body.data.items || [];
-      setItems((current) => current.map((item, index) => ({
-        ...item,
-        status: serverItems[index]?.status || "failed",
-        failureReason: serverItems[index]?.failure_reason || "",
-        outputName: serverItems[index]?.output_file_name || "",
-        resultId: serverItems[index]?.result_id || item.resultId || "",
-      })));
-      setResult(body.data);
-      if (body.data.failed) setError(`${body.data.failed} 张图片处理失败，请查看文件列表中的真实原因。`);
-    } catch (reason) {
-      setItems((current) => current.map((item) => ({ ...item, status: "failed", failureReason: reason.message || "请求失败" })));
-      setError(reason.message || "批量水印处理失败。");
-    } finally {
+  const applyPreset = (saved, file, message = "") => {
+    setKind(saved.kind);
+    setOpacity(saved.opacity);
+    setPosition(saved.position);
+    setMarginX(saved.margin_x);
+    setMarginY(saved.margin_y);
+    setLogoFile(file);
+    if (saved.kind === "image") {
+      setImageWidthPercent(saved.image_width_percent);
+    } else {
+      setText(saved.text);
+      setFontId(saved.font_id);
+      setColor(saved.color);
+      setTextSize(saved.text_size);
+      setRotation(saved.rotation);
+      setTile(saved.tile);
+    }
+    setPresetRevision((revision) => revision + 1);
+    setError(message);
+  };
+
+  const trackBatch = async (operation, action = "submit") => {
+    if (!operation || batchLocked.current) return;
+    const { batchId, batchItems, submit, retryOf } = operation;
+    const minimumRevision = retryOf ? (retryOf.retry_revision || 0) + 1 : 0;
+    const matchSnapshot = (snapshot) => matchBatchItems(batchItems, snapshot, batchId, Boolean(retryOf));
+    const controller = new AbortController();
+    const isCurrent = () => batchLocked.current === controller && !controller.signal.aborted;
+    const statusUrl = `${API_BASE}/api/batch-watermark/batches/${encodeURIComponent(batchId)}`;
+    let lastConfirmedAt = Date.now();
+    let pollTimer;
+    controller.signal.addEventListener("abort", () => window.clearTimeout(pollTimer), { once: true });
+    const stopTracking = () => {
+      controller.abort();
+      batchLocked.current = null;
       setRunning(false);
       setRunningBatchId("");
+    };
+    const finish = (snapshot, matched) => {
+      if ((snapshot.retry_revision || 0) < minimumRevision) {
+        throw new Error("返回的批量水印结果早于本次重试。");
+      }
+      if (matched.some((item) => !TERMINAL_ITEM_STATUSES.has(item.status))) {
+        throw new Error("批量水印结果仍有未结束的图片。");
+      }
+      unconfirmedBatch.current = null;
+      stopTracking();
+      setItems(matched);
+      setResult(snapshot);
+      if (snapshot.failed) setError(`${snapshot.failed} 张图片处理失败，请查看文件列表中的真实原因。`);
+    };
+    const pause = (message, canResubmit = false) => {
+      unconfirmedBatch.current = operation;
+      stopTracking();
+      setRecoveryAction(canResubmit ? "resubmit" : "query");
+      setItems((current) => current.map((item) => TERMINAL_ITEM_STATUSES.has(item.status) ? item : { ...item, status: "unconfirmed" }));
+      setError(message);
+    };
+    const pollStatus = async () => {
+      const request = new AbortController();
+      const abortRequest = () => request.abort();
+      const timeout = window.setTimeout(abortRequest, 5000);
+      controller.signal.addEventListener("abort", abortRequest, { once: true });
+      try {
+        const response = await fetch(statusUrl, { cache: "no-store", signal: request.signal });
+        const body = await response.json();
+        if (!isCurrent()) return;
+        if (!response.ok) {
+          if (action === "query" && !operation.confirmed && !retryOf &&
+              response.status === 404 && body?.detail?.code === "WATERMARK_BATCH_NOT_FOUND") {
+            pause("暂未查到原批次，提交结果仍未确认。可以再次查询，或用原图片和参数继续提交。", true);
+            return;
+          }
+          throw new Error("暂时无法查询原批次。");
+        }
+        const snapshot = body?.data;
+        const matched = matchSnapshot(snapshot);
+        const terminal = BATCH_RESULT_STATUSES.includes(snapshot.batch_status);
+        if ((snapshot.retry_revision || 0) < minimumRevision) {
+          if (action === "query" && !operation.confirmed && terminal) {
+            pause("尚未确认本次失败项重试。可以再次查询，或继续提交原重试。", true);
+            return;
+          }
+          throw new Error("尚未读到本次重试的状态。");
+        }
+        if (terminal) {
+          operation.confirmed = true;
+          finish(snapshot, matched);
+        } else if (snapshot.status === "pending" || snapshot.status === "processing") {
+          operation.confirmed = true;
+          lastConfirmedAt = Date.now();
+          setRunningBatchId(batchId);
+          setItems(matched);
+        } else {
+          throw new Error("批量水印返回了无法识别的批次状态。");
+        }
+      } catch {
+        if (isCurrent() && (action === "query" || Date.now() - lastConfirmedAt >= BATCH_CONFIRMATION_TIMEOUT_MS)) {
+          pause("暂时无法确认原批次状态，请再次查询。");
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        controller.signal.removeEventListener("abort", abortRequest);
+        if (isCurrent()) pollTimer = window.setTimeout(pollStatus, BATCH_STATUS_INTERVAL_MS);
+      }
+    };
+
+    batchLocked.current = controller;
+    setRunning(true);
+    setRecoveryAction("");
+    setError("");
+    if (action === "submit") {
+      setResult(null);
+      setItems(batchItems);
     }
+    if (action === "query") {
+      await pollStatus();
+      return;
+    }
+    setRunningBatchId(batchId);
+    pollTimer = window.setTimeout(pollStatus, BATCH_STATUS_INTERVAL_MS);
+    try {
+      const response = await submit(statusUrl, controller.signal);
+      const body = await response.json();
+      if (!isCurrent()) return;
+      if (!response.ok) {
+        if (action === "submit" && !operation.confirmed && BATCH_PRE_SUBMIT_REJECTIONS.has(body?.detail?.code)) {
+          stopTracking();
+          setResult(retryOf || null);
+          setError(responseMessage(body, "批量水印提交失败。"));
+          return;
+        }
+        throw new Error("批量水印提交结果未确认。");
+      }
+      if (!BATCH_RESULT_STATUSES.includes(body?.data?.batch_status)) throw new Error("未收到完整的批次结果。");
+      finish(body.data, matchSnapshot(body.data));
+    } catch {
+      if (isCurrent()) pause("批量水印提交结果未确认，请查询原批次状态。");
+    }
+  };
+
+  const runBatch = async () => {
+    if (!hasRunnableItems || batchLocked.current || outputCheck.current || unconfirmedBatch.current || inputLocked || (kind === "image" && !logoFile) || (kind === "text" && !text.trim())) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    outputCheck.current = controller;
+    setCheckingOutput(true);
+    setError("");
+    try {
+      await checkBatchOutput("batch-watermark", {
+        source_bytes: items.reduce((sum, item) => sum + (item.file?.size ?? item.sizeBytes ?? 0), 0),
+        logo_bytes: logoFile?.size || 0,
+      }, controller.signal);
+    } catch (reason) {
+      setError(controller.signal.aborted ? "检查输出空间超时，请重试。" : reason.message || "无法检查批次输出空间，请重试。");
+      return;
+    } finally {
+      window.clearTimeout(timeout);
+      outputCheck.current = null;
+      setCheckingOutput(false);
+    }
+    if (controller.signal.aborted) return;
+    const batchItems = items.map((item) => ({ ...item, status: "pending", failureReason: "", outputName: "", outputResultId: "" }));
+    const batchId = `watermark_batch_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    const formData = new FormData();
+    formData.append("batch_id", batchId);
+    formData.append("entries_json", JSON.stringify(batchItems.map((item) => (
+      item.file ? { id: item.id } : { id: item.id, result_id: item.resultId, file_name: item.fileName }
+    ))));
+    for (const item of batchItems) {
+      if (item.file) formData.append(`file_${item.id}`, item.file, item.file.name);
+    }
+    formData.append("spec_json", JSON.stringify(spec));
+    if (logoFile) formData.append("watermark_file", logoFile, logoFile.name);
+    await trackBatch({
+      batchId, batchItems,
+      submit: (_, signal) => fetch(`${API_BASE}/api/batch-watermark/batches`, { method: "POST", body: formData, signal }),
+    });
+  };
+
+  const retryFailed = async () => {
+    if (batchLocked.current || outputCheck.current || unconfirmedBatch.current || !result?.failed) return;
+    await trackBatch({
+      batchId: result.batch_id, batchItems: items, retryOf: result,
+      submit: (statusUrl, signal) => fetch(`${statusUrl}/retry-failed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retry_revision: result.retry_revision || 0 }),
+        signal,
+      }),
+    });
   };
 
   const openFolder = async () => {
@@ -605,52 +846,72 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
     }
   };
 
-  const completed = result ? Number(result.completed || 0) : items.filter((item) => item.status === "completed").length;
-  const failed = result ? Number(result.failed || 0) : items.filter((item) => item.status === "failed").length;
-  const total = result ? Number(result.total || 0) : items.length;
-  const progress = total ? Math.round((completed + failed) * 100 / total) : 0;
+  const counts = { pending: 0, processing: 0, completed: 0, failed: 0, canceled: 0, unconfirmed: 0 };
+  for (const item of items) counts[item.status]++;
+  const total = items.length;
+  const showBatchProgress = Boolean(running || result || recoveryAction);
+  const showBatchStatus = showBatchProgress || recoveryState === "loading" || Boolean(error);
+  const executionLayout = showBatchStatus ? "status" : "setup";
+  const progress = total ? Math.round((counts.completed + counts.failed + counts.canceled) * 100 / total) : 0;
+
+  const handleWatermarkTypeKeyDown = (event) => {
+    if (submissionLocked || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')];
+    const current = tabs.indexOf(event.target);
+    if (current === -1) return;
+    const offset = event.key === "ArrowLeft" ? -1 : 1;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + offset + tabs.length) % tabs.length;
+    event.preventDefault();
+    tabs[next].click();
+    tabs[next].focus();
+  };
 
   return (
-    <section className="hdde-watermark-page hdde-page-frame hdde-page-stack" data-testid="batch-watermark-page">
-      <input ref={imageInputRef} data-testid="batch-watermark-file-input" type="file" multiple hidden accept=".png,.jpg,.jpeg,image/png,image/jpeg" onChange={(event) => { addImages(event.currentTarget.files); event.currentTarget.value = ""; }} />
-      <input ref={logoInputRef} data-testid="batch-watermark-logo-input" type="file" hidden accept=".png,image/png" onChange={(event) => { selectLogo(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
+    <section className="hdde-watermark-page hdde-page-frame hdde-page-stack" data-testid="batch-watermark-page" hidden={!active} inert={!active ? "" : undefined}>
+      <input ref={imageInputRef} data-testid="batch-watermark-file-input" type="file" multiple hidden accept=".png,.jpg,.jpeg,image/png,image/jpeg" disabled={inputLocked} onChange={(event) => { addImages(event.currentTarget.files); event.currentTarget.value = ""; }} />
+      <input ref={logoInputRef} data-testid="batch-watermark-logo-input" type="file" hidden accept=".png,image/png" disabled={submissionLocked} onChange={(event) => { selectLogo(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
       <HddePageHeader
         title="批量水印"
-        description="在本地为多张图片添加文字或透明 PNG 水印。只叠加水印，不缩放、不增强、不覆盖原图。"
-        meta={<HddeStatusPill tone="info">本地批量处理</HddeStatusPill>}
-        actions={<button type="button" className="hdde-secondary-action" onClick={() => imageInputRef.current?.click()}>添加图片</button>}
+        description="批量叠加文字或透明 PNG 水印，保留原图。"
+        actions={items.length ? <button type="button" className="hdde-secondary-action" disabled={inputLocked} onClick={() => imageInputRef.current?.click()}>添加图片</button> : null}
       />
 
       <div className="hdde-watermark-workbench">
-        <aside className="hdde-watermark-files" aria-label="图片列表">
-          <header><div><p className="hdde-eyebrow">图片列表</p><h2>{items.length} 张图片</h2></div><button type="button" onClick={() => imageInputRef.current?.click()}>继续添加</button></header>
-          {items.length ? <div className="hdde-watermark-file-list">{items.map((item) => (
-            <article key={item.id} data-active={item.id === activeItem?.id} data-status={item.status}>
-              <button type="button" className="hdde-watermark-file-main" onClick={() => setActiveId(item.id)}>
-                <strong title={itemDisplayName(item)}>{itemDisplayName(item)}</strong><span>{item.file ? formatBytes(item.file.size) : item.resultId ? formatBytes(item.sizeBytes) : "历史批次"}</span>
-                <small title={item.outputName ? `${STATUS_LABELS[item.status]} · ${item.outputName}` : STATUS_LABELS[item.status]}>{STATUS_LABELS[item.status]}{item.outputName ? ` · ${item.outputName}` : ""}</small>
-                {item.failureReason ? <em>{item.failureReason}</em> : null}
-              </button>
-              <button type="button" className="hdde-watermark-remove" aria-label={item.recovered ? `历史批次条目 ${itemDisplayName(item)}` : `移除 ${itemDisplayName(item)}`} disabled={running || item.recovered} onClick={() => removeItem(item.id)}>{item.recovered ? "历史" : "移除"}</button>
-            </article>
-          ))}</div> : <button type="button" className="hdde-watermark-empty" onClick={() => imageInputRef.current?.click()}><strong>添加需要加水印的图片</strong><span>支持单张或多张 PNG、JPG、JPEG</span></button>}
-        </aside>
-
         <section className="hdde-watermark-preview" aria-label="真实水印预览">
-          <header><div><p className="hdde-eyebrow">实时预览</p><h2>{activeItem ? itemDisplayName(activeItem) : "选择代表图片"}</h2></div><span data-state={previewState}>{previewState === "loading" ? "正在生成" : previewState === "ready" ? "后端真实预览" : "等待图片"}</span></header>
+          <header>
+            <div><h2 title={activeItem ? itemDisplayName(activeItem) : undefined}>{activeItem ? itemDisplayName(activeItem) : "实时预览"}</h2></div>
+            {items.length > 1 ? <div className="hdde-watermark-preview-pages" role="group" aria-label="切换预览图片">
+              <button type="button" className="hdde-secondary-action" disabled={activeIndex === 0} onClick={() => setActiveId(items[activeIndex - 1].id)}>上一张</button>
+              <span aria-live="polite">{activeIndex + 1} / {items.length}</span>
+              <button type="button" className="hdde-secondary-action" disabled={activeIndex === items.length - 1} onClick={() => setActiveId(items[activeIndex + 1].id)}>下一张</button>
+            </div> : null}
+            {activeItem && previewState !== "loading" ? <span data-state={previewState}>{previewState === "ready" ? "水印预览" : previewState === "error" ? "预览不可用" : sourcePreviewUrl ? "原图" : "无预览"}</span> : null}
+          </header>
           <div className="hdde-watermark-preview-stage" data-testid="batch-watermark-preview">
-            {watermarkPreviewUrl ? <img src={watermarkPreviewUrl} alt={`${itemDisplayName(activeItem)}的真实水印效果`} /> : sourcePreviewUrl ? <img src={sourcePreviewUrl} alt={`${itemDisplayName(activeItem)}原图预览`} /> : <div><strong>预览区</strong><span>{activeItem?.recovered ? "历史批次仅恢复文件状态；如需预览，请重新添加原图。" : "添加图片并设置水印后，这里显示后端真实合成结果。"}</span></div>}
+            {currentPreview?.error ? <div role="alert"><strong>预览不可用</strong><span>{currentPreview.error}</span></div> : currentPreview?.url ? <img src={currentPreview.url} alt={`${itemDisplayName(activeItem)}的真实水印效果`} /> : sourcePreviewUrl ? <img src={sourcePreviewUrl} alt={`${itemDisplayName(activeItem)}原图预览`} /> : (
+              <div>
+                {!items.length ? <button type="button" className="hdde-primary-action" disabled={inputLocked} onClick={() => imageInputRef.current?.click()}>添加图片</button> : null}
+                <span>{activeItem?.recovered ? "如需预览历史批次，请重新添加原图。" : activeItem ? "暂无图片预览" : "支持批量选择 PNG、JPG 图片"}</span>
+              </div>
+            )}
             {previewState === "loading" ? <span className="hdde-watermark-preview-loading" role="status">生成真实预览中…</span> : null}
           </div>
-          <footer><span>代表图片可从左侧切换</span><strong>预览与批处理使用同一 Watermark Engine</strong></footer>
+          {activeItem ? <footer>
+            <span>{STATUS_LABELS[activeItem.status]}{activeItem.outputName ? ` · ${activeItem.outputName}` : ""}{activeItem.failureReason ? ` · ${activeItem.failureReason}` : ""}</span>
+            {!activeItem.recovered ? <button type="button" className="hdde-tertiary-action" disabled={inputLocked} onClick={() => removeItem(activeItem.id)}>移除当前图片</button> : null}
+          </footer> : null}
         </section>
 
-        <aside className="hdde-watermark-settings" aria-label="水印参数">
-          <div className="hdde-watermark-mode" role="tablist" aria-label="水印类型">
-            <button type="button" role="tab" aria-selected={kind === "text"} onClick={() => setKind("text")}>文字水印</button>
-            <button type="button" role="tab" aria-selected={kind === "image"} onClick={() => setKind("image")}>图片水印</button>
+        <aside className="hdde-watermark-sidebar" aria-label="水印设置与执行" data-execution={executionLayout}>
+          <div className="hdde-watermark-settings">
+          <fieldset disabled={submissionLocked} style={{ display: "contents" }}>
+          <WatermarkPresets active={active} spec={spec} logoFile={logoFile} onApply={applyPreset} setApplying={setApplyingPreset} />
+          <div className="hdde-watermark-mode" role="tablist" aria-label="水印类型" onKeyDown={handleWatermarkTypeKeyDown}>
+            <button type="button" role="tab" id="watermark-type-text" aria-controls="watermark-type-panel" aria-selected={kind === "text"} tabIndex={kind === "text" ? 0 : -1} onClick={() => setKind("text")}>文字水印</button>
+            <button type="button" role="tab" id="watermark-type-image" aria-controls="watermark-type-panel" aria-selected={kind === "image"} tabIndex={kind === "image" ? 0 : -1} onClick={() => setKind("image")}>图片水印</button>
           </div>
-          <div className="hdde-watermark-form">
+          <div key={presetRevision} className="hdde-watermark-form" id="watermark-type-panel" role="tabpanel" aria-labelledby={`watermark-type-${kind}`}>
+            <div className="hdde-watermark-appearance">
             {kind === "text" ? <>
               <TextPresetField value={text} onChange={setText} />
               <FontSelector value={fontId} onChange={setFontId} />
@@ -660,7 +921,6 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
                 <ScrubbableNumericField label="大小" value={textSize} min={10} max={160} suffix="px" onChange={setTextSize} testId="batch-watermark-text-size" />
                 <ScrubbableNumericField label="旋转角度" value={rotation} min={-180} max={180} suffix="°" onChange={setRotation} testId="batch-watermark-rotation" />
               </div>
-              <label className="hdde-watermark-switch"><span><strong>平铺文字</strong><small>间距由系统按图片尺寸自动计算，平铺不使用九宫格边距</small></span><input type="checkbox" checked={tile} onChange={(event) => setTile(event.target.checked)} /></label>
             </> : <>
               <button type="button" className="hdde-watermark-logo-picker" onClick={() => logoInputRef.current?.click()}><strong>{logoFile?.name || "选择透明 PNG"}</strong><span>{logoFile ? formatBytes(logoFile.size) : "保留 Logo 的 Alpha 透明边缘"}</span></button>
               <div className="hdde-watermark-parameter-grid">
@@ -668,29 +928,83 @@ export default function BatchWatermarkPage({ onNavigate, continueResultId = "" }
                 <ScrubbableNumericField label="透明度" value={opacity} min={1} max={100} suffix="%" onChange={setOpacity} testId="batch-watermark-opacity" />
               </div>
             </>}
+            </div>
+          <section className="hdde-watermark-placement" aria-labelledby="watermark-placement-title">
+            <header>
+              <h3 id="watermark-placement-title">位置与边距</h3>
+              {kind === "text" ? <label className="hdde-watermark-switch">
+                <input type="checkbox" checked={tile} onChange={(event) => setTile(event.target.checked)} aria-describedby="watermark-tile-note" />
+                <strong>平铺文字</strong>
+              </label> : null}
+            </header>
+            {kind === "text" ? <p className={tile ? "hdde-watermark-tile-note" : "sr-only"} id="watermark-tile-note">间距自动计算。</p> : null}
             {kind !== "text" || !tile ? <>
-              <fieldset className="hdde-watermark-position"><legend>九宫格位置</legend><div>{POSITION_OPTIONS.map(([value, label]) => <button key={value} type="button" aria-label={label} aria-pressed={position === value} onClick={() => setPosition(value)}>{label}</button>)}</div></fieldset>
-              <div className="hdde-watermark-margins">
-                <label data-disabled={!marginAvailability.horizontal}><span>水平边距{!marginAvailability.horizontal ? <small>当前位置水平居中，不使用</small> : null}</span><input data-testid="batch-watermark-margin-x" type="number" min="0" max="10000" value={marginX} disabled={!marginAvailability.horizontal} onChange={(event) => setMarginX(Math.min(10000, Math.max(0, Number(event.target.value))))} /></label>
-                <label data-disabled={!marginAvailability.vertical}><span>垂直边距{!marginAvailability.vertical ? <small>当前位置垂直居中，不使用</small> : null}</span><input data-testid="batch-watermark-margin-y" type="number" min="0" max="10000" value={marginY} disabled={!marginAvailability.vertical} onChange={(event) => setMarginY(Math.min(10000, Math.max(0, Number(event.target.value))))} /></label>
+              <div className="hdde-watermark-placement-controls">
+                <fieldset className="hdde-watermark-position">
+                  <legend>九宫格位置</legend>
+                  <div>{POSITION_OPTIONS.map(([value, label, arrow]) => (
+                    <button key={value} type="button" title={label} aria-label={label} aria-pressed={position === value} onClick={() => setPosition(value)}>
+                      <span aria-hidden="true">{arrow}</span>
+                    </button>
+                  ))}</div>
+                </fieldset>
+                <div className="hdde-watermark-margins">
+                  <label data-disabled={!marginAvailability.horizontal}>
+                    <span>水平边距{!marginAvailability.horizontal ? <small title="当前位置水平居中，不使用">停用</small> : null}</span>
+                    <span className="hdde-watermark-margin-input">
+                      <input data-testid="batch-watermark-margin-x" type="number" min="0" max="10000" value={marginX} disabled={!marginAvailability.horizontal}
+                        onChange={(event) => setMarginX(Math.min(10000, Math.max(0, Number(event.target.value))))} />
+                      <span className="hdde-watermark-margin-unit">px</span>
+                    </span>
+                  </label>
+                  <label data-disabled={!marginAvailability.vertical}>
+                    <span>垂直边距{!marginAvailability.vertical ? <small title="当前位置垂直居中，不使用">停用</small> : null}</span>
+                    <span className="hdde-watermark-margin-input">
+                      <input data-testid="batch-watermark-margin-y" type="number" min="0" max="10000" value={marginY} disabled={!marginAvailability.vertical}
+                        onChange={(event) => setMarginY(Math.min(10000, Math.max(0, Number(event.target.value))))} />
+                      <span className="hdde-watermark-margin-unit">px</span>
+                    </span>
+                  </label>
+                </div>
               </div>
             </> : null}
+          </section>
           </div>
-          <section className="hdde-watermark-execution">
-            <div aria-live="polite"><span>处理进度</span><strong>{completed} 成功 / {failed} 失败 / {total} 总计</strong></div>
-            <progress aria-label={running ? "批量水印处理中" : "批量水印处理进度"} max="100" value={running ? undefined : progress}>{running ? "处理中" : `${progress}%`}</progress>
-            <button data-testid="batch-watermark-run" type="button" className="hdde-primary-action" disabled={!hasRunnableItems || running || (kind === "image" && !logoFile) || (kind === "text" && !text.trim())} onClick={() => void runBatch()}>{running ? "正在批量添加水印…" : "批量添加水印"}</button>
+          </fieldset>
+          </div>
+          <section className="hdde-watermark-execution" aria-label="水印执行与结果">
+            <div className="hdde-watermark-run-summary">
+              <div aria-live="polite">
+                {showBatchProgress ? (
+                  <><span>处理进度</span><strong>{counts.completed} 成功 / {counts.failed} 失败{counts.canceled ? ` / ${counts.canceled} 取消` : ""} / {total} 总计</strong></>
+                ) : !resultLoading && recoveryState !== "loading" ? (
+                  <span>{total ? `已添加 ${total} 张图片` : "请先添加图片"}</span>
+                ) : null}
+              </div>
+              {running ? <span>{counts.processing} 处理中 / {counts.pending} 等待处理</span> : null}
+              {showBatchProgress ? <progress aria-label="批量水印处理进度" max="100" value={progress}>{`${progress}%`}</progress> : null}
+            </div>
+            <div className="hdde-watermark-run-actions">
+            <button data-testid="batch-watermark-run" type="button" className={result ? "hdde-secondary-action" : "hdde-primary-action"} disabled={!hasRunnableItems || inputLocked || (kind === "image" && !logoFile) || (kind === "text" && !text.trim())} onClick={() => void runBatch()}>{checkingOutput ? "正在检查输出空间…" : running ? "正在确认或处理批次…" : "批量添加水印"}</button>
+            {recoveryAction ? <button type="button" className="hdde-secondary-action" onClick={() => void trackBatch(unconfirmedBatch.current, "query")}>查询批次状态</button> : null}
+            {recoveryAction === "resubmit" ? <button type="button" className="hdde-secondary-action" onClick={() => void trackBatch(unconfirmedBatch.current, "resubmit")}>继续提交原批次</button> : null}
             {running && runningBatchId ? <button type="button" className="hdde-secondary-action" onClick={async () => {
+              const activeBatch = batchLocked.current;
               try {
                 const response = await fetch(`${API_BASE}/api/batch-watermark/batches/${encodeURIComponent(runningBatchId)}/control`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "cancel" }) });
                 const body = await response.json();
                 if (!response.ok) throw new Error(responseMessage(body, "取消请求未成功，请等待批次状态。"));
-              } catch (reason) { setError(reason.message); }
+              } catch (reason) { if (batchLocked.current === activeBatch) setError(reason.message); }
             }}>取消未开始项</button> : null}
+            {result?.failed ? <button type="button" className={counts.completed ? "hdde-secondary-action" : "hdde-primary-action"} disabled={checkingOutput} onClick={() => void retryFailed()}>仅重试失败项</button> : null}
+            {result ? <div className="hdde-watermark-delivery-actions" data-testid="batch-watermark-delivery-actions"><button type="button" className="hdde-secondary-action" onClick={() => void openFolder()}>打开文件夹</button><button type="button" className={counts.completed ? "hdde-primary-action" : "hdde-secondary-action"} onClick={() => onNavigate?.(`/outputs?batch_id=${encodeURIComponent(result.batch_id)}`)}>进入输出中心</button></div> : null}
+            </div>
             {recoveryState === "loading" ? <p role="status">正在恢复批量水印结果…</p> : null}
+            {importIssues.length ? <details className="hdde-watermark-import-issues" open={importIssues.length <= 3}>
+              <summary>{importIssues.length} 个文件未加入</summary>
+              <ul>{importIssues.map(({ name, reason }, index) => <li key={`${index}:${name}`}>{name}：{reason}</li>)}</ul>
+            </details> : null}
             {error ? <p role="alert">{error}</p> : null}
-            {result ? <div className="hdde-watermark-delivery-actions" data-testid="batch-watermark-delivery-actions"><button type="button" className="hdde-secondary-action" onClick={() => void openFolder()}>打开文件夹</button><button type="button" className="hdde-secondary-action" onClick={() => onNavigate?.("/outputs")}>进入输出中心</button></div> : null}
-            <small className="hdde-watermark-protection">原图永不覆盖 · 输出自动防重名 · 仅执行局部 Overlay</small>
           </section>
         </aside>
       </div>

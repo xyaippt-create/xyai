@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import tempfile
 import threading
@@ -18,6 +19,7 @@ from PIL import Image, ImageDraw
 import backend.batch_watermark_api as batch_watermark_api
 from backend.batch_watermark_api import _write_without_overwrite, register_batch_watermark_routes
 from engine.batch_watermark import font_registry
+from engine.output.metadata_writer import _read_effective_dpi, set_jpeg_jfif_density
 
 
 def png_bytes(size=(240, 160), color=(30, 60, 90, 255), *, dpi=None, icc_profile=None):
@@ -81,6 +83,41 @@ class BatchWatermarkApiTests(unittest.TestCase):
         self.client.close()
         self.temporary.cleanup()
 
+    def test_low_space_blocks_watermark_preflight_and_creation_before_registration(self):
+        png = png_bytes()
+        endpoint = "/api/batch-watermark/batches"
+        with patch("backend.batch_capacity.shutil.disk_usage") as usage:
+            # Each write alone fits, but both target the same volume.
+            usage.return_value.free = len(png) + 1
+            preflight = self.client.post(f"{endpoint}/preflight", json={"source_bytes": len(png), "logo_bytes": 0})
+            created = self.client.post(endpoint, data={"spec_json": '{"kind":"text","text":"test"}'}, files={"files": ("input.png", png, "image/png")})
+        for response in (preflight, created):
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(response.json()["detail"]["code"], "BATCH_DISK_SPACE_INSUFFICIENT")
+        self.assertFalse(self.registry)
+        self.assertFalse(list(self.formal_root.rglob("*.png")))
+
+    def test_presets_reject_invalid_logo_and_duplicate_name_without_changing_saved_config(self):
+        endpoint = "/api/batch-watermark/presets"
+        fields = {"name": "  品牌角标  ", "spec_json": '{"kind":"image","text":"未使用的文字","image_width_percent":31}'}
+        invalid = self.client.post(endpoint, data=fields, files={"watermark_file": ("bad.png", png_bytes(), "image/png")})
+        self.assertEqual(invalid.status_code, 422)
+        self.assertIn("重新选择", invalid.json()["detail"])
+        self.assertEqual(self.client.get(endpoint).json()["data"], [])
+
+        logo = logo_bytes()
+        saved = self.client.post(endpoint, data=fields, files={"watermark_file": ("brand.png", logo, "image/png")})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        preset = saved.json()["data"]
+        self.assertEqual(preset["name"], "品牌角标")
+        self.assertEqual(set(preset["spec"]), {"kind", "opacity", "position", "margin_x", "margin_y", "image_width_percent"})
+        self.assertEqual(preset["spec"]["image_width_percent"], 31)
+        duplicate = self.client.post(endpoint, data={"name": preset["name"], "spec_json": '{"text":"替代"}'})
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(self.client.get(endpoint).json()["data"], [preset])
+        self.assertEqual(self.client.get(f"{endpoint}/{preset['id']}/logo").content, logo)
+        self.assertFalse(self.registry)
+
     def test_preview_is_backend_rendered_png(self):
         response = self.client.post(
             "/api/batch-watermark/preview",
@@ -125,6 +162,113 @@ class BatchWatermarkApiTests(unittest.TestCase):
         self.assertEqual(item["source_task_id"], "task-a")
         self.assertEqual(item["source_result_sha256"], source_sha)
         self.assertEqual(hashlib.sha256(Path(item["output_path"]).read_bytes()).hexdigest(), item["output_sha256"])
+
+    def test_fitted_preview_matches_resized_full_composite(self):
+        endpoint = "/api/batch-watermark/preview"
+        source = png_bytes((2200, 1600), (30, 60, 90, 170))
+        logo = logo_bytes()
+        for spec in [
+            '{"kind":"text","text":"水印","text_size":72,"rotation":-29,"tile":true}',
+            '{"kind":"image","position":"top-left","image_width_percent":23,"opacity":67}',
+        ]:
+            files = {"file": ("large.png", source, "image/png"), "watermark_file": ("logo.png", logo, "image/png")}
+            full = self.client.post(endpoint, data={"spec_json": spec}, files=files)
+            fitted = self.client.post(endpoint, data={"spec_json": spec, "fit_preview": "true"}, files=files)
+            self.assertEqual(full.status_code, 200, full.text if not full.is_success else "")
+            self.assertEqual(fitted.status_code, 200, fitted.text if not fitted.is_success else "")
+            with Image.open(io.BytesIO(full.content)) as original, Image.open(io.BytesIO(fitted.content)) as reduced:
+                self.assertEqual(original.size, (2200, 1600))
+                self.assertEqual(max(reduced.size), 1600)
+                expected = original.resize(reduced.size, Image.Resampling.LANCZOS)
+                self.assertEqual(reduced.tobytes(), expected.tobytes())
+
+    def test_manifest_binds_same_names_and_isolates_an_unavailable_result(self):
+        first_id, missing_id, last_id = "a" * 32, "b" * 32, "c" * 32
+        first_image = png_bytes((240, 160), (200, 20, 20, 255))
+        last_image = png_bytes((320, 180), (20, 200, 20, 255))
+        manifest = [
+            {"id": first_id},
+            {"id": missing_id, "result_id": "missing-result", "file_name": "missing.png"},
+            {"id": last_id},
+        ]
+        files = [
+            (f"file_{last_id}", ("same.png", last_image, "image/png")),
+            (f"file_{first_id}", ("same.png", first_image, "image/png")),
+        ]
+        spec = '{"kind":"text","text":"批次"}'
+        created = self.client.post(
+            "/api/batch-watermark/batches",
+            data={"entries_json": json.dumps(manifest), "spec_json": spec},
+            files=files,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        result = created.json()["data"]
+        first, missing, last = result["items"]
+        self.assertEqual(result["batch_status"], "PARTIAL_SUCCESS")
+        self.assertEqual([item["client_item_id"] for item in result["items"]], [first_id, missing_id, last_id])
+        for item, original in [(first, first_image), (last, last_image)]:
+            self.assertEqual(item["status"], "completed")
+            self.assertEqual(item["source_sha_before"], hashlib.sha256(original).hexdigest())
+        self.assertNotEqual(first["output_path"], last["output_path"])
+        self.assertEqual(missing["status"], "failed")
+        self.assertEqual(missing["source_result_id"], "missing-result")
+        self.assertTrue(missing["failure_reason"])
+        self.assertFalse(missing["result_id"])
+        recovered = self.client.get(f"/api/batch-watermark/batches/{result['batch_id']}")
+        self.assertEqual(recovered.json()["data"]["items"], result["items"])
+
+        invalid = self.client.post(
+            "/api/batch-watermark/batches",
+            data={"entries_json": json.dumps([manifest[0], manifest[0]]), "spec_json": spec},
+            files=files,
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_retry_uses_original_logo_and_row_ids_without_republishing_success(self):
+        endpoint = "/api/batch-watermark/batches"
+        publish = batch_watermark_api._write_without_overwrite
+        publications = []
+
+        def fail_second_output(root, name, data, moment):
+            publications.append(name)
+            if len(publications) == 2:
+                raise PermissionError("temporary write denial")
+            return publish(root, name, data, moment)
+
+        original_logo = logo_bytes()
+        with patch.object(batch_watermark_api, "_write_without_overwrite", side_effect=fail_second_output):
+            created = self.client.post(endpoint, data={"spec_json": '{"kind":"image","image_width_percent":30}'}, files=[
+                ("files", ("same.png", png_bytes((240, 160)), "image/png")),
+                ("files", ("same.png", png_bytes((320, 180)), "image/png")),
+                ("watermark_file", ("logo.png", original_logo, "image/png")),
+            ]).json()["data"]
+        batch_id = created["batch_id"]
+        retry = f"{endpoint}/{batch_id}/retry-failed"
+        first, failed = created["items"]
+        self.assertEqual([first["status"], failed["status"]], ["completed", "failed"])
+        original_result = Path(first["output_path"]).read_bytes()
+        logo = self.formal_root / ".运行缓存" / "watermark-sources" / batch_id / "logo.png"
+        self.assertEqual(logo.read_bytes(), original_logo)
+
+        logo.write_bytes(b"changed")
+        blocked = self.client.post(retry, json={"retry_revision": 0}).json()["data"]
+        self.assertIn("原透明 PNG Logo", blocked["items"][1]["failure_reason"])
+        self.assertIn("请重新发起批次", blocked["items"][1]["failure_reason"])
+        self.assertEqual(blocked["items"][0], first)
+        self.assertEqual(len(list(Path(created["output_directory"]).iterdir())), 1)
+        logo.write_bytes(original_logo)
+        recovered = self.client.post(retry, json={"retry_revision": 1}).json()["data"]
+        self.assertEqual(recovered["retry_revision"], 2)
+        self.assertEqual(recovered["items"][0], first)
+        self.assertEqual(Path(first["output_path"]).read_bytes(), original_result)
+        new = recovered["items"][1]
+        for key in ("item_id", "task_id", "source_path", "source_sha256"):
+            self.assertEqual(new[key], failed[key])
+        self.assertEqual(new["status"], "completed")
+        self.assertNotEqual(new["output_path"], first["output_path"])
+        replay = self.client.post(retry, json={"retry_revision": 1}).json()["data"]
+        self.assertEqual(replay, recovered)
+        self.assertEqual(len(list(Path(created["output_directory"]).iterdir())), 2)
 
     def test_medium_font_id_reaches_batch_record_and_exact_renderer(self):
         response = self.client.post(
@@ -227,6 +371,42 @@ class BatchWatermarkApiTests(unittest.TestCase):
                 for x in range(output_image.width):
                     if not (left <= x < right and top <= y < bottom):
                         self.assertEqual(output_alpha.getpixel((x, y)), source_alpha.getpixel((x, y)))
+
+    def test_formal_batch_jpeg_preserves_declared_resolution(self):
+        def exif_jpeg(resolution=None):
+            exif = Image.Exif()
+            exif[305] = "Source software"
+            if resolution:
+                exif[282], exif[283], exif[296] = *resolution, 2
+            stream = io.BytesIO()
+            Image.new("RGB", (320, 200)).save(stream, format="JPEG", exif=exif)
+            return stream.getvalue()
+
+        cases = {
+            "exif-without-dpi": (exif_jpeg(), None),
+            "fractional-exif": (exif_jpeg((96.012, 117.018)), (96.012, 117.018)),
+            "jfif-inch": (set_jpeg_jfif_density(jpeg_bytes(), 1, (144, 117)), (144, 117)),
+            "jfif-centimeter": (set_jpeg_jfif_density(jpeg_bytes(), 2, (37, 40)), (37 * 2.54, 40 * 2.54)),
+        }
+        response = self.client.post(
+            "/api/batch-watermark/batches",
+            files=[("files", (f"{name}.jpg", source, "image/jpeg")) for name, (source, _) in cases.items()],
+            data={"spec_json": '{"kind":"text","text":"JPEG DPI"}'},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()["data"]
+        self.assertEqual(data["batch_status"], "FULL_SUCCESS", data["items"])
+        for item, (name, (source, dpi)) in zip(data["items"], cases.items(), strict=True):
+            with self.subTest(name=name):
+                self.assertEqual(item["source_sha_after"], hashlib.sha256(source).hexdigest())
+                self.assertTrue(item["output_metadata"]["dpi_unchanged"])
+                output = Path(item["output_path"])
+                self.assertEqual(_read_effective_dpi(output.read_bytes()), dpi)
+                with Image.open(output) as decoded, Image.open(io.BytesIO(source)) as original:
+                    decoded.load()
+                    self.assertEqual(decoded.size, original.size)
+                    self.assertEqual(decoded.info["jfif_unit"], original.info["jfif_unit"])
+                    self.assertEqual(decoded.info["jfif_density"], original.info["jfif_density"])
 
     def test_formal_batch_png_without_dpi_does_not_invent_dpi(self):
         source = png_bytes(color=(30, 60, 90, 173))

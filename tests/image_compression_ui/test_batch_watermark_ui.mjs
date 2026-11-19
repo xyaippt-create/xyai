@@ -25,7 +25,7 @@ test("batch watermark is a formal route and not a placeholder", () => {
   const routes = read("src/appRoutes.js");
   const app = read("src/App.jsx");
   assert.match(routes, /key:\s*"batch-watermark"[\s\S]*?implementationType:\s*"existing"/);
-  assert.match(app, /route\.key === "batch-watermark"/);
+  assert.match(app, /active=\{route\?\.key === "batch-watermark"\}/);
   assert.match(app, /<BatchWatermarkPage/);
   assert.doesNotMatch(read("src/BatchWatermarkPage.jsx"), /<main\b/);
 });
@@ -48,7 +48,7 @@ test("formal UI wires real preview, batch execution and completion actions", () 
 
 test("batch result deep link restores the exact persisted batch without task-detail contracts", () => {
   const page = read("src/BatchWatermarkPage.jsx");
-  assert.match(page, /new URLSearchParams\(window\.location\.search\)\.get\("batch_id"\)/);
+  assert.match(read("src/App.jsx"), /requestedBatchId=\{watermarkEntry\.batchId\}/);
   assert.match(page, /fetch\(`\$\{API_BASE\}\/api\/batch-watermark\/batches\/\$\{encodeURIComponent\(requestedBatchId\)\}`/);
   assert.match(page, /method:\s*"GET"/);
   assert.match(page, /recovered\?\.batch_id !== requestedBatchId/);
@@ -106,18 +106,47 @@ test("recovered batch result keeps full partial and failed contracts distinct", 
   assert.ok(restoredItems.every((item) => item.file === null && item.recovered === true));
 });
 
-test("recovery hydrates the only left list and keeps history read-only", () => {
+test("recovery hydrates preview navigation and keeps history read-only", () => {
   const page = read("src/BatchWatermarkPage.jsx");
   assert.match(page, /const restoredItems = mapRecoveredBatchItems\(recovered\)/);
   assert.match(page, /setItems\(restoredItems\)/);
   assert.match(page, /setActiveId\(restoredItems\[0\]\?\.id \|\| ""\)/);
-  assert.match(page, /if \(!activeItem\?\.file && !activeItem\?\.previewUrl\)\s*\{\s*setSourcePreviewUrl\(""\)/);
-  assert.match(page, /if \(activeItem\.previewUrl\)\s*\{\s*setSourcePreviewUrl\(activeItem\.previewUrl\);\s*return undefined;/);
+  assert.match(page, /if \(!previewFile && !previewAssetUrl\)\s*\{\s*setSourcePreview\(null\)/);
+  assert.match(page, /if \(previewAssetUrl\)\s*\{\s*setSourcePreview\(\{ id: previewItemId, url: previewAssetUrl \}\);\s*return undefined;/);
   assert.match(page, /const hasRunnableItems = items\.length > 0 && items\.every\(\(item\) => item\.file \|\| item\.resultId\)/);
-  assert.match(page, /disabled=\{running \|\| item\.recovered\}/);
-  assert.match(page, /disabled=\{!hasRunnableItems \|\| running/);
-  assert.equal((page.match(/className="hdde-watermark-file-list"/g) || []).length, 1);
+  assert.match(page, /\{activeItem \? <footer>[\s\S]*?\{!activeItem\.recovered \? <button[^\n]+>移除当前图片<\/button>/);
+  assert.match(page, /disabled=\{!hasRunnableItems \|\| inputLocked/);
+  assert.doesNotMatch(page, /hdde-watermark-file-list|watermark-inspector-files|watermark-inspector-switch/);
   assert.doesNotMatch(page, /result\.items\.map|hdde-watermark-result-items/);
+});
+
+test("live batch binds shuffled outcomes by row ID and preserves the reused input", async () => {
+  const { matchBatchItems } = await loadRealComponent("/src/BatchWatermarkPage.jsx");
+  const rows = [{ id: "reuse", resultId: "original-result" }, { id: "local" }, { id: "queued" }];
+  const result = {
+    batch_id: "batch-a",
+    items: [
+      { client_item_id: "queued", status: "canceled" },
+      { client_item_id: "local", status: "failed", failure_reason: "损坏的 PNG" },
+      { client_item_id: "reuse", status: "completed", result_id: "new-result", output_file_name: "同名_水印.png" },
+    ],
+  };
+  const matched = matchBatchItems(rows, result, "batch-a");
+  assert.deepEqual(matched.map(({ status }) => status), ["completed", "failed", "canceled"]);
+  assert.equal(matched[0].resultId, "original-result");
+  assert.equal(matched[0].outputResultId, "new-result");
+  assert.equal(matched[0].outputName, "同名_水印.png");
+  assert.equal(matched[1].failureReason, "损坏的 PNG");
+  assert.throws(() => matchBatchItems(rows, result, "batch-b"), /图片清单不一致/);
+  const duplicate = { ...result, items: [result.items[0], result.items[0], result.items[2]] };
+  assert.throws(() => matchBatchItems(rows, duplicate, "batch-a"), /图片清单不一致/);
+  const active = {
+    batch_id: "batch-a",
+    items: [result.items[2], { client_item_id: "queued", status: "pending" }, { client_item_id: "local", status: "processing" }],
+  };
+  assert.deepEqual(matchBatchItems(rows, active, "batch-a").map(({ status }) => status), ["completed", "processing", "pending"]);
+  active.items[1].status = "unknown";
+  assert.throws(() => matchBatchItems(rows, active, "batch-a"), /无法识别的图片状态/);
 });
 
 test("image watermark exposes relative width but no tile control", () => {
@@ -128,13 +157,32 @@ test("image watermark exposes relative width but no tile control", () => {
   assert.doesNotMatch(imageBranch, /平铺文字/);
 });
 
+test("retry matches recovered and live rows by their original server item IDs", async () => {
+  const { mapRecoveredBatchItems, matchBatchItems } = await loadRealComponent("/src/BatchWatermarkPage.jsx");
+  const original = {
+    batch_id: "original-batch",
+    items: [
+      { item_id: "first", file_name: "same.png", status: "completed", result_id: "existing" },
+      { item_id: "second", file_name: "same.png", status: "failed" },
+      { item_id: "third", file_name: "same.png", status: "canceled" },
+    ],
+  };
+  const rows = mapRecoveredBatchItems(original);
+  const progress = { ...original, items: [original.items[2], { ...original.items[1], status: "processing" }, original.items[0]] };
+  const matched = matchBatchItems(rows, progress, original.batch_id, true);
+  assert.deepEqual(matched.map(({ status, outputResultId }) => [status, outputResultId]), [
+    ["completed", "existing"], ["processing", ""], ["canceled", ""],
+  ]);
+  assert.deepEqual(matched.map(({ id }) => id), rows.map(({ id }) => id));
+});
+
 test("parameter labels and progress remain concise and truthful", () => {
   const page = read("src/BatchWatermarkPage.jsx");
   assert.match(page, /<span id="batch-watermark-color-label">颜色<\/span>/);
   assert.match(page, /ScrubbableNumericField label="大小" value=\{textSize\}/);
-  assert.match(page, /value=\{running \? undefined : progress\}/);
+  assert.match(page, /value=\{progress\}/);
   assert.doesNotMatch(page, /Math\.max\(5, progress\)|文字颜色|文字大小|图片宽度/);
-  assert.match(page, /<strong>\{completed\} 成功 \/ \{failed\} 失败 \/ \{total\} 总计<\/strong>/);
+  assert.match(page, /<strong>\{counts\.completed\} 成功 \/ \{counts\.failed\} 失败.*\/ \{total\} 总计<\/strong>/);
   assert.doesNotMatch(page, /TOTAL=|COMPLETED=|FAILED=/);
 });
 
@@ -207,11 +255,12 @@ test("compact color and scrubbable numeric controls share authoritative state an
 
 test("result area removes the duplicate file list and keeps only two delivery actions", () => {
   const page = read("src/BatchWatermarkPage.jsx");
-  assert.equal((page.match(/<strong>\{completed\} 成功 \/ \{failed\} 失败 \/ \{total\} 总计<\/strong>/g) || []).length, 1);
+  assert.equal((page.match(/<strong>\{counts\.completed\} 成功 \/ \{counts\.failed\} 失败.*\/ \{total\} 总计<\/strong>/g) || []).length, 1);
   assert.equal((page.match(/>打开文件夹<\/button>/g) || []).length, 1);
   assert.equal((page.match(/>进入输出中心<\/button>/g) || []).length, 1);
   assert.match(page, /hdde-watermark-delivery-actions/);
-  assert.equal((page.match(/className="hdde-secondary-action"[^>]*onClick[^>]*>[^<]*(?:打开文件夹|进入输出中心)/g) || []).length, 2);
+  assert.match(page, /className="hdde-secondary-action" onClick=\{\(\) => void openFolder\(\)\}>打开文件夹/);
+  assert.match(page, /className=\{counts\.completed \? "hdde-primary-action" : "hdde-secondary-action"\} onClick=\{\(\) => onNavigate\?\.\(`\/outputs\?batch_id=\$\{encodeURIComponent\(result\.batch_id\)\}`\)\}>进入输出中心/);
   assert.doesNotMatch(page, /className="hdde-tertiary-action"[^>]*>进入输出中心/);
   assert.doesNotMatch(page, /全部处理完成|部分处理完成|result\.items\.map|hdde-watermark-result-items/);
   assert.doesNotMatch(page, /TOTAL=|COMPLETED=|FAILED=|返回处理中|返回处理中心|查看结果|查看输出目录/);
@@ -223,7 +272,7 @@ test("watermark parameters use compact paired controls without numeric sliders",
   assert.equal((page.match(/className="hdde-watermark-parameter-grid"/g) || []).length, 2);
   assert.match(page, /<ColorField value=\{color\}[\s\S]*?ScrubbableNumericField label="透明度"[\s\S]*?ScrubbableNumericField label="大小" value=\{textSize\}[\s\S]*?ScrubbableNumericField label="旋转角度"/);
   assert.doesNotMatch(page, /function SliderField|<SliderField/);
-  assert.match(page, /平铺文字[\s\S]*?平铺不使用九宫格边距/);
+  assert.match(page, /平铺文字[\s\S]*?间距自动计算/);
   assert.match(css, /\.hdde-watermark-parameter-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(css, /\.hdde-watermark-scrub-input\s*\{[^}]*min-height:\s*44px[^}]*border-radius:\s*8px[^}]*cursor:\s*ew-resize/);
 });
@@ -246,13 +295,13 @@ test("margin UI mirrors nine-grid renderer semantics and hides ineffective tile 
   assert.match(page, /disabled=\{!marginAvailability\.vertical\}/);
 });
 
-test("long filenames use a shrinkable information column and fixed remove action", () => {
+test("preview navigation preserves the full filename and offers sequential access", () => {
+  const page = read("src/BatchWatermarkPage.jsx");
   const css = read("src/index.css");
-  assert.match(css, /\.hdde-watermark-file-list\s*\{[^}]*min-width:\s*0[^}]*grid-auto-rows:\s*max-content[^}]*overflow-x:\s*hidden/);
-  assert.match(css, /\.hdde-watermark-file-list article\s*\{[^}]*min-width:\s*0[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+52px[^}]*overflow:\s*hidden/);
-  assert.match(css, /\.hdde-watermark-file-main strong\s*\{[^}]*text-overflow:\s*ellipsis[^}]*white-space:\s*nowrap/);
-  assert.match(css, /\.hdde-watermark-file-main small\s*\{[^}]*-webkit-line-clamp:\s*2[^}]*line-clamp:\s*2/);
-  assert.match(css, /\.hdde-watermark-remove\s*\{[^}]*width:\s*48px[^}]*min-width:\s*48px/);
+  assert.match(page, /<h2 title=\{activeItem \? itemDisplayName\(activeItem\)/);
+  assert.match(page, /aria-label="切换预览图片"/);
+  assert.match(page, /disabled=\{activeIndex === 0\}[\s\S]*?disabled=\{activeIndex === items\.length - 1\}/);
+  assert.match(page, /disabled=\{inputLocked\} onClick=\{\(\) => removeItem\(activeItem\.id\)\}/);
   assert.match(css, /\.hdde-watermark-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*overflow:\s*hidden/);
 });
 

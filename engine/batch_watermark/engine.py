@@ -9,6 +9,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageOps
 
+from engine.output.metadata_writer import set_jpeg_jfif_density
+
 from .font_registry import LoadedFont, load_watermark_font
 from .spec import WatermarkSpec
 
@@ -111,7 +113,7 @@ def _text_patch(spec: WatermarkSpec) -> tuple[Image.Image, LoadedFont]:
     return patch, loaded_font
 
 
-def _logo_patch(watermark_bytes: bytes, canvas_width: int, spec: WatermarkSpec) -> Image.Image:
+def decode_watermark_logo(watermark_bytes: bytes) -> Image.Image:
     if not watermark_bytes:
         raise ValueError("请选择透明 PNG 图片水印。")
     try:
@@ -128,6 +130,11 @@ def _logo_patch(watermark_bytes: bytes, canvas_width: int, spec: WatermarkSpec) 
         raise ValueError("无法读取图片水印，请选择有效的透明 PNG。") from exc
     if rgba.getchannel("A").getextrema() == (255, 255):
         raise ValueError("图片水印必须包含实际透明像素。")
+    return rgba
+
+
+def _logo_patch(watermark_bytes: bytes, canvas_width: int, spec: WatermarkSpec) -> Image.Image:
+    rgba = decode_watermark_logo(watermark_bytes)
     target_width = max(1, round(canvas_width * spec.image_width_percent / 100))
     target_height = max(1, round(rgba.height * target_width / rgba.width))
     return _multiply_alpha(rgba.resize((target_width, target_height), Image.Resampling.LANCZOS), spec.opacity)
@@ -166,7 +173,15 @@ class WatermarkEngine:
 
     engine_id = "hdde.batch-watermark.v1"
 
-    def render(self, source_bytes: bytes, spec: WatermarkSpec, *, watermark_bytes: bytes | None = None, output_format: str | None = None) -> WatermarkRenderResult:
+    def render(
+        self,
+        source_bytes: bytes,
+        spec: WatermarkSpec,
+        *,
+        watermark_bytes: bytes | None = None,
+        output_format: str | None = None,
+        preview_max_edge: int | None = None,
+    ) -> WatermarkRenderResult:
         if not source_bytes:
             raise ValueError("源图片为空。")
         try:
@@ -179,6 +194,8 @@ class WatermarkEngine:
                     raise ValueError("图片像素数量过大，已停止处理。")
                 icc_profile = opened.info.get("icc_profile")
                 source_dpi = _valid_dpi(opened.info.get("dpi"))
+                jfif_unit = opened.info.get("jfif_unit")
+                jfif_density = opened.info.get("jfif_density")
                 source_exif = opened.getexif()
                 source_has_alpha = "A" in opened.getbands() or "transparency" in opened.info
                 base = ImageOps.exif_transpose(opened).convert("RGBA")
@@ -193,6 +210,17 @@ class WatermarkEngine:
             raise ValueError("水印没有可见内容。")
         result = base.copy()
         result.alpha_composite(overlay)
+        if preview_max_edge and max(result.size) > preview_max_edge:
+            original_width, original_height = result.size
+            # Keep watermark geometry in source pixels. Only the display copy is reduced.
+            result.thumbnail((preview_max_edge, preview_max_edge), Image.Resampling.LANCZOS, reducing_gap=None)
+            left, top, right, bottom = alpha_bbox
+            alpha_bbox = (
+                math.floor(left * result.width / original_width),
+                math.floor(top * result.height / original_height),
+                math.ceil(right * result.width / original_width),
+                math.ceil(bottom * result.height / original_height),
+            )
         selected_format = str(output_format or source_format).upper().replace("JPG", "JPEG")
         if selected_format not in SUPPORTED_SOURCE_FORMATS:
             raise ValueError("输出格式必须与 PNG 或 JPEG 合同一致。")
@@ -210,15 +238,21 @@ class WatermarkEngine:
             save_options["icc_profile"] = icc_profile
         if save_exif:
             save_options["exif"] = save_exif
-        if source_dpi is not None:
+        same_jpeg = source_format == selected_format == "JPEG"
+        if source_dpi is not None and not same_jpeg:
             save_options["dpi"] = source_dpi
         stream = io.BytesIO()
         if selected_format == "PNG":
             result.save(stream, format="PNG", compress_level=6, **save_options)
         else:
             result.convert("RGB").save(stream, format="JPEG", quality=95, subsampling=0, optimize=False, **save_options)
+        encoded = stream.getvalue()
+        # Pillow's JPEG dpi view can be a fallback or a conversion from EXIF.
+        # Keep EXIF resolution and carry the declared JFIF density without rounding.
+        if same_jpeg and jfif_unit in (0, 1, 2) and jfif_density is not None:
+            encoded = set_jpeg_jfif_density(encoded, jfif_unit, jfif_density)
         return WatermarkRenderResult(
-            data=stream.getvalue(), source_format=source_format, output_format=selected_format,
+            data=encoded, source_format=source_format, output_format=selected_format,
             width=result.width, height=result.height, overlay_bbox=alpha_bbox,
             source_has_alpha=source_has_alpha, alpha_outside_overlay_unchanged=True,
             icc_status="preserved" if icc_profile else "not_present", exif_status=exif_status,
