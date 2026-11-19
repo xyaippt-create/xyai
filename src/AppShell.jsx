@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from "r
 import { APP_ROUTES } from "./appRoutes.js";
 import HddeIcon from "./HddeIcon.jsx";
 import UnifiedFeedback from "./UnifiedFeedback.jsx";
+import { UserGuideProvider, UserGuideTrigger } from "./UserGuide.jsx";
 
 const THEME_STORAGE_KEY = "hdde-ui-theme";
 const THEME_MODES = Object.freeze([
@@ -62,6 +63,22 @@ const NAVIGATION_CONTEXT_BY_ROUTE = Object.freeze({
   "color-correction-review": "color-correction",
   "output-compare": "outputs",
   "release-notes": "settings",
+});
+
+const ROUTES_WITHOUT_TOPBAR_CONTEXT = new Set([
+  "print-8k",
+  "processing",
+  "four-k-enhancement",
+  "color-correction",
+  "compression",
+  "batch-watermark",
+  "outputs",
+  "settings",
+  "release-notes",
+]);
+
+const TOPBAR_PARENT_BY_ROUTE = Object.freeze({
+  "output-compare": "outputs",
 });
 
 export function useAppTheme() {
@@ -146,9 +163,11 @@ export default function AppShell({
   const navigationRoutes = new Map(
     APP_ROUTES.filter((item) => item.showInNavigation !== false).map((item) => [item.key, item]),
   );
+  const topbarParent = navigationRoutes.get(TOPBAR_PARENT_BY_ROUTE[route?.key]);
 
   return (
     <AppThemeContext.Provider value={themeContextValue}>
+      <UserGuideProvider>
       <a className="hdde-skip-link" href="#hdde-main-content">跳到主要内容</a>
       <div
         className={`hdde-app-shell ${workspaceMode ? "hdde-app-shell--workspace" : ""}`}
@@ -204,15 +223,24 @@ export default function AppShell({
       <div className="hdde-shell-main">
         {workspaceMode ? null : <header className="hdde-topbar">
           <div className="hdde-topbar-inner">
-            <div className="hdde-route-context" aria-label="当前位置">
-              <span>影界 HDDE</span>
-              <HddeIcon name="chevron" size={14} />
-              <strong>{route?.pageTitle || "页面不存在"}</strong>
-            </div>
+            {topbarParent ? (
+              <nav className="hdde-route-context" aria-label="页面路径">
+                <a href={topbarParent.path} onClick={(event) => handleNavigation(event, topbarParent.path)}>
+                  {topbarParent.pageTitle}
+                </a>
+                <HddeIcon name="chevron" size={14} />
+                <strong aria-current="page">{route.pageTitle}</strong>
+              </nav>
+            ) : !ROUTES_WITHOUT_TOPBAR_CONTEXT.has(route?.key) ? (
+              <div className="hdde-route-context" aria-label="当前位置">
+                <span>影界 HDDE</span>
+                <HddeIcon name="chevron" size={14} />
+                <strong>{route?.pageTitle || "页面不存在"}</strong>
+              </div>
+            ) : null}
 
             <div className="hdde-topbar-actions">
               <div className="hdde-theme-control" role="group" aria-label="界面主题">
-                <HddeIcon name="sun" size={16} />
                 <div className="hdde-theme-options">
                   {THEME_MODES.map((option) => (
                     <button
@@ -227,6 +255,7 @@ export default function AppShell({
                   ))}
                 </div>
               </div>
+              <UserGuideTrigger />
               <UnifiedFeedback
                 sourceFeature={FEEDBACK_FEATURE_BY_ROUTE[route?.key] || "runtime_failure"}
                 stage="user_feedback_entry"
@@ -246,6 +275,7 @@ export default function AppShell({
         </main>
       </div>
       </div>
+      </UserGuideProvider>
     </AppThemeContext.Provider>
   );
 }

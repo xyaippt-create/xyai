@@ -274,7 +274,7 @@ export default function SystemSettingsPage({ onNavigate }) {
   };
 
   return (
-    <div className="hdde-settings-page hdde-page-frame hdde-page-stack" data-testid="system-settings-page">
+    <div className="hdde-settings-page hdde-page-frame hdde-page-stack hdde-system-settings" data-testid="system-settings-page">
       <HddePageHeader
         eyebrow="偏好与运行环境"
         title="系统设置"

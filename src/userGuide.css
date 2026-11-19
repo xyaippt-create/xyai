@@ -1,0 +1,123 @@
+.hdde-guide-save-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.hdde-guide-save-status a { color: var(--brand-primary); font-size: 13px; text-underline-offset: 3px; }
+.hdde-guide-trigger { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 979px) {
+  .hdde-guide-trigger span { display: none; }
+  .hdde-topbar-actions .hdde-guide-trigger,
+  .hdde-retouch-workspace__actions .hdde-guide-trigger { flex: 0 0 auto; min-width: 36px; padding-inline: 8px; }
+}
+
+.hdde-guide-panel, .hdde-guide-viewer {
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  padding: 0;
+  background: var(--card-background);
+  color: var(--text-primary);
+}
+.hdde-guide-panel::backdrop, .hdde-guide-viewer::backdrop { background: rgb(10 18 30 / 40%); }
+.hdde-guide-panel {
+  inset: 0 0 0 auto;
+  width: min(560px, 100%);
+  max-width: 100%;
+  height: 100%;
+  max-height: 100%;
+  margin: 0 0 0 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  box-shadow: -8px 0 34px rgb(10 18 30 / 14%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .hdde-guide-panel[open] { transition: transform 200ms ease-out; }
+  .hdde-guide-panel[open]::backdrop { transition: opacity 200ms ease-out; }
+  @starting-style {
+    .hdde-guide-panel[open] { transform: translateX(100%); }
+    .hdde-guide-panel[open]::backdrop { opacity: 0; }
+  }
+  .hdde-guide-panel:not([open]),
+  .hdde-guide-panel:not([open])::backdrop {
+    transition: transform 200ms ease-in, opacity 200ms ease-in,
+      display 200ms allow-discrete, overlay 200ms allow-discrete;
+  }
+  .hdde-guide-panel:not([open]) { transform: translateX(100%); }
+  .hdde-guide-panel:not([open])::backdrop { opacity: 0; }
+}
+.hdde-guide-panel > header, .hdde-guide-viewer > header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--card-background);
+}
+.hdde-guide-panel h2 { margin: 0; font-size: 19px; }
+.hdde-guide-panel button, .hdde-guide-viewer button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+.hdde-guide-panel > header button, .hdde-guide-viewer > header button {
+  display: grid; place-items: center; width: 36px; height: 36px; border-radius: 8px;
+}
+.hdde-guide-panel nav, .hdde-guide-panel article { padding: 16px 20px 24px; }
+.hdde-guide-search { padding: 16px 20px 0; }
+.hdde-guide-search label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.hdde-guide-search-field {
+  display: flex; align-items: center; gap: 8px; padding-inline-start: 12px;
+  color: var(--text-secondary); border: 1px solid var(--border-color); border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-subtle) 35%, var(--card-background));
+}
+.hdde-guide-search-field:has(input:focus) {
+  background: var(--card-background);
+  outline: var(--control-focus);
+  outline-offset: -2px;
+}
+.hdde-guide-search-field input {
+  flex: 1; width: 100%; min-width: 0; min-height: 44px; padding: 0 8px 0 0;
+  border: 0; background: transparent; color: var(--text-primary); font: inherit;
+}
+.hdde-guide-search-field input:focus { outline: none; }
+@media (forced-colors: active) {
+  .hdde-guide-search-field:has(input:focus) { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+.hdde-guide-search-field button { display: grid; place-items: center; width: 44px; height: 44px; flex: none; }
+.hdde-guide-search p, .hdde-guide-result-section { color: var(--text-secondary); font-size: 14px; }
+.hdde-guide-search p { margin: 12px 0 0; }
+.hdde-guide-search p:empty { margin: 0; }
+.hdde-guide-result-section { display: block; margin-top: 3px; }
+.hdde-guide-panel nav button {
+  display: flex; align-items: center; justify-content: space-between; text-align: start;
+  width: 100%; min-height: 48px; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--border-color);
+}
+.hdde-guide-panel nav button:hover, .hdde-guide-panel > header button:hover,
+.hdde-guide-viewer button:hover { background: var(--surface-subtle); }
+.hdde-guide-panel .hdde-guide-back { display: inline-flex; align-items: center; gap: 3px; padding: 6px 0; color: var(--brand-primary); font-size: 14px; }
+.hdde-guide-panel article h3 { margin: 12px 0 6px; font-size: 20px; }
+.hdde-guide-panel nav section + section { margin-block-start: 28px; }
+.hdde-guide-panel nav h3 { margin: 0 0 4px; font-size: 14px; font-weight: 700; color: var(--text-primary); }
+.hdde-guide-panel .hdde-guide-intro { margin: 0 0 16px; line-height: 1.6; color: var(--text-secondary); }
+.hdde-guide-panel ol { margin: 0; padding-inline-start: 1.6em; list-style: decimal; font-size: 15px; line-height: 1.65; }
+.hdde-guide-panel li { margin-block: 14px; padding-inline-start: 3px; }
+.hdde-guide-panel li p { margin: 2px 0 0; }
+.hdde-guide-panel li strong[id] { display: block; scroll-margin-top: 74px; }
+.hdde-guide-panel li::marker { color: var(--brand-primary); font-weight: 700; }
+.hdde-guide-panel figure { margin: 8px 0 0; }
+.hdde-guide-panel figure button {
+  display: block; position: relative; width: 100%; overflow: hidden;
+  padding: 0; border: 1px solid var(--border-color); border-radius: 8px; cursor: zoom-in;
+}
+.hdde-guide-panel figure img { display: block; width: 100%; height: auto; }
+.hdde-guide-panel figure svg { position: absolute; top: 4px; right: 4px; padding: 2px; border-radius: 4px; background: white; color: #264568; }
+.hdde-guide-panel .hdde-guide-next { display: inline-flex; align-items: center; gap: 3px; margin-top: 6px; padding: 6px 0; color: var(--brand-primary); text-align: start; }
+.hdde-guide-result { border-top: 1px solid var(--border-color); margin: 18px 0 0; padding-top: 14px; font-size: 15px; line-height: 1.6; }
+.hdde-guide-viewer { margin: auto; width: min(1442px, 96vw); max-width: 96vw; max-height: 94vh; border-radius: 10px; }
+.hdde-guide-viewer[open] { display: flex; flex-direction: column; }
+.hdde-guide-viewer > div { min-height: 0; max-width: 100%; overflow: auto; }
+.hdde-guide-viewer header .hdde-guide-zoom { width: auto; margin-left: auto; padding-inline: 10px; color: var(--brand-primary); }
+.hdde-guide-viewer img { display: block; margin-inline: auto; width: auto; max-width: 100%; max-height: calc(94vh - 66px); }
+.hdde-guide-viewer [data-actual-size="true"] img { max-width: none; max-height: none; }

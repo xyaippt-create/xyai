@@ -31,14 +31,17 @@ test("UI-01B rolls the shared page hierarchy through formal work areas", () => {
 });
 
 test("UI-01B keeps one current-task hierarchy and one sequential preparation surface", () => {
-  assert.match(pages.processing, /<h2 id="processing-queue-title">\{taskView === "history" \? "历史任务" : "当前任务"\}<\/h2>/);
+  assert.match(pages.processing, /id="processing-current-tab"[^>]*role="tab"[^>]*aria-controls="processing-task-panel"/);
+  assert.match(pages.processing, /id="processing-history-tab"[^>]*role="tab"[^>]*aria-controls="processing-task-panel"/);
+  assert.match(pages.processing, /id="processing-task-panel"[^>]*role="tabpanel"/);
+  assert.doesNotMatch(pages.processing, /<h2 id="processing-queue-title"/);
   assert.doesNotMatch(pages.processing, /<p className="hdde-eyebrow">处理中心<\/p>/);
   assert.doesNotMatch(pages.processing, /正式目录 READY|正式目录 BLOCKED/);
   assert.match(styles, /\.hdde-processing-steps[\s\S]*gap: 0;[\s\S]*overflow: hidden;/);
 });
 
 test("UI-01B gives output center and retouch actionable restrained empty states", () => {
-  assert.match(pages.outputs, /当前分类还没有正式成品/);
+  assert.match(pages.outputs, /recordKind === "batch" \? "没有匹配的批量处理记录" : "没有匹配的单张处理记录"/);
   assert.match(pages.outputs, /前往处理中心生成结果/);
   assert.match(pages.outputs, /onNavigate\?\.\("\/processing"\)/);
   assert.match(pages.retouch, /hdde-retouch-canvas-wrap \$\{session \? "has-image" : "is-empty"\}/);

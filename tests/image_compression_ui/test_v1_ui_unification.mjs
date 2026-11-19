@@ -95,9 +95,10 @@ test("output center exposes compact search sort selection and responsive detail 
   assert.match(output, /placeholder="搜索文件名"/);
   assert.match(output, /value=\{sortOrder\}/);
   // S61-OC-00 selects single cards and available batch children through the shared list.
-  assert.match(output, /selectableItems\.find\(\(item\) => item\.id === selectedId\)/);
+  assert.match(output, /selectableItems\.find\(\(item\) => \(item\.record_id \|\| item\.id\) === selectedId\)/);
+  assert.match(output, /data\.selected_id === selectedId && data\.selection_matches/);
   assert.match(styles, /\.hdde-output-toolbar/);
-  assert.match(styles, /@media \(min-width: 900px\) and \(max-width: 1120px\)/);
+  assert.match(styles, /@media \(900px < width <= 1120px\)/);
   assert.match(styles, /overflow-wrap: anywhere/);
 });
 

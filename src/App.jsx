@@ -34,6 +34,20 @@ const LEGACY_TASK_ROUTES = Object.freeze({
 });
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
+function rememberWorkspaceEntry(entries, path) {
+  const [pathname, search] = path.split("?", 2);
+  const route = findAppRoute(pathname)?.key;
+  if (route !== "compression" && route !== "batch-watermark") return entries;
+  const query = new URLSearchParams(search);
+  const batchId = route === "batch-watermark" ? (query.get("batch_id") || "").trim() : "";
+  const resultId = batchId ? "" : (query.get("continue_result") || "").trim();
+  const key = batchId ? `batch:${batchId}` : resultId ? `result:${resultId}` : "local";
+  const previous = entries[route];
+  if (previous && (key === "local" || key === previous.key)) return entries;
+  // A plain sidebar visit resumes the workspace. An explicit link opens its own input.
+  return { ...entries, [route]: { key, resultId, batchId } };
+}
+
 function browserPath() {
   return `${window.location.pathname}${window.location.search}`;
 }
@@ -128,9 +142,11 @@ function ExistingPageEmptyState({ title, description, onBackToProcessing }) {
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState(initialPathFromBrowser);
+  const [workspaceEntries, setWorkspaceEntries] = useState(() => rememberWorkspaceEntry({}, currentPath));
   const currentRoutePathRef = useRef(normalizeAppPath(currentPath));
   const activeRouteTransitionRef = useRef(null);
   const [taskContext, setTaskContext] = useState(null);
+  const [compressionTaskContext, setCompressionTaskContext] = useState(null);
   const [taskLoadState, setTaskLoadState] = useState("idle");
   const [taskRegistryRevision, setTaskRegistryRevision] = useState(0);
   const [retouchWorkspaceMounted, setRetouchWorkspaceMounted] = useState(false);
@@ -152,6 +168,7 @@ export default function App() {
       committed = true;
       updateHistory?.();
       currentRoutePathRef.current = nextRoutePath;
+      setWorkspaceEntries((entries) => rememberWorkspaceEntry(entries, targetPath));
       setCurrentPath(targetPath);
     };
     const reducedMotion = typeof window.matchMedia === "function"
@@ -186,7 +203,8 @@ export default function App() {
     commitPathChange(targetPath, () => {
       if (browserPath() !== targetPath) {
         const method = options.replace ? "replaceState" : "pushState";
-        window.history[method]({}, "", targetPath);
+        const entry = pathname === "/smart-delivery" ? { startDelivery: true } : {};
+        window.history[method](entry, "", targetPath);
       }
     });
   }, [commitPathChange]);
@@ -324,21 +342,28 @@ export default function App() {
     });
   }, []);
   const currentResultFeedbackTarget = useMemo(() => {
-    if (!FEEDBACK_TASK_ROUTES.has(route?.key) || !taskConfig?.task_id) return null;
-    if (route?.key === "color-correction" && taskConfig.feature_key !== "color_correction") return null;
-    const result = taskConfig.task_result || {};
+    const feedbackTask = route?.key === "compression"
+      ? compressionTaskContext && {
+        ...compressionTaskContext.taskConfig,
+        task_id: compressionTaskContext.taskId,
+        task_result: compressionTaskContext.taskResult,
+      }
+      : taskConfig;
+    if (!FEEDBACK_TASK_ROUTES.has(route?.key) || !feedbackTask?.task_id) return null;
+    if (route?.key === "color-correction" && feedbackTask.feature_key !== "color_correction") return null;
+    const result = feedbackTask.task_result || {};
     return {
-      feature_key: taskConfig.feature_key || result.feature_key || taskConfig.mode || "runtime_failure",
-      module_id: taskConfig.module_id || result.module_id || "",
-      operation_id: taskConfig.operation_id || result.operation_id || "",
-      trace_id: taskConfig.trace_id || result.trace_id || "",
-      task_id: taskConfig.task_id,
-      result_id: taskConfig.result_id || result.result_id || "",
-      delivery_id: taskConfig.delivery_id || result.delivery_id || "",
+      feature_key: feedbackTask.feature_key || result.feature_key || feedbackTask.mode || "runtime_failure",
+      module_id: feedbackTask.module_id || result.module_id || "",
+      operation_id: feedbackTask.operation_id || result.operation_id || "",
+      trace_id: feedbackTask.trace_id || result.trace_id || "",
+      task_id: feedbackTask.task_id,
+      result_id: feedbackTask.result_id || result.result_id || "",
+      delivery_id: feedbackTask.delivery_id || result.delivery_id || "",
       stage: "user_feedback_entry",
       route: routePath,
     };
-  }, [route?.key, routePath, taskConfig]);
+  }, [route?.key, routePath, taskConfig, compressionTaskContext]);
   const isLocalRetouchResult = ["LOCAL_RETOUCH", "local_retouch"].includes(taskContext?.mode);
   const canResumeCurrentRetouch = Boolean(
     isLocalRetouchResult
@@ -538,8 +563,6 @@ export default function App() {
         onOpenSharedProcessing={() => navigateTo("/processing?mode=4k_v1", { replace: true })}
       />
     );
-  } else if (route.key === "compression") {
-    content = <CompressionPage continueResultId={continueResultId} onNavigate={navigateTo} onTaskContextChange={rememberTaskContext} />;
   } else if (route.key === "color-correction") {
     content = (
       <ColorCorrectionPage
@@ -558,14 +581,18 @@ export default function App() {
       />
     );
   } else if (route.key === "outputs") {
-    content = <OutputCenterPage onNavigate={navigateTo} />;
+    const outputBatchId = new URLSearchParams(window.location.search).get("batch_id") || "";
+    content = <OutputCenterPage outputBatchId={outputBatchId} onNavigate={navigateTo} />;
   } else if (route.key === "output-compare") {
-    const compareItemId = new URLSearchParams(window.location.search).get("item") || "";
+    const params = new URLSearchParams(window.location.search);
+    const compareItemId = params.get("item") || "";
+    const outputBatchId = params.get("batch_id") || "";
     content = (
       <OutputCenterPage
         compareItemId={compareItemId}
+        outputBatchId={outputBatchId}
         onNavigate={navigateTo}
-        onBackFromCompare={() => navigateTo("/outputs")}
+        onBackFromCompare={() => navigateTo(outputBatchId ? `/outputs?batch_id=${encodeURIComponent(outputBatchId)}` : "/outputs")}
       />
     );
   } else if (route.key === "smart-delivery") {
@@ -582,13 +609,12 @@ export default function App() {
       <SmartDeliveryPage
         selectedItemIds={selectedItemIds}
         selectedResultIds={selectedResultIds}
+        onRetryFailed={(mode, ids) => navigateTo(`/smart-delivery?${mode === "result_ids" ? "results" : "items"}=${encodeURIComponent(ids.join(","))}`)}
         onBackToOutputs={() => navigateTo("/outputs")}
       />
     );
-  } else if (route.key === "retouch") {
+  } else if (["retouch", "compression", "batch-watermark"].includes(route.key)) {
     content = null;
-  } else if (route.key === "batch-watermark") {
-    content = <BatchWatermarkPage continueResultId={continueResultId} onNavigate={navigateTo} />;
   } else if (route.key === "settings") {
     content = <SystemSettingsPage onNavigate={navigateTo} />;
   } else if (route.key === "print-8k") {
@@ -603,6 +629,8 @@ export default function App() {
     ? new URLSearchParams(window.location.search).get("mode") || ""
     : "";
   const showsProcessingCenter = ["processing", "history"].includes(route?.key);
+  const compressionEntry = workspaceEntries.compression;
+  const watermarkEntry = workspaceEntries["batch-watermark"];
   const shellRoute = route?.key === "processing" && requestedMode === "4k_v1"
     ? findAppRoute("/4k-enhancement")
     : route;
@@ -635,6 +663,28 @@ export default function App() {
         </div>
       )}
       {showsProcessingCenter ? null : <React.Suspense fallback={null}>{content}</React.Suspense>}
+      {compressionEntry ? (
+        <React.Suspense fallback={null}>
+          <CompressionPage
+            key={compressionEntry.key}
+            active={route?.key === "compression"}
+            continueResultId={compressionEntry.resultId}
+            onNavigate={navigateTo}
+            onTaskContextChange={setCompressionTaskContext}
+          />
+        </React.Suspense>
+      ) : null}
+      {watermarkEntry ? (
+        <React.Suspense fallback={null}>
+          <BatchWatermarkPage
+            key={watermarkEntry.key}
+            active={route?.key === "batch-watermark"}
+            continueResultId={watermarkEntry.resultId}
+            requestedBatchId={watermarkEntry.batchId}
+            onNavigate={navigateTo}
+          />
+        </React.Suspense>
+      ) : null}
       {retouchWorkspaceMounted || route?.key === "retouch" ? (
         <div
           hidden={route?.key !== "retouch"}
@@ -644,7 +694,7 @@ export default function App() {
           <React.Suspense fallback={null}>
             <LocalRetouchPage
               onBack={() => navigateTo(DEFAULT_APP_PATH)}
-              onOpenOutputCenter={() => navigateTo("/outputs")}
+              onOpenOutputCenter={(batchId) => navigateTo(batchId ? `/outputs?batch_id=${encodeURIComponent(batchId)}` : "/outputs")}
               onResultReady={handleRetouchResultReady}
               onResumeReady={handleRetouchResumeReady}
               onResumeAvailabilityChange={handleRetouchResumeAvailability}

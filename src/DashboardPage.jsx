@@ -3399,6 +3399,7 @@ export default function DashboardPage({
           title={processingMode === PROCESSING_MODE_FOUR_K ? "4K画质增强" : "处理中心"}
           description={processingMode === PROCESSING_MODE_FOUR_K ? "共享上传、进度与结果流程；当前已预选4K画质增强：超分重建细节，并以原图保真融合。" : "集中创建与查看当前任务，已结束记录继续保留在同一处理中心的历史任务中。"}
         />
+        <div className="hdde-desktop-columns hdde-processing-columns">
         <section className="hdde-processing-panel hdde-processing-prepare" aria-labelledby="processing-prepare-title">
           <header className="hdde-processing-section-heading">
             <div>
@@ -3509,6 +3510,7 @@ export default function DashboardPage({
           {outputDirError ? <p className="hdde-processing-inline-feedback" data-tone="negative">{outputDirError}</p> : null}
         </section>
 
+        <div className="hdde-processing-queue-column">
         {activeColorBatch ? (
           <section className="hdde-processing-panel hdde-processing-batch-summary" aria-labelledby="color-batch-summary-title" data-testid="color-batch-summary">
             <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
@@ -3538,14 +3540,11 @@ export default function DashboardPage({
           </section>
         ) : null}
 
-        <section className="hdde-processing-panel hdde-processing-queue" aria-labelledby="processing-queue-title">
-          <div className="hdde-processing-task-tabs" role="tablist" aria-label="处理中心任务范围">
-            <button type="button" role="tab" aria-selected={taskView === "current"} onClick={() => { setTaskView("current"); setActiveItemId(""); setNotice(""); }}>当前任务</button>
-            <button type="button" role="tab" aria-selected={taskView === "history"} onClick={() => { setTaskView("history"); setActiveItemId(""); setNotice(""); }}>历史任务</button>
-          </div>
+        <section className="hdde-processing-panel hdde-processing-queue" aria-label="处理中心任务列表">
           <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
-            <div>
-              <h2 id="processing-queue-title">{taskView === "history" ? "历史任务" : "当前任务"}</h2>
+            <div className="hdde-processing-task-tabs" role="tablist" aria-label="处理中心任务范围">
+              <button id="processing-current-tab" type="button" role="tab" aria-selected={taskView === "current"} aria-controls="processing-task-panel" onClick={() => { setTaskView("current"); setActiveItemId(""); setNotice(""); }}>当前任务</button>
+              <button id="processing-history-tab" type="button" role="tab" aria-selected={taskView === "history"} aria-controls="processing-task-panel" onClick={() => { setTaskView("history"); setActiveItemId(""); setNotice(""); }}>历史任务</button>
             </div>
             <div className="hdde-processing-list-heading-actions">
               <span className="hdde-processing-count">{visibleTaskItems.length} 条</span>
@@ -3573,7 +3572,7 @@ export default function DashboardPage({
             </div>
           </header>
 
-          <div className="hdde-processing-table-wrap">
+          <div id="processing-task-panel" className="hdde-processing-table-wrap" role="tabpanel" aria-labelledby={`processing-${taskView}-tab`}>
             <table>
               <thead>
                 <tr>
@@ -3654,6 +3653,8 @@ export default function DashboardPage({
         </section>
 
         {showCurrentSummary ? (
+        <details className="hdde-processing-result-tray">
+          <summary><strong>进度与结果</strong><span>{currentStageLabel} · {currentProgress}%</span></summary>
         <div className="hdde-processing-summary-grid">
           <section className="hdde-processing-panel hdde-processing-summary" aria-labelledby="processing-status-title">
             <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
@@ -3706,7 +3707,19 @@ export default function DashboardPage({
             </div>
           </section>
         </div>
-        ) : null}
+        </details>
+        ) : (
+          <aside className="hdde-processing-panel hdde-processing-summary hdde-processing-summary-empty" aria-label="进度与结果">
+            <header className="hdde-processing-section-heading hdde-processing-section-heading--compact">
+              <div>
+                <h2>进度与结果</h2>
+                <p>{taskView === "history" ? "从历史列表打开任务详情或成品。" : "导入图片后，这里会显示任务进度、输出目录和结果操作。"}</p>
+              </div>
+            </header>
+          </aside>
+        )}
+        </div>
+        </div>
       </div>
     </section>
   );

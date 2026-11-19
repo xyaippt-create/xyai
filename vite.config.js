@@ -45,6 +45,12 @@ export default defineConfig(({ command }) => {
   const apiTarget = configuredApiTarget || "http://127.0.0.1:0";
   return {
     plugins: [react()],
+    build: {
+      // The bundled guide must also open after the browser has gone offline.
+      assetsInlineLimit(file) {
+        if (path.resolve(path.dirname(file)) === path.join(PROJECT_ROOT, "src", "assets", "user-guide")) return true;
+      },
+    },
     define: {
       __HDDE_BUILD_ID__: JSON.stringify(build.id),
       __HDDE_BUILD_TIME__: JSON.stringify(build.builtAt),

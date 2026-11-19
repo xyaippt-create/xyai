@@ -69,7 +69,7 @@ test("compression confirmation requires a real candidate and preserves the no-pr
   assert.match(compressionPage, /const compressionDeliveryReady = candidateState\.candidateDeliveryReady/);
   assert.match(compressionPage, /data-testid="compression-open-folder"[\s\S]*?!compressionDeliveryReady/);
   assert.match(compressionPage, /data-testid="compression-delivery-state"/);
-  assert.match(compressionPage, /确认完成，可以交付/);
+  assert.match(compressionPage, /compressionDeliveryReady \? <HddeStatusPill tone="positive">可交付<\/HddeStatusPill>/);
   assert.match(compressionPage, /candidateState\.sourceNoProcessing[\s\S]*?原图已满足要求/);
   assert.match(compressionPage, /继续使用原图，或调整参数后重新处理/);
 });

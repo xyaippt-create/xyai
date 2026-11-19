@@ -2,9 +2,28 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
 import "./index.css";
+import "./workbench.css";
 
 function BrandedApplication() {
   const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    // Browsers also match :focus-visible when a text field is clicked.
+    const root = document.documentElement;
+    const onPointer = () => root.setAttribute("data-pointer-focus", "");
+    const onKey = (event) => {
+      if (event.key === "Tab" || event.key.startsWith("Arrow") || event.key === "Escape") {
+        root.removeAttribute("data-pointer-focus");
+      }
+    };
+    window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("keydown", onKey, true);
+      root.removeAttribute("data-pointer-focus");
+    };
+  }, []);
 
   useEffect(() => {
     // Output Center's first-screen budget starts at navigation, not module readiness.
