@@ -356,6 +356,30 @@ class PackagedRuntimeContractTests(unittest.TestCase):
         self.assertEqual(result["version"], version["display_version"])
         self.assertEqual(Path(result["frontend"]), ROOT / "dist" / "index.html")
 
+    def test_self_test_imports_native_modules_and_fails_without_dialog(self):
+        resources = {"version": "V-test", "resource_root": str(ROOT), "frontend": str(ROOT / "dist" / "index.html")}
+        with patch.object(packaged_launcher, "validate_packaged_resources", return_value=resources):
+            with patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+                self.assertEqual(packaged_launcher.main(["--self-test"]), 0)
+            self.assertIn("HDDE_PACKAGED_SELF_TEST=PASS", out.getvalue())
+            self.assertIn("ONNXRUNTIME_PROVIDERS=", out.getvalue())
+
+            real_import = __import__("importlib").import_module
+
+            def broken_onnxruntime(name, *args, **kwargs):
+                if name == "onnxruntime":
+                    raise ImportError("DLL load failed while importing onnxruntime_pybind11_state")
+                return real_import(name, *args, **kwargs)
+
+            with (
+                patch("importlib.import_module", side_effect=broken_onnxruntime),
+                patch("runtime.error_dialog.show_error_dialog") as dialog,
+                patch("sys.stdout", new_callable=__import__("io").StringIO) as out,
+            ):
+                self.assertEqual(packaged_launcher.main(["--self-test"]), 1)
+            dialog.assert_not_called()
+            self.assertIn("HDDE_PACKAGED_SELF_TEST=FAIL ImportError", out.getvalue())
+
     def test_formal_spec_targets_current_packaged_entry_and_resources(self):
         spec = (ROOT / "packaging" / "windows" / "HDDE.spec").read_text(encoding="utf-8")
         self.assertIn('packaged_main.py', spec)

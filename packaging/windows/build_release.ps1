@@ -21,6 +21,54 @@ function Resolve-SingleInstaller {
     return $Candidates[0]
 }
 
+# R1 shipped msvcp140/vcruntime140 14.26 from a driver folder that sat before System32 on PATH;
+# PyInstaller resolves these DLLs through PATH. For the PyInstaller run, put System32 first and
+# drop every other folder that carries its own copy.
+function Get-PackagingPath {
+    $System32 = [Environment]::GetFolderPath("System").TrimEnd('\')
+    $Entries = @($System32)
+    foreach ($Entry in ($env:PATH -split ';')) {
+        $Trimmed = $Entry.Trim().Trim('"').TrimEnd('\')
+        if (-not $Trimmed -or $Trimmed -ieq $System32) { continue }
+        $CarriesVcRuntime = $false
+        foreach ($Name in @("msvcp140.dll", "vcruntime140.dll")) {
+            try {
+                if (Test-Path -LiteralPath (Join-Path $Trimmed $Name) -PathType Leaf) { $CarriesVcRuntime = $true }
+            }
+            catch { }
+        }
+        if ($CarriesVcRuntime) {
+            Write-Host "PACKAGING_PATH_DROPPED=$Trimmed"
+            continue
+        }
+        $Entries += $Trimmed
+    }
+    return ($Entries -join ';')
+}
+
+# onnxruntime needs VC runtime 14.40 or newer; an older bundled copy fails at import on the user's machine.
+function Assert-VcRuntimeVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$AppTree,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $Minimum = [Version]"14.40.0.0"
+    # Windows PowerShell 5.1 ignores -Include together with -LiteralPath, so filter by name explicitly.
+    $Dlls = @(Get-ChildItem -LiteralPath $AppTree -Recurse -File | Where-Object { $_.Name -match '^(msvcp140|vcruntime140|concrt140).*\.dll$' })
+    if ($Dlls.Count -eq 0) {
+        throw "VC_RUNTIME_GATE=FAIL ($Label): no VC runtime DLL found under $AppTree"
+    }
+    foreach ($Dll in $Dlls) {
+        $DllVersion = $Dll.VersionInfo.FileVersionRaw
+        $Relative = $Dll.FullName.Substring($AppTree.Length).TrimStart('\')
+        if ($null -eq $DllVersion -or $DllVersion -lt $Minimum) {
+            throw "VC_RUNTIME_GATE=FAIL ($Label): $Relative is $DllVersion, needs >= $Minimum"
+        }
+        Write-Output "VC_RUNTIME=$DllVersion $Relative"
+    }
+    Write-Output "VC_RUNTIME_GATE=PASS ($Label) files=$($Dlls.Count)"
+}
+
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -78,16 +126,29 @@ try {
     & $Python -c "import os; from pathlib import Path; from runtime.production_frontend import validate_production_frontend; validate_production_frontend(Path(os.environ['HDDE_PACKAGING_FRONTEND_DIR'])); print('PRODUCTION_FRONTEND=PASS')"
     if ($LASTEXITCODE -ne 0) { throw "Frontend artifact validation failed with exit code $LASTEXITCODE." }
 
-    & $Python -m PyInstaller --noconfirm --distpath $AppDist --workpath $PyInstallerWork $SpecPath
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed with exit code $LASTEXITCODE." }
+    $PreviousPath = $env:PATH
+    try {
+        $env:PATH = Get-PackagingPath
+        & $Python -m PyInstaller --noconfirm --distpath $AppDist --workpath $PyInstallerWork $SpecPath
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed with exit code $LASTEXITCODE." }
+    }
+    finally {
+        $env:PATH = $PreviousPath
+    }
 
     $PackagedAppTree = Join-Path $AppDist "HDDE"
     $PackagedExe = Join-Path $PackagedAppTree "HDDE.exe"
     if (-not (Test-Path -LiteralPath $PackagedExe -PathType Leaf)) {
         throw "Frozen runtime output is missing: $PackagedExe"
     }
-    & $PackagedExe --self-test
-    if ($LASTEXITCODE -ne 0) { throw "Frozen runtime self-test failed with exit code $LASTEXITCODE." }
+    Assert-VcRuntimeVersion -AppTree $PackagedAppTree -Label "app"
+    # HDDE.exe is a windowed app: pipe through Out-String so PowerShell waits and captures the self-test line.
+    $SelfTestOutput = (& $PackagedExe --self-test | Out-String).Trim()
+    $SelfTestExit = $LASTEXITCODE
+    Write-Output $SelfTestOutput
+    if ($SelfTestExit -ne 0 -or $SelfTestOutput -notmatch 'HDDE_PACKAGED_SELF_TEST=PASS') {
+        throw "Frozen runtime self-test failed with exit code ${SelfTestExit}: $SelfTestOutput"
+    }
 
     & $Python $PackageDataGate --app-tree $PackagedAppTree --project-root $ProjectRoot --manifest $ProvenanceManifest --pyinstaller-work (Join-Path $PyInstallerWork "HDDE")
     if ($LASTEXITCODE -ne 0) { throw "PACKAGE_DATA_LEAK_GATE failed with exit code $LASTEXITCODE." }
@@ -157,6 +218,7 @@ try {
     $ExtractedAppTree = Join-Path $ExtractedInstallerRoot "app"
     & $Python $PackageDataGate --app-tree $ExtractedAppTree --project-root $ProjectRoot --manifest $ExtractedProvenanceManifest --pyinstaller-work (Join-Path $PyInstallerWork "HDDE")
     if ($LASTEXITCODE -ne 0) { throw "Extracted installer app tree PACKAGE_DATA_LEAK_GATE failed with exit code $LASTEXITCODE." }
+    Assert-VcRuntimeVersion -AppTree $ExtractedAppTree -Label "installer"
 
     & $Python $InstallerDataGate --installer $Installer.FullName --extracted-root $ExtractedInstallerRoot --source-app-tree $PackagedAppTree --webview2-bootstrapper $WebView2BootstrapperPath --app-provenance $ProvenanceManifest --extracted-app-provenance $ExtractedProvenanceManifest --manifest $InstallerContentManifest
     if ($LASTEXITCODE -ne 0) { throw "Installer content data gate failed with exit code $LASTEXITCODE." }

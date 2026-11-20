@@ -3487,3 +3487,12 @@ V0.8.6 部署补记（同日）：重启前 8787 无运行中任务；`npx vite 
 - `.gitignore` 放行 `packaging/windows/HDDE.spec`，正式打包配置首次纳入版本库（文件内无本机绝对路径）。
 - `tests/test_packaged_runtime.py`：打包资源完整性测试在局部修图模型（不入库，约 92MB）不存在时跳过并注明原因；本机有模型时照常执行并通过。
 - 验证：以 LF 导出 HEAD 叠加本次改动、无 settings/dist/模型的副本，按 CI 顺序实跑：ESLint、ruff 零报错，前端 411 项通过，构建成功，后端 77 项通过（跳过 1 项）。
+
+## 2026-11-20｜V0.8.6 测试安装包 R2：修复打进旧版 VC 运行库
+
+- `packaging/windows/build_release.ps1`：PyInstaller 运行期间 PATH 以 System32 打头，并去掉其他自带 msvcp140/vcruntime140 的目录（本机去掉 `System32\HWAudioDriver` 与 Python311），结束后恢复；新增 VC 运行库门禁，应用目录与安装包解出目录中所有 msvcp140*/vcruntime140*/concrt140* 必须 ≥14.40，否则中止。用 R1 应用目录实测门禁报 `_internal\msvcp140.dll is 14.26.28720.3` 失败。
+- 自检原来形同虚设：HDDE.exe 是窗口程序，PowerShell 直接调用不等待（实测 0.003 秒返回），R1 的「自检 PASS」实际没有检查。现改为管道调用等待结束，并要求输出含 `HDDE_PACKAGED_SELF_TEST=PASS`。
+- `runtime/packaged_launcher.py`：`--self-test` 在资源校验之外实际导入 numpy、cv2、PIL、onnxruntime、fastapi、uvicorn 并读取 onnxruntime 执行器；失败时输出 FAIL 并返回 1，不弹窗（避免卡住打包）。`tests/test_packaged_runtime.py` 补成功与 onnxruntime 导入失败两种情形，19 项通过。
+- `requirements.txt`：`opencv-python-headless` 限定 `<5`。CI 从零安装装到 OpenCV 5.1，不再自带颜色校正所需的 haarcascade 人脸文件，导致打包资源测试失败；本机为 4.13。
+- R2：`build_release.ps1 -BuildId V086-TEST-20261120-R2`（工具同 R1）。结果 packaging/windows/release/V0.8.6/installer/HDDE_V0.8.6-dev_V086-TEST-20261120-R2_Setup.exe，229,181,551 B，SHA-256 995b2027a005376cdf4c8438ba7080854dbc08f4f7d132ccdec2a5a64c77d014。包内 VC 运行库 14.50（numpy 自带一份 14.40），应用与安装包两处门禁 PASS；自检 PASS，onnxruntime 执行器 Azure、CPU；数据泄漏检查两次 PASS，安装包内容扫描 PASS。安装包解出目录的 HDDE.exe 自检同样 PASS。
+- 注意：按工作区打包（HEAD c1a72c6，工作区另有 51 项其他会话未提交改动，与 R1 做法相同）；未在本机实际安装后启动界面。本条改动未提交。

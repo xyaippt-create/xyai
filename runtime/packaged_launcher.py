@@ -577,6 +577,28 @@ def run_packaged_runtime(
             signal.signal(sig, handler)
 
 
+# Native extensions the running app loads. Importing them here makes the build-time
+# self-test fail when a bundled DLL is wrong (R1 shipped an old VC runtime and
+# onnxruntime only failed on the user's machine).
+SELF_TEST_NATIVE_MODULES = ("numpy", "cv2", "PIL.Image", "onnxruntime", "fastapi", "uvicorn")
+
+
+def run_self_test() -> int:
+    """Build-time check: resources present and native modules importable. Never shows a dialog."""
+    import importlib
+
+    try:
+        resources = validate_packaged_resources()
+        for name in SELF_TEST_NATIVE_MODULES:
+            importlib.import_module(name)
+        providers = importlib.import_module("onnxruntime").get_available_providers()
+    except Exception as exc:
+        print(f"HDDE_PACKAGED_SELF_TEST=FAIL {type(exc).__name__}: {exc}")
+        return 1
+    print(f"HDDE_PACKAGED_SELF_TEST=PASS VERSION={resources['version']} ONNXRUNTIME_PROVIDERS={','.join(providers)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"影界 HDDE {APP_VERSION} 正式桌面入口")
     parser.add_argument("--shutdown", action="store_true", help="正常退出正在运行的影界 HDDE。")
@@ -591,9 +613,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.shutdown:
         return request_shutdown()
     if args.self_test:
-        resources = validate_packaged_resources()
-        print(f"HDDE_PACKAGED_SELF_TEST=PASS VERSION={resources['version']}")
-        return 0
+        return run_self_test()
     return run_packaged_runtime(preferred_port=args.port, validation_runtime_root=args.validation_runtime_root)
 
 
