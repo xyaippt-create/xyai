@@ -3479,3 +3479,11 @@ V0.8.6 部署补记（同日）：重启前 8787 无运行中任务；`npx vite 
 - `tests/diagnostics/test_v0453_core_pipeline.py`：四处中文被 GBK 误读成乱码、引号被吃掉导致无法解析，还原为“普通PNG / 透明PNG / 中文小字图 / 高清测试.png”（与 `backend/backend_uploads/高清测试.png` 实际文件名一致），保留 BOM。该文件是独立脚本，本次只验证可解析，未运行。
 - `gui/app.py`：更正此前“--gui 会崩”的判断——运行时 `run_tkinter_gui()` 用 `globals().update` 注入 tkinter 名称，能正常工作，属误报。补 `if TYPE_CHECKING:` 声明供静态检查识别，运行时行为不变（缺 tkinter 时仍回退 PowerShell 界面），`--self-test` 通过。
 - `ruff.toml` 撤销全部 per-file-ignores 与排除项，全仓库 ruff 零报错。验证：后端 9 个套件 77 项、`test_real_app` 58 项通过。未提交，无 Git 写操作。
+
+## 2026-11-20｜CI 变绿：换行符、本机文件依赖与短路径
+
+- 首次 CI（run 44644214670）前后端均失败，原因都不在代码逻辑：① Windows 运行器检出时把 LF 转成 CRLF，`test_batch_watermark_ui` 等 3 项按 `\n` 匹配源码的契约测试失败（以 LF 导出 HEAD 后 411 项全过）；② 后端测试读取本机才有的 `settings/settings.json`、`packaging/windows/HDDE.spec`、`dist/index.html` 和局部修图模型；③ 运行器 TEMP 为 8.3 短路径 `RUNNER~1`，与程序解析出的长路径比较不相等。
+- `.github/workflows/ci.yml`：检出前关闭 `core.autocrlf`；后端 job 先构建前端、生成指向运行器临时目录的测试用设置文件，测试步骤把 TEMP/TMP 指到 `runner.temp`。
+- `.gitignore` 放行 `packaging/windows/HDDE.spec`，正式打包配置首次纳入版本库（文件内无本机绝对路径）。
+- `tests/test_packaged_runtime.py`：打包资源完整性测试在局部修图模型（不入库，约 92MB）不存在时跳过并注明原因；本机有模型时照常执行并通过。
+- 验证：以 LF 导出 HEAD 叠加本次改动、无 settings/dist/模型的副本，按 CI 顺序实跑：ESLint、ruff 零报错，前端 411 项通过，构建成功，后端 77 项通过（跳过 1 项）。

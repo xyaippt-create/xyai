@@ -342,6 +342,10 @@ class PackagedRuntimeContractTests(unittest.TestCase):
                 Path(r"C:\Users\tester\AppData\Local") / "YingjieHDDE" / "settings.json",
             )
 
+    @unittest.skipUnless(
+        (ROOT / "models" / "local_retouch" / "inpainting_lama_2025jan.onnx").is_file(),
+        "局部修图模型不入库（约 92MB），只在本机存在时验证打包资源完整性",
+    )
     def test_packaged_resource_contract_uses_product_version_and_current_dist(self):
         version = json.loads((ROOT / "product_version.json").read_text(encoding="utf-8"))
         with (

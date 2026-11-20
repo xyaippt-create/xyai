@@ -34,6 +34,7 @@ build/
 dist/
 *.spec
 !VisualMasterPro.spec
+!packaging/windows/HDDE.spec
 *.spec.tmp
 *.exe
 *.pkg
