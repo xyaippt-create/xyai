@@ -3842,7 +3842,6 @@ def compute_safe_beta_quality_scores(
     profile = image_quality_profile if image_quality_profile in IMAGE_QUALITY_PROFILES else str(type_fields["image_quality_profile"])
     merged = {
         "quality_score_status": "available",
-        "image_quality_profile": profile,
         **type_fields,
         "image_quality_profile": profile,
         **scores,
@@ -5899,7 +5898,7 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "skin_person_overlap_ratio": metrics.get("skin_person_overlap_ratio"),
                     "face_detection_confidence": metrics.get("face_detection_confidence"),
                     "person_detection_confidence": metrics.get("person_detection_confidence"),
-                    "skin_protection_applied": metrics.get("skin_protection_applied"),
+                    "skin_protection_applied": output_resolution_fields.get("skin_protection_applied", metrics.get("skin_protection_applied")),
                     "skin_protection_reason": metrics.get("skin_protection_reason"),
                     "after": "" if flat_output else relative_or_name(after_path, run_dir),
                     "enhanced": relative_or_name(enhanced_path, run_dir),
@@ -5942,7 +5941,6 @@ def process(args: argparse.Namespace) -> dict[str, object]:
                     "fast_quality_level": output_resolution_fields.get("fast_quality_level", per_file_timing.get("fast_quality_level")),
                     "portrait_group_face_count": output_resolution_fields.get("portrait_group_face_count"),
                     "face_protection_applied": output_resolution_fields.get("face_protection_applied"),
-                    "skin_protection_applied": output_resolution_fields.get("skin_protection_applied", metrics.get("skin_protection_applied")),
                     "hair_protection_applied": output_resolution_fields.get("hair_protection_applied"),
                     "clothing_protection_applied": output_resolution_fields.get("clothing_protection_applied"),
                     "background_defocus_protection_applied": output_resolution_fields.get("background_defocus_protection_applied"),

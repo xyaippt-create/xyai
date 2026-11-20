@@ -995,35 +995,6 @@ def quality_metrics(before_image: np.ndarray, after_image: np.ndarray, text_dens
     }
 
 
-def visual_gate(metrics: dict[str, Any], text_density: float) -> tuple[bool, str, str]:
-    pass_gate = (
-        metrics["color_fidelity_score"] >= 88
-        and metrics["artifact_risk"] != "high"
-        and metrics["pseudo_hd_risk"] != "high"
-        and metrics["detail_stability_score"] >= 55
-        and metrics["clarity_score"] >= 15
-        and metrics["clarity_gain"] >= -0.5
-        and metrics["edge_quality_gain"] >= -0.5
-    )
-    if text_density >= 0.015:
-        pass_gate = pass_gate and metrics["text_clarity_score"] >= 24 and metrics["text_clarity_gain"] >= -0.8
-    visual_score = metrics["visual_score"]
-    if not pass_gate:
-        level = "failed"
-    elif visual_score >= 72 and metrics["color_fidelity_score"] >= 95:
-        level = "excellent"
-    elif visual_score >= 50:
-        level = "standard"
-    else:
-        level = "acceptable"
-    note = (
-        f"清晰度 {metrics['clarity_score']}，文字 {metrics['text_clarity_score']}，"
-        f"边缘 {metrics['edge_quality_score']}，色彩忠实 {metrics['color_fidelity_score']}，"
-        f"伪高清风险 {metrics['pseudo_hd_risk']}。"
-    )
-    return bool(pass_gate), level, note
-
-
 def visual_gate(metrics: dict[str, Any], text_density: float, image_type: str = "general") -> tuple[bool, str, str]:
     """V0.3.7 stricter 1080P delivery gate.
 
@@ -1089,32 +1060,6 @@ def visual_gate(metrics: dict[str, Any], text_density: float, image_type: str = 
         f"伪高清风险 {metrics['pseudo_hd_risk']}，最终等级 {level}。"
     )
     return bool(pass_gate), level, note
-
-
-def compression_gate(main_image: np.ndarray, candidate_image: np.ndarray, profile: str, text_density: float) -> dict[str, Any]:
-    diff = pixel_diff_score(main_image, candidate_image)
-    color_delta = mean_lab_delta(main_image, candidate_image)
-    main_edge = laplacian_score(main_image)
-    candidate_edge = laplacian_score(candidate_image)
-    edge_ratio = candidate_edge / max(main_edge, 1e-6)
-
-    diff_limit = 2.2 if profile == "preview_light" else 1.45
-    color_limit = 2.0 if profile == "preview_light" else 1.35
-    edge_limit = 0.82 if profile == "preview_light" else 0.88
-    if text_density >= 0.035:
-        diff_limit -= 0.25
-        edge_limit += 0.04
-
-    quality_preserved = diff <= diff_limit and color_delta <= color_limit and edge_ratio >= edge_limit
-    return {
-        "quality_preserved": bool(quality_preserved),
-        "candidate_pixel_diff_from_main": round(diff, 6),
-        "candidate_color_delta": round(color_delta, 6),
-        "candidate_edge_ratio": round(edge_ratio, 6),
-        "compression_quality_drop": round(max(0.0, color_delta + max(0.0, 1.0 - edge_ratio) * 4.0), 6),
-        "compression_allowed": bool(quality_preserved),
-        "pseudo_hd_risk": "low" if quality_preserved else "medium",
-    }
 
 
 def compression_gate(

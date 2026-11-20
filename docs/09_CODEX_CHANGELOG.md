@@ -3463,3 +3463,19 @@ V0.8.6 部署补记（同日）：重启前 8787 无运行中任务；`npx vite 
 - `requirements.txt` 移除 `Flask`、`Flask-Cors`：全仓库跟踪文件无任何 flask 引用，服务早已是 FastAPI。
 - 核实后保留：`gui/`、`batch/` 由 `main.py --gui` / 批处理命令行模式和 `VisualMasterPro.spec` 引用；`modes/`、`pipelines/` 由 `--mode` 命令行选项与 `packaging/windows/program_resources.py` 引用；`engine/color_correction/v3_white_balance_prototype.py` 产品未用但有专属测试；根目录 7 个旧 `test_*.py` 仍导入现存模块。这些是否下线属于产品决策，本次未动。
 - 验证：`py_compile` 通过；依赖 main.py 的 8 个 unittest 套件共 77 项通过；`main.py --server --port 8799` 真实启动，`/api/health`、`/api/runtime/status`、`/api/v1/tasks`、`/` 均 200，随后关闭。8787 未触碰。内部清理，不写更新说明。未提交，无 Git 写操作。
+
+## 2026-11-20｜接入 ruff、ESLint 与 GitHub Actions CI
+
+- 新增 `ruff.toml`：只开语法错误、未定义名称、重复字典键、同名函数覆盖（E9/F63/F7/F82/F601/F811）。首次扫描发现的已知债务按文件登记豁免，修好后删对应行：`gui/app.py` 缺 tkinter 导入（`--gui` 的 Tk 界面 86 处未定义名称）；`tests/diagnostics/test_v0453_core_pipeline.py` 中文编码损坏无法解析；`tests/hd_core/test_source_domain_restoration.py` return 后残留不可达断言；`backend/v036_output_core.py` 的 `visual_gate`/`compression_gate` 各定义两次；两处字典重复键。本次未修。
+- 新增 `eslint.config.js`（ESLint 10.15.0 + react-hooks 7.1.1，开发依赖、精确版本）：`@eslint/js` 推荐规则去掉未使用变量、空块、无用赋值、错误 cause 等写法偏好；构建常量 `__HDDE_BUILD_ID__`/`__HDDE_BUILD_TIME__` 声明为全局；文案中的全角空格不报。`package.json` 增加 `npm run lint`，`package-lock.json` 随之更新（npm 把依赖按字母重排）。
+- 新增 `.github/workflows/ci.yml`（Windows 运行器）：前端 ESLint、`node --test` UI 测试、vite 构建；后端 ruff、安装 requirements 后跑依赖 main.py 的 8 个 unittest 套件。
+- 本地验证：ruff、ESLint 均零报错；vite 构建到临时目录成功（未碰 dist）；8 个后端套件 77 项通过（同日清理死代码后已跑）。`node --test` 411 项中 1 项失败（`test_ui_01b_rollout.mjs` UI-01B），原因是工作区里其他会话未提交的 `src/productDisplay.js` 改动去掉了该测试检查的写法；HEAD 版本含该写法。CI 只在推送后运行，Windows 运行器全新安装依赖的结果未验证。未提交，无 Git 写操作。
+
+## 2026-11-20｜修复 ruff 首次扫描登记的已知问题，撤销全部豁免
+
+- `tests/hd_core/test_source_domain_restoration.py`：`_real_artifact_validator_results` 被插进 `test_operator_deterministic` 中间，该测试的 3 条断言落到 return 之后从未执行。断言放回原测试；文件 56 项通过（确定性证据 status/byte/pixel 三项实测为真）。
+- `backend/v036_output_core.py`：删除被后文同名定义覆盖、永不生效的旧版 `visual_gate`、`compression_gate`（V0.3.7 版本保留，签名不变）。
+- 重复字典键：`engine/diagnostics/safe_1080p_feedback_package.py` 删去重复的同值键；`tools/experiments/safe_1080p_enhance.py` 两处按 Python 实际生效值合并（`image_quality_profile` 去掉 `**type_fields` 前那份，保留其后覆盖的一份；`skin_protection_applied` 把后一处的取值移到前一处位置），输出取值与键序不变。
+- `tests/diagnostics/test_v0453_core_pipeline.py`：四处中文被 GBK 误读成乱码、引号被吃掉导致无法解析，还原为“普通PNG / 透明PNG / 中文小字图 / 高清测试.png”（与 `backend/backend_uploads/高清测试.png` 实际文件名一致），保留 BOM。该文件是独立脚本，本次只验证可解析，未运行。
+- `gui/app.py`：更正此前“--gui 会崩”的判断——运行时 `run_tkinter_gui()` 用 `globals().update` 注入 tkinter 名称，能正常工作，属误报。补 `if TYPE_CHECKING:` 声明供静态检查识别，运行时行为不变（缺 tkinter 时仍回退 PowerShell 界面），`--self-test` 通过。
+- `ruff.toml` 撤销全部 per-file-ignores 与排除项，全仓库 ruff 零报错。验证：后端 9 个套件 77 项、`test_real_app` 58 项通过。未提交，无 Git 写操作。

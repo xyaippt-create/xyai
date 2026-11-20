@@ -307,7 +307,6 @@ def _route_truth_config(run_result: dict[str, Any], tool_checks: dict[str, Any])
                 "knowledge_text_line_roi_gain": row.get("knowledge_text_line_roi_gain", "not_applicable"),
                 "face_protection_pass": row.get("face_protection_pass", "not_applicable"),
                 "product_material_protection_pass": row.get("product_material_protection_pass", "not_applicable"),
-                "background_blur_protection_pass": row.get("background_blur_protection_pass", "not_applicable"),
                 "texture_roi_score": row.get("texture_roi_score", "not_applicable"),
                 "texture_roi_gain": row.get("texture_roi_gain", "not_applicable"),
                 "valid_text_roi_count": row.get("valid_text_roi_count", "not_applicable"),

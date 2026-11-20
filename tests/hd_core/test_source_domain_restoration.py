@@ -140,6 +140,9 @@ class SourceDomainRestorationTest(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        self.assertEqual(evidence["status"], "PASS")
+        self.assertTrue(evidence["byte_identical"])
+        self.assertTrue(evidence["pixel_sha256_identical"])
 
     @classmethod
     def _real_artifact_validator_results(cls) -> tuple[dict, dict]:
@@ -155,9 +158,6 @@ class SourceDomainRestorationTest(unittest.TestCase):
             )
             cls._cached_path_validator_results = cached
         return cached
-        self.assertEqual(evidence["status"], "PASS")
-        self.assertTrue(evidence["byte_identical"])
-        self.assertTrue(evidence["pixel_sha256_identical"])
 
     def test_controlled_mild_degradation_recovery_gate(self) -> None:
         mild = [row for row in self.calibration["formal_rows"] if row["level"] == "MILD"]

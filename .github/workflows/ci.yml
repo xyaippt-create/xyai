@@ -1,0 +1,61 @@
+# 影界 HDDE 持续集成：静态检查 + 前端测试与构建 + 后端核心回归
+# 产品只在 Windows 上运行，CI 也用 Windows 运行器。
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: 前端 lint / 测试 / 构建
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: 前端单元测试
+        run: node --test "tests/image_compression_ui/*.mjs"
+      - name: 构建
+        run: npx vite build
+
+  backend:
+    name: 后端 lint / 核心回归
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Ruff
+        run: |
+          python -m pip install ruff==0.8.6
+          python -m ruff check .
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 核心回归（依赖 main.py 的应用级测试）
+        run: >-
+          python -m unittest
+          tests.diagnostics.test_app_runtime_isolation
+          tests.diagnostics.test_runtime_diagnostics
+          tests.diagnostics.test_unified_feedback
+          tests.test_packaged_runtime
+          tests.test_task_record_deletion
+          tests.output.test_lineage_feedback
+          tests.local_retouch.test_batch_local_retouch
+          tests.image_compression_ui.test_batch_output_contract

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from batch.batch_processor import collect_image_paths, process_batch
 from engine.io import read_image
@@ -15,6 +16,10 @@ from gui.powershell_fallback import run_powershell_gui
 from runtime.crash_handler import handle_exception, install_global_exception_hook
 from runtime.logger import logs_dir
 from runtime.user_settings import has_seen_quick_guide, mark_quick_guide_seen
+
+if TYPE_CHECKING:
+    # 运行时由 run_tkinter_gui() 在启动时注入模块全局；导入放在函数里，缺少 tkinter 时才能回退到 PowerShell 界面。
+    from tkinter import BOTH, END, LEFT, RIGHT, W, Y, Button, Frame, Label, Listbox, Menu, Scrollbar, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 
 MODE_LABELS = {
