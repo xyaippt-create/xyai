@@ -3456,3 +3456,10 @@ S80 部署补记（同日）：负责人要求后重启 8787（重启前无运�
 - 20 项版本测试、24 项系统设置测试通过。正在运行的 8787 与 dist 仍显示 V0.8.5，需重启并重建后才显示新版本。未提交，无 Git 写操作，staging 为空。
 
 V0.8.6 部署补记（同日）：重启前 8787 无运行中任务；`npx vite build --emptyOutDir=false` 重建 dist 后以 formal_launcher 独立进程重启 8787，/api/runtime/status 为 ready、版本「V0.8.6 开发版」，更新日志页顶部显示 V0.8.6 条目。未提交，无 Git 写操作，staging 为空。
+
+## 2026-11-20｜清理死代码：main.py 旧 build_web_app 与未使用的 Flask 依赖
+
+- `main.py` 删除被后文同名定义覆盖、永不执行的旧 `build_web_app()`（约 590 行），以及只被它调用的 `normalize_user_output_root()`；共删 598 行（5727→5129）。逐字节核对：仅删除这两段，文件内其他会话的未提交差异原样保留。
+- `requirements.txt` 移除 `Flask`、`Flask-Cors`：全仓库跟踪文件无任何 flask 引用，服务早已是 FastAPI。
+- 核实后保留：`gui/`、`batch/` 由 `main.py --gui` / 批处理命令行模式和 `VisualMasterPro.spec` 引用；`modes/`、`pipelines/` 由 `--mode` 命令行选项与 `packaging/windows/program_resources.py` 引用；`engine/color_correction/v3_white_balance_prototype.py` 产品未用但有专属测试；根目录 7 个旧 `test_*.py` 仍导入现存模块。这些是否下线属于产品决策，本次未动。
+- 验证：`py_compile` 通过；依赖 main.py 的 8 个 unittest 套件共 77 项通过；`main.py --server --port 8799` 真实启动，`/api/health`、`/api/runtime/status`、`/api/v1/tasks`、`/` 均 200，随后关闭。8787 未触碰。内部清理，不写更新说明。未提交，无 Git 写操作。
